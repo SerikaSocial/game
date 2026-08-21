@@ -1,0 +1,17 @@
+# Godot
+.godot/
+*.translation
+
+# .NET
+bin/
+obj/
+*.user
+
+# Export artifacts and presets (presets contain signing config)
+export_presets.cfg
+build/
+
+# Secrets
+.env
+.env.*
+!.env.example
