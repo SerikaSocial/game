@@ -33,8 +33,11 @@ public partial class Main : Node3D
     private string ClientId => OrDefault("SERIKA_CLIENT_ID", "serika-social-game");
 
     private Hud _hud;
+    private PauseMenu _pauseMenu;
+    private InWorldHud _inWorldHud;
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
     private bool _inHome;
+    private bool _inWorld;
 
     public override void _Ready()
     {
@@ -63,7 +66,16 @@ public partial class Main : Node3D
         _hud.RetryPressed += () => _ = LoginThenRoute();
         _hud.HomePressed += EnterHome;
         _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
+        _hud.JoinWorldPressed += (worldId) => _ = JoinWorldById(worldId);
         _hud.ShowLogin();
+
+        _pauseMenu = new PauseMenu { Name = "PauseMenu" };
+        AddChild(_pauseMenu);
+        _pauseMenu.HomePressed += EnterHome;
+        _pauseMenu.QuitPressed += () => GetTree().Quit();
+
+        _inWorldHud = new InWorldHud { Name = "InWorldHud" };
+        AddChild(_inWorldHud);
     }
 
     // ── World ───────────────────────────────────────────────────────────────────────
@@ -77,27 +89,72 @@ public partial class Main : Node3D
                 BackgroundMode = Godot.Environment.BGMode.Sky,
                 Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
                 AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.4f, 0.45f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+                FogEnabled = true,
+                FogLightColor = new Color(0.5f, 0.55f, 0.65f),
+                FogLightEnergy = 0.3f,
+                FogDensity = 0.001f,
             },
         });
 
-        var sun = new DirectionalLight3D { ShadowEnabled = true };
+        var sun = new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f };
         sun.RotationDegrees = new Vector3(-50, -30, 0);
         AddChild(sun);
 
-        // "The Commons": a 40m floor. This is the built-in world; user worlds stream in M4.
+        // "The Commons": a 40m floor with decorative elements.
         var floor = new StaticBody3D { Name = "Floor" };
         var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(40, 40) } };
-        floorMesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.3f, 0.32f, 0.35f) };
+        floorMesh.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.18f, 0.20f, 0.24f),
+            Roughness = 0.9f,
+        };
         floor.AddChild(floorMesh);
         var floorCol = new CollisionShape3D { Shape = new WorldBoundaryShape3D() };
         floor.AddChild(floorCol);
         AddChild(floor);
+
+        // Decorative pillars at the corners
+        float[] corners = { -15, 15 };
+        foreach (float x in corners)
+        {
+            foreach (float z in corners)
+            {
+                var pillar = new MeshInstance3D
+                {
+                    Mesh = new BoxMesh { Size = new Vector3(1, 4, 1) },
+                    Position = new Vector3(x, 2, z),
+                };
+                pillar.MaterialOverride = new StandardMaterial3D
+                {
+                    AlbedoColor = new Color(0.12f, 0.13f, 0.16f),
+                    Roughness = 0.8f,
+                };
+                AddChild(pillar);
+            }
+        }
+
+        // Central platform — a gathering spot
+        var platform = new MeshInstance3D
+        {
+            Mesh = new CylinderMesh { Height = 0.2f, TopRadius = 3, BottomRadius = 3 },
+            Position = new Vector3(0, 0.1f, 0),
+        };
+        platform.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.22f, 0.24f, 0.28f),
+            Roughness = 0.7f,
+        };
+        AddChild(platform);
     }
 
     private void SpawnLocalPlayer()
     {
         _local = new LocalPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
         AddChild(_local);
+        if (_hud != null)
+            _local.SetAvatarColor(_hud.AvatarColor);
     }
 
     // ── Login → route (Home, or a world from a deep link) ────────────────────────────
@@ -184,12 +241,45 @@ public partial class Main : Node3D
     private void EnterHome()
     {
         _inHome = true;
+        _inWorld = false;
         TeardownRemotes();
         _transport?.Disconnect();
         _transport = null;
         if (_local == null) SpawnLocalPlayer();
         _worldName = "Home";
         _hud?.ShowHome(_username);
+        _ = PopulateWorldList();
+    }
+
+    private List<(string id, string name, string description, int capacity)> _fetchedWorlds;
+
+    private async Task PopulateWorldList()
+    {
+        if (_api == null) return;
+        try
+        {
+            var worlds = await _api.GetWorldsAsync();
+            var list = new List<(string id, string name, string description, int capacity)>();
+            foreach (var w in worlds.EnumerateArray())
+            {
+                string id = w.GetProperty("id").GetString();
+                string name = w.GetProperty("name").GetString();
+                string desc = w.TryGetProperty("description", out var d) ? d.GetString() : "";
+                int cap = w.TryGetProperty("capacity", out var c) ? c.GetInt32() : 32;
+                list.Add((id, name, desc ?? "", cap));
+            }
+            _fetchedWorlds = list;
+            CallDeferred(nameof(OnWorldsFetched));
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"world list fetch failed: {e.Message}");
+        }
+    }
+
+    private void OnWorldsFetched()
+    {
+        _hud?.SetWorlds(_fetchedWorlds);
     }
 
     private void TeardownRemotes()
@@ -248,17 +338,22 @@ public partial class Main : Node3D
         int others = peers.Length;
         string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
         _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
+        _inWorld = true;
+        _inWorldHud.SetWorld(_worldName);
+        _inWorldHud.SetPlayerCount(1 + others);
     }
 
     private void OnPeerJoined(PeerInfo p)
     {
         GD.Print($"SMOKE peer_join {p.PeerId} {p.Name}");
         SpawnRemote(p);
+        _inWorldHud.SetPlayerCount(1 + _remotes.Count);
     }
 
     private void OnPeerLeft(uint peerId)
     {
         if (_remotes.Remove(peerId, out var a)) a.QueueFree();
+        _inWorldHud.SetPlayerCount(1 + _remotes.Count);
     }
 
     private void OnPoseReceived(uint peerId, PoseFrame frame)
@@ -277,9 +372,21 @@ public partial class Main : Node3D
 
     // ── Per-frame ────────────────────────────────────────────────────────────────────
 
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && _inWorld && !_pauseMenu.IsOpen)
+        {
+            _pauseMenu.Show();
+            GetViewport().SetInputAsHandled();
+        }
+    }
+
     public override void _PhysicsProcess(double delta)
     {
         _transport?.Poll(delta);
+
+        if (_local != null && _pauseMenu != null)
+            _local.MouseSensitivity = _pauseMenu.MouseSensitivity;
 
         if (_transport is { Connected_: true } && _local != null)
         {

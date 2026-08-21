@@ -12,6 +12,14 @@ git clone --recurse-submodules https://github.com/SerikaSocial/game.git
 git submodule update --init
 ```
 
+**Godot binary** (local dev on this machine):
+
+```bash
+GODOT=/media/pikachubolk/63d7930c-4cfb-4c68-96a6-879048200e36/Documents/Godot/Godot_v4.7.1-stable_mono_linux_x86_64/Godot_v4.7.1-stable_mono_linux.x86_64
+$GODOT --headless --build    # build C# solution
+$GODOT --headless --export-release "Linux/X11"   # export a platform
+```
+
 ## The proto submodule
 
 `proto` holds the wire codec spec and its golden corpus — the contract with the Rust relay

@@ -8,11 +8,12 @@ public partial class LocalPlayer : CharacterBody3D
 {
     private const float Speed = 4.0f;
     private const float JumpVelocity = 4.5f;
-    private const float MouseSensitivity = 0.003f;
+    public float MouseSensitivity { get; set; } = 0.003f;
 
     private Node3D _yaw;      // horizontal look, also the body facing
     private Camera3D _camera; // pitch
     private float _gravity = 9.8f;
+    private MeshInstance3D _bodyMesh;
 
     public override void _Ready()
     {
@@ -30,6 +31,7 @@ public partial class LocalPlayer : CharacterBody3D
         };
         mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.9f, 0.7f, 0.2f) };
         AddChild(mesh);
+        _bodyMesh = mesh;
 
         _yaw = new Node3D { Name = "Yaw", Position = new Vector3(0, 1.6f, 0) };
         AddChild(_yaw);
@@ -79,5 +81,11 @@ public partial class LocalPlayer : CharacterBody3D
     {
         var basis = new Basis(_yaw.Basis.GetRotationQuaternion());
         return new Transform3D(basis, GlobalPosition);
+    }
+
+    public void SetAvatarColor(Color color)
+    {
+        if (_bodyMesh?.MaterialOverride is StandardMaterial3D mat)
+            mat.AlbedoColor = color;
     }
 }

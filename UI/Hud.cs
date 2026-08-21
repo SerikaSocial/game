@@ -1,22 +1,38 @@
 using System;
+using System.Collections.Generic;
 using Godot;
 
 namespace SerikaSocial;
 
-/// The client's front-of-house UI: a login screen, a loading/connecting overlay with an
-/// animated spinner and status line, and an error card with Retry. Built entirely in code so
-/// it has no scene/asset dependencies and matches the rest of the client's programmatic style.
+/// The client's front-of-house UI: a polished login screen, a loading/connecting overlay with an
+/// animated spinner and status line, an error card with Retry, and a Home panel with world list.
+/// Built entirely in code so it has no scene/asset dependencies.
 ///
 /// Main drives it: ShowLogin → SetStatus(…) as login/join progresses → Hide() once in-world,
-/// or ShowError(…) on failure.
+/// or ShowError(…) on failure. ShowHome(…) for the personal Home with world browsing.
 public partial class Hud : CanvasLayer
 {
     public event Action LoginPressed;
     public event Action RetryPressed;
     public event Action HomePressed;
     public event Action JoinCommonsPressed;
+    public event Action<string> JoinWorldPressed;
+
+    public Color AvatarColor { get; private set; } = new Color(0.9f, 0.7f, 0.2f);
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
+    private const string ClientVersion = "0.1.1";
+    private static readonly Color[] PresetColors =
+    {
+        new(0.95f, 0.72f, 0.20f), // amber
+        new(0.35f, 0.65f, 0.95f), // sky
+        new(0.55f, 0.85f, 0.45f), // lime
+        new(0.92f, 0.45f, 0.55f), // coral
+        new(0.75f, 0.55f, 0.95f), // lavender
+        new(0.45f, 0.85f, 0.80f), // teal
+        new(0.98f, 0.85f, 0.45f), // gold
+        new(0.80f, 0.80f, 0.85f), // silver
+    };
 
     private ColorRect _scrim;
     private Panel _card;
@@ -25,12 +41,17 @@ public partial class Hud : CanvasLayer
     private Label _status;
     private Button _loginButton;
     private Button _retryButton;
+    private Button _quitButton;
     private Control _spinner;
     private Label _toast;
+    private Label _versionLabel;
+    private HBoxContainer _colorPicker;
+    private Label _colorLabel;
 
     private Panel _homePanel;
     private Label _homeLabel;
-    private Button _homeButton; // small "⌂ Home" while in a world
+    private VBoxContainer _worldListContainer;
+    private Button _homeButton;
 
     private bool _spinning;
 
@@ -40,7 +61,7 @@ public partial class Hud : CanvasLayer
 
         _scrim = new ColorRect
         {
-            Color = new Color(0.05f, 0.06f, 0.09f, 1f),
+            Color = new Color(0.03f, 0.04f, 0.06f, 1f),
             AnchorRight = 1,
             AnchorBottom = 1,
         };
@@ -48,28 +69,28 @@ public partial class Hud : CanvasLayer
 
         _card = new Panel
         {
-            CustomMinimumSize = new Vector2(420, 300),
+            CustomMinimumSize = new Vector2(480, 340),
             AnchorLeft = 0.5f,
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -210,
-            OffsetTop = -150,
-            OffsetRight = 210,
-            OffsetBottom = 150,
+            OffsetLeft = -240,
+            OffsetTop = -170,
+            OffsetRight = 240,
+            OffsetBottom = 170,
         };
         var style = new StyleBoxFlat
         {
-            BgColor = new Color(0.10f, 0.11f, 0.15f, 1f),
-            CornerRadiusTopLeft = 16,
-            CornerRadiusTopRight = 16,
-            CornerRadiusBottomLeft = 16,
-            CornerRadiusBottomRight = 16,
+            BgColor = new Color(0.08f, 0.09f, 0.12f, 1f),
+            CornerRadiusTopLeft = 12,
+            CornerRadiusTopRight = 12,
+            CornerRadiusBottomLeft = 12,
+            CornerRadiusBottomRight = 12,
             BorderWidthTop = 1,
             BorderWidthBottom = 1,
             BorderWidthLeft = 1,
             BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.08f),
+            BorderColor = new Color(1, 1, 1, 0.06f),
         };
         _card.AddThemeStyleboxOverride("panel", style);
         AddChild(_card);
@@ -78,28 +99,29 @@ public partial class Hud : CanvasLayer
         {
             AnchorRight = 1,
             AnchorBottom = 1,
-            OffsetLeft = 32,
-            OffsetTop = 32,
-            OffsetRight = -32,
-            OffsetBottom = -32,
+            OffsetLeft = 36,
+            OffsetTop = 36,
+            OffsetRight = -36,
+            OffsetBottom = -36,
         };
-        vbox.AddThemeConstantOverride("separation", 14);
+        vbox.AddThemeConstantOverride("separation", 12);
         _card.AddChild(vbox);
 
         _title = new Label { Text = "Serika Social", HorizontalAlignment = HorizontalAlignment.Center };
-        _title.AddThemeFontSizeOverride("font_size", 32);
-        _title.AddThemeColorOverride("font_color", new Color(0.9f, 0.95f, 1f));
+        _title.AddThemeFontSizeOverride("font_size", 28);
+        _title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
         vbox.AddChild(_title);
 
         _subtitle = new Label
         {
-            Text = "A social VR world",
+            Text = "Social VR for everyone",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _subtitle.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+        _subtitle.AddThemeFontSizeOverride("font_size", 14);
+        _subtitle.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
         vbox.AddChild(_subtitle);
 
-        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 8) });
+        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 12) });
 
         _spinner = new Control { CustomMinimumSize = new Vector2(0, 48), Visible = false };
         _spinner.Draw += DrawSpinner;
@@ -111,19 +133,64 @@ public partial class Hud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        _status.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+        _status.AddThemeFontSizeOverride("font_size", 14);
+        _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
         vbox.AddChild(_status);
 
         vbox.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
 
-        _loginButton = MakeButton("Log in with Serika");
+        // Avatar color picker
+        _colorLabel = new Label
+        {
+            Text = "Avatar color",
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        _colorLabel.AddThemeFontSizeOverride("font_size", 13);
+        _colorLabel.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
+        vbox.AddChild(_colorLabel);
+
+        _colorPicker = new HBoxContainer
+        {
+            Alignment = BoxContainer.AlignmentMode.Center,
+        };
+        _colorPicker.AddThemeConstantOverride("separation", 8);
+        vbox.AddChild(_colorPicker);
+        for (int i = 0; i < PresetColors.Length; i++)
+        {
+            var swatch = new ColorSwatch(PresetColors[i], i == 0);
+            swatch.Pressed += () =>
+            {
+                AvatarColor = swatch.Color;
+                foreach (var child in _colorPicker.GetChildren())
+                    if (child is ColorSwatch s) s.Selected = s == swatch;
+            };
+            _colorPicker.AddChild(swatch);
+        }
+
+        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
+
+        _loginButton = MakeButton("Log in with Serika", true);
         _loginButton.Pressed += () => LoginPressed?.Invoke();
         vbox.AddChild(_loginButton);
 
-        _retryButton = MakeButton("Retry");
+        _retryButton = MakeButton("Retry", true);
         _retryButton.Visible = false;
         _retryButton.Pressed += () => RetryPressed?.Invoke();
         vbox.AddChild(_retryButton);
+
+        _quitButton = MakeButton("Quit", false);
+        _quitButton.Visible = false;
+        _quitButton.Pressed += () => GetTree().Quit();
+        vbox.AddChild(_quitButton);
+
+        _versionLabel = new Label
+        {
+            Text = $"v{ClientVersion}",
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        _versionLabel.AddThemeFontSizeOverride("font_size", 11);
+        _versionLabel.AddThemeColorOverride("font_color", new Color(0.4f, 0.44f, 0.5f));
+        vbox.AddChild(_versionLabel);
 
         _toast = new Label
         {
@@ -133,38 +200,39 @@ public partial class Hud : CanvasLayer
             AnchorTop = 1,
             AnchorRight = 1,
             AnchorBottom = 1,
-            OffsetTop = -48,
+            OffsetTop = -52,
             OffsetBottom = -16,
         };
-        _toast.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.95f));
+        _toast.AddThemeFontSizeOverride("font_size", 14);
+        _toast.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
         AddChild(_toast);
 
         BuildHomePanel();
         BuildHomeButton();
     }
 
-    // A non-modal panel shown while in the personal Home: welcome + ways to go multiplayer.
+    // A non-modal panel shown while in the personal Home: welcome + world list.
     private void BuildHomePanel()
     {
         _homePanel = new Panel
         {
             Visible = false,
             AnchorLeft = 0.5f,
-            AnchorTop = 1,
+            AnchorTop = 0.5f,
             AnchorRight = 0.5f,
-            AnchorBottom = 1,
-            OffsetLeft = -260,
-            OffsetTop = -140,
-            OffsetRight = 260,
-            OffsetBottom = -24,
+            AnchorBottom = 0.5f,
+            OffsetLeft = -300,
+            OffsetTop = -220,
+            OffsetRight = 300,
+            OffsetBottom = 220,
         };
         var style = new StyleBoxFlat
         {
-            BgColor = new Color(0.10f, 0.11f, 0.15f, 0.92f),
-            CornerRadiusTopLeft = 14, CornerRadiusTopRight = 14,
-            CornerRadiusBottomLeft = 14, CornerRadiusBottomRight = 14,
+            BgColor = new Color(0.08f, 0.09f, 0.12f, 0.95f),
+            CornerRadiusTopLeft = 12, CornerRadiusTopRight = 12,
+            CornerRadiusBottomLeft = 12, CornerRadiusBottomRight = 12,
             BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.08f),
+            BorderColor = new Color(1, 1, 1, 0.06f),
         };
         _homePanel.AddThemeStyleboxOverride("panel", style);
         AddChild(_homePanel);
@@ -172,37 +240,57 @@ public partial class Hud : CanvasLayer
         var vbox = new VBoxContainer
         {
             AnchorRight = 1, AnchorBottom = 1,
-            OffsetLeft = 20, OffsetTop = 16, OffsetRight = -20, OffsetBottom = -16,
+            OffsetLeft = 24, OffsetTop = 24, OffsetRight = -24, OffsetBottom = -24,
         };
-        vbox.AddThemeConstantOverride("separation", 10);
+        vbox.AddThemeConstantOverride("separation", 12);
         _homePanel.AddChild(vbox);
 
-        _homeLabel = new Label { Text = "Welcome home", HorizontalAlignment = HorizontalAlignment.Center };
-        _homeLabel.AddThemeFontSizeOverride("font_size", 18);
-        _homeLabel.AddThemeColorOverride("font_color", new Color(0.9f, 0.95f, 1f));
+        _homeLabel = new Label { Text = "Home", HorizontalAlignment = HorizontalAlignment.Center };
+        _homeLabel.AddThemeFontSizeOverride("font_size", 24);
+        _homeLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
         vbox.AddChild(_homeLabel);
 
         var hint = new Label
         {
-            Text = "You're in your private Home. Jump into a world when you're ready.",
+            Text = "You're in your private Home. Join a world below when you're ready.",
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        hint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+        hint.AddThemeFontSizeOverride("font_size", 13);
+        hint.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
         vbox.AddChild(hint);
+
+        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
+
+        // Scrollable world list
+        var scroll = new ScrollContainer
+        {
+            CustomMinimumSize = new Vector2(0, 200),
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+        };
+        scroll.AddThemeStyleboxOverride("panel", new StyleBoxFlat { BgColor = new Color(0, 0, 0, 0) });
+        vbox.AddChild(scroll);
+
+        _worldListContainer = new VBoxContainer
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        _worldListContainer.AddThemeConstantOverride("separation", 8);
+        scroll.AddChild(_worldListContainer);
 
         var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
         row.AddThemeConstantOverride("separation", 10);
         vbox.AddChild(row);
 
-        var join = MakeButton("Join The Commons");
-        join.CustomMinimumSize = new Vector2(190, 40);
+        var join = MakeButton("Join The Commons", true);
+        join.CustomMinimumSize = new Vector2(200, 42);
         join.Pressed += () => JoinCommonsPressed?.Invoke();
         row.AddChild(join);
 
-        var browse = new Button { Text = "Browse worlds ↗", CustomMinimumSize = new Vector2(150, 40) };
+        var browse = new Button { Text = "Browse worlds ↗", CustomMinimumSize = new Vector2(160, 42) };
         browse.Flat = true;
-        browse.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.9f));
+        browse.AddThemeColorOverride("font_color", new Color(0.65f, 0.7f, 0.82f));
+        browse.AddThemeFontSizeOverride("font_size", 14);
         browse.Pressed += () => OS.ShellOpen(WorldsUrl);
         row.AddChild(browse);
     }
@@ -221,27 +309,81 @@ public partial class Hud : CanvasLayer
         AddChild(_homeButton);
     }
 
-    private static Button MakeButton(string text)
+    private static Button MakeButton(string text, bool primary)
     {
         var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 44) };
+        if (primary)
+        {
+            var normal = new StyleBoxFlat
+            {
+                BgColor = new Color(0.88f, 0.89f, 0.92f),
+                CornerRadiusTopLeft = 8,
+                CornerRadiusTopRight = 8,
+                CornerRadiusBottomLeft = 8,
+                CornerRadiusBottomRight = 8,
+                ContentMarginTop = 10,
+                ContentMarginBottom = 10,
+            };
+            var hover = (StyleBoxFlat)normal.Duplicate();
+            hover.BgColor = new Color(1f, 1f, 1f);
+            b.AddThemeStyleboxOverride("normal", normal);
+            b.AddThemeStyleboxOverride("hover", hover);
+            b.AddThemeStyleboxOverride("pressed", normal);
+            b.AddThemeColorOverride("font_color", new Color(0.08f, 0.09f, 0.12f));
+        }
+        else
+        {
+            var normal = new StyleBoxFlat
+            {
+                BgColor = new Color(0.15f, 0.16f, 0.20f),
+                CornerRadiusTopLeft = 8,
+                CornerRadiusTopRight = 8,
+                CornerRadiusBottomLeft = 8,
+                CornerRadiusBottomRight = 8,
+                ContentMarginTop = 10,
+                ContentMarginBottom = 10,
+                BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
+                BorderColor = new Color(1, 1, 1, 0.08f),
+            };
+            var hover = (StyleBoxFlat)normal.Duplicate();
+            hover.BgColor = new Color(0.2f, 0.21f, 0.25f);
+            b.AddThemeStyleboxOverride("normal", normal);
+            b.AddThemeStyleboxOverride("hover", hover);
+            b.AddThemeStyleboxOverride("pressed", normal);
+            b.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
+        }
+        b.AddThemeFontSizeOverride("font_size", 15);
+        return b;
+    }
+
+    private static Button MakeWorldButton(string name, string desc, int capacity)
+    {
+        var btn = new Button
+        {
+            CustomMinimumSize = new Vector2(0, 64),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
         var normal = new StyleBoxFlat
         {
-            BgColor = new Color(0.35f, 0.5f, 0.95f),
-            CornerRadiusTopLeft = 10,
-            CornerRadiusTopRight = 10,
-            CornerRadiusBottomLeft = 10,
-            CornerRadiusBottomRight = 10,
-            ContentMarginTop = 10,
-            ContentMarginBottom = 10,
+            BgColor = new Color(0.12f, 0.13f, 0.16f),
+            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
+            CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
+            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
+            BorderColor = new Color(1, 1, 1, 0.05f),
+            ContentMarginLeft = 16, ContentMarginRight = 16,
+            ContentMarginTop = 12, ContentMarginBottom = 12,
         };
         var hover = (StyleBoxFlat)normal.Duplicate();
-        hover.BgColor = new Color(0.42f, 0.57f, 1f);
-        b.AddThemeStyleboxOverride("normal", normal);
-        b.AddThemeStyleboxOverride("hover", hover);
-        b.AddThemeStyleboxOverride("pressed", normal);
-        b.AddThemeColorOverride("font_color", Colors.White);
-        b.AddThemeFontSizeOverride("font_size", 16);
-        return b;
+        hover.BgColor = new Color(0.16f, 0.17f, 0.21f);
+        hover.BorderColor = new Color(1, 1, 1, 0.12f);
+        btn.AddThemeStyleboxOverride("normal", normal);
+        btn.AddThemeStyleboxOverride("hover", hover);
+        btn.AddThemeStyleboxOverride("pressed", normal);
+        btn.AddThemeColorOverride("font_color", new Color(0.9f, 0.92f, 0.95f));
+        btn.AddThemeFontSizeOverride("font_size", 15);
+        btn.Text = $"{name}    [capacity: {capacity}]";
+        btn.TooltipText = desc;
+        return btn;
     }
 
     // ── Public state transitions ─────────────────────────────────────────────────────
@@ -254,10 +396,13 @@ public partial class Hud : CanvasLayer
         _card.Visible = true;
         _loginButton.Visible = true;
         _retryButton.Visible = false;
+        _quitButton.Visible = true;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
         SetSpinning(false);
         _subtitle.Visible = true;
+        _colorLabel.Visible = true;
+        _colorPicker.Visible = true;
         _status.Text = "";
     }
 
@@ -268,11 +413,14 @@ public partial class Hud : CanvasLayer
         _card.Visible = true;
         _loginButton.Visible = false;
         _retryButton.Visible = false;
+        _quitButton.Visible = false;
         _subtitle.Visible = false;
+        _colorLabel.Visible = false;
+        _colorPicker.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
         SetSpinning(true);
-        _status.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+        _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
         _status.Text = message;
     }
 
@@ -284,8 +432,11 @@ public partial class Hud : CanvasLayer
         SetSpinning(false);
         _loginButton.Visible = false;
         _retryButton.Visible = true;
+        _quitButton.Visible = true;
         _subtitle.Visible = false;
-        _status.AddThemeColorOverride("font_color", new Color(1f, 0.5f, 0.5f));
+        _colorLabel.Visible = false;
+        _colorPicker.Visible = false;
+        _status.AddThemeColorOverride("font_color", new Color(1f, 0.45f, 0.45f));
         _status.Text = message;
     }
 
@@ -306,7 +457,7 @@ public partial class Hud : CanvasLayer
         }
     }
 
-    /// The personal Home: no modal scrim, a friendly non-modal panel with ways out.
+    /// The personal Home: no modal scrim, a friendly panel with world list.
     public void ShowHome(string username)
     {
         Visible = true;
@@ -316,6 +467,35 @@ public partial class Hud : CanvasLayer
         SetSpinning(false);
         _homeLabel.Text = $"Welcome home, {username}";
         _homePanel.Visible = true;
+    }
+
+    /// Populate the world list in the Home panel. Each entry is a button that fires JoinWorldPressed.
+    public void SetWorlds(List<(string id, string name, string description, int capacity)> worlds)
+    {
+        if (_worldListContainer == null) return;
+        foreach (var child in _worldListContainer.GetChildren())
+            child.QueueFree();
+
+        if (worlds.Count == 0)
+        {
+            var empty = new Label
+            {
+                Text = "No worlds available right now.",
+                HorizontalAlignment = HorizontalAlignment.Center,
+            };
+            empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
+            empty.AddThemeFontSizeOverride("font_size", 13);
+            _worldListContainer.AddChild(empty);
+            return;
+        }
+
+        foreach (var w in worlds)
+        {
+            var btn = MakeWorldButton(w.name, w.description, w.capacity);
+            var id = w.id;
+            btn.Pressed += () => JoinWorldPressed?.Invoke(id);
+            _worldListContainer.AddChild(btn);
+        }
     }
 
     private void SetSpinning(bool on)
@@ -334,15 +514,52 @@ public partial class Hud : CanvasLayer
     {
         float w = _spinner.Size.X;
         var center = new Vector2(w * 0.5f, 24);
-        float radius = 16f;
-        int segments = 12;
+        float radius = 14f;
+        int segments = 10;
         float t = (float)Time.GetTicksMsec() / 1000f;
         for (int i = 0; i < segments; i++)
         {
-            float a = Mathf.Tau * i / segments + t * 4f;
+            float a = Mathf.Tau * i / segments + t * 3f;
             float alpha = (float)i / segments;
             var p = center + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * radius;
-            _spinner.DrawCircle(p, 2.5f, new Color(0.5f, 0.65f, 1f, alpha));
+            _spinner.DrawCircle(p, 2.2f, new Color(0.6f, 0.7f, 0.9f, alpha));
         }
+    }
+}
+
+/// A clickable color swatch for the avatar color picker.
+public partial class ColorSwatch : Button
+{
+    public Color Color { get; }
+    public bool Selected { get; set; }
+
+    public ColorSwatch(Color color, bool selected)
+    {
+        Color = color;
+        Selected = selected;
+        CustomMinimumSize = new Vector2(32, 32);
+        UpdateStyle();
+        Pressed += () => { Selected = true; UpdateStyle(); };
+    }
+
+    private void UpdateStyle()
+    {
+        var normal = new StyleBoxFlat
+        {
+            BgColor = Color,
+            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6,
+            CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6,
+            BorderWidthTop = Selected ? 2 : 0,
+            BorderWidthBottom = Selected ? 2 : 0,
+            BorderWidthLeft = Selected ? 2 : 0,
+            BorderWidthRight = Selected ? 2 : 0,
+            BorderColor = new Color(1, 1, 1, 0.9f),
+            ContentMarginLeft = 4, ContentMarginRight = 4,
+            ContentMarginTop = 4, ContentMarginBottom = 4,
+        };
+        AddThemeStyleboxOverride("normal", normal);
+        var hover = (StyleBoxFlat)normal.Duplicate();
+        hover.BgColor = Color.Lightened(0.15f);
+        AddThemeStyleboxOverride("hover", hover);
     }
 }
