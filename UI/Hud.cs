@@ -13,6 +13,10 @@ public partial class Hud : CanvasLayer
 {
     public event Action LoginPressed;
     public event Action RetryPressed;
+    public event Action HomePressed;
+    public event Action JoinCommonsPressed;
+
+    private const string WorldsUrl = "https://social.serika.dev/worlds";
 
     private ColorRect _scrim;
     private Panel _card;
@@ -23,6 +27,10 @@ public partial class Hud : CanvasLayer
     private Button _retryButton;
     private Control _spinner;
     private Label _toast;
+
+    private Panel _homePanel;
+    private Label _homeLabel;
+    private Button _homeButton; // small "⌂ Home" while in a world
 
     private bool _spinning;
 
@@ -130,6 +138,87 @@ public partial class Hud : CanvasLayer
         };
         _toast.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.95f));
         AddChild(_toast);
+
+        BuildHomePanel();
+        BuildHomeButton();
+    }
+
+    // A non-modal panel shown while in the personal Home: welcome + ways to go multiplayer.
+    private void BuildHomePanel()
+    {
+        _homePanel = new Panel
+        {
+            Visible = false,
+            AnchorLeft = 0.5f,
+            AnchorTop = 1,
+            AnchorRight = 0.5f,
+            AnchorBottom = 1,
+            OffsetLeft = -260,
+            OffsetTop = -140,
+            OffsetRight = 260,
+            OffsetBottom = -24,
+        };
+        var style = new StyleBoxFlat
+        {
+            BgColor = new Color(0.10f, 0.11f, 0.15f, 0.92f),
+            CornerRadiusTopLeft = 14, CornerRadiusTopRight = 14,
+            CornerRadiusBottomLeft = 14, CornerRadiusBottomRight = 14,
+            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
+            BorderColor = new Color(1, 1, 1, 0.08f),
+        };
+        _homePanel.AddThemeStyleboxOverride("panel", style);
+        AddChild(_homePanel);
+
+        var vbox = new VBoxContainer
+        {
+            AnchorRight = 1, AnchorBottom = 1,
+            OffsetLeft = 20, OffsetTop = 16, OffsetRight = -20, OffsetBottom = -16,
+        };
+        vbox.AddThemeConstantOverride("separation", 10);
+        _homePanel.AddChild(vbox);
+
+        _homeLabel = new Label { Text = "Welcome home", HorizontalAlignment = HorizontalAlignment.Center };
+        _homeLabel.AddThemeFontSizeOverride("font_size", 18);
+        _homeLabel.AddThemeColorOverride("font_color", new Color(0.9f, 0.95f, 1f));
+        vbox.AddChild(_homeLabel);
+
+        var hint = new Label
+        {
+            Text = "You're in your private Home. Jump into a world when you're ready.",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        hint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+        vbox.AddChild(hint);
+
+        var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
+        row.AddThemeConstantOverride("separation", 10);
+        vbox.AddChild(row);
+
+        var join = MakeButton("Join The Commons");
+        join.CustomMinimumSize = new Vector2(190, 40);
+        join.Pressed += () => JoinCommonsPressed?.Invoke();
+        row.AddChild(join);
+
+        var browse = new Button { Text = "Browse worlds ↗", CustomMinimumSize = new Vector2(150, 40) };
+        browse.Flat = true;
+        browse.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.9f));
+        browse.Pressed += () => OS.ShellOpen(WorldsUrl);
+        row.AddChild(browse);
+    }
+
+    // A small button, top-left, to return to Home from a world.
+    private void BuildHomeButton()
+    {
+        _homeButton = new Button
+        {
+            Text = "⌂ Home",
+            Visible = false,
+            CustomMinimumSize = new Vector2(90, 34),
+            OffsetLeft = 16, OffsetTop = 16, OffsetRight = 106, OffsetBottom = 50,
+        };
+        _homeButton.Pressed += () => HomePressed?.Invoke();
+        AddChild(_homeButton);
     }
 
     private static Button MakeButton(string text)
@@ -165,6 +254,8 @@ public partial class Hud : CanvasLayer
         _card.Visible = true;
         _loginButton.Visible = true;
         _retryButton.Visible = false;
+        _homePanel.Visible = false;
+        _homeButton.Visible = false;
         SetSpinning(false);
         _subtitle.Visible = true;
         _status.Text = "";
@@ -178,6 +269,8 @@ public partial class Hud : CanvasLayer
         _loginButton.Visible = false;
         _retryButton.Visible = false;
         _subtitle.Visible = false;
+        _homePanel.Visible = false;
+        _homeButton.Visible = false;
         SetSpinning(true);
         _status.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
         _status.Text = message;
@@ -196,11 +289,13 @@ public partial class Hud : CanvasLayer
         _status.Text = message;
     }
 
-    /// In-world: tear down the overlay, leave a small transient toast.
+    /// In-world: tear down the overlay, show the small Home button, leave a transient toast.
     public void HideWithToast(string toast)
     {
         _scrim.Visible = false;
         _card.Visible = false;
+        _homePanel.Visible = false;
+        _homeButton.Visible = true;
         SetSpinning(false);
         if (!string.IsNullOrEmpty(toast))
         {
@@ -209,6 +304,18 @@ public partial class Hud : CanvasLayer
             var t = GetTree().CreateTimer(4.0);
             t.Timeout += () => _toast.Visible = false;
         }
+    }
+
+    /// The personal Home: no modal scrim, a friendly non-modal panel with ways out.
+    public void ShowHome(string username)
+    {
+        Visible = true;
+        _scrim.Visible = false;
+        _card.Visible = false;
+        _homeButton.Visible = false;
+        SetSpinning(false);
+        _homeLabel.Text = $"Welcome home, {username}";
+        _homePanel.Visible = true;
     }
 
     private void SetSpinning(bool on)

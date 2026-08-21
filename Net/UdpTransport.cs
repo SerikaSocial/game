@@ -18,6 +18,8 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     private bool _welcomed;
     private double _helloTimer;
     private double _pingTimer;
+    private double _connectTimeout;
+    private const double ConnectTimeoutSeconds = 15.0;
     private readonly byte[] _rx = new byte[2048];
 
     public event Action<uint, PeerInfo[]> Connected;
@@ -39,6 +41,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         _ticket = ticket;
         _welcomed = false;
         _helloTimer = 0;
+        _connectTimeout = ConnectTimeoutSeconds;
         SendHello();
     }
 
@@ -64,6 +67,16 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         {
             _helloTimer -= dt;
             if (_helloTimer <= 0) { SendHello(); _helloTimer = 0.25; }
+
+            _connectTimeout -= dt;
+            if (_connectTimeout <= 0)
+            {
+                Rejected?.Invoke("Connection timed out — the world server may not be running. Check that the relay (instanced) is started on the expected endpoint.");
+                _welcomed = false;
+                _sock?.Close();
+                _sock = null;
+                return;
+            }
         }
         else
         {

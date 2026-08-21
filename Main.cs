@@ -33,6 +33,8 @@ public partial class Main : Node3D
     private string ClientId => OrDefault("SERIKA_CLIENT_ID", "serika-social-game");
 
     private Hud _hud;
+    private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
+    private bool _inHome;
 
     public override void _Ready()
     {
@@ -47,15 +49,21 @@ public partial class Main : Node3D
             GD.Print($"SMOKE connecting to {endpoint}");
             SpawnLocalPlayer();
             ConnectTo(endpoint, ticket);
+            return;
         }
-        else
-        {
-            _hud = new Hud { Name = "Hud" };
-            AddChild(_hud);
-            _hud.LoginPressed += () => _ = LoginAndJoin();
-            _hud.RetryPressed += () => _ = LoginAndJoin();
-            _hud.ShowLogin();
-        }
+
+        // Register the serikasocial:// handler so the website's "Open in app" works, and see
+        // if we were launched from such a link (e.g. serikasocial://world/<id>).
+        DeepLink.RegisterHandler();
+        _pendingIntent = DeepLink.FromCommandLine();
+
+        _hud = new Hud { Name = "Hud" };
+        AddChild(_hud);
+        _hud.LoginPressed += () => _ = LoginThenRoute();
+        _hud.RetryPressed += () => _ = LoginThenRoute();
+        _hud.HomePressed += EnterHome;
+        _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
+        _hud.ShowLogin();
     }
 
     // ── World ───────────────────────────────────────────────────────────────────────
@@ -92,13 +100,17 @@ public partial class Main : Node3D
         AddChild(_local);
     }
 
-    // ── Login → join ─────────────────────────────────────────────────────────────────
+    // ── Login → route (Home, or a world from a deep link) ────────────────────────────
 
-    private async Task LoginAndJoin()
+    private ApiClient _api;
+    private string _username = "traveller";
+
+    /// Sign in, then go where the launch intent says: a deep-linked world, or Home.
+    private async Task LoginThenRoute()
     {
         try
         {
-            var api = new ApiClient(ApiBaseUrl);
+            _api = new ApiClient(ApiBaseUrl);
             var pkce = new PkceFlow();
 
             _hud?.SetStatus("Opening your browser to sign in…");
@@ -109,28 +121,81 @@ public partial class Main : Node3D
             string code = await pkce.WaitForCodeAsync(TimeSpan.FromMinutes(3));
 
             _hud?.SetStatus("Signing in…");
-            var user = await api.ExchangeAsync(code, pkce.Verifier);
-            string username = user.GetProperty("username").GetString();
-            GD.Print($"logged in as {username}");
+            var user = await _api.ExchangeAsync(code, pkce.Verifier);
+            _username = user.GetProperty("username").GetString();
+            GD.Print($"logged in as {_username}");
 
-            _hud?.SetStatus("Finding a world…");
-            var worlds = await api.GetWorldsAsync();
-            string worldId = worlds[0].GetProperty("id").GetString();
-            string worldName = worlds[0].GetProperty("name").GetString();
-
-            _hud?.SetStatus($"Joining {worldName}…");
-            var joined = await api.CreateInstanceAsync(worldId);
-            string endpoint = joined.GetProperty("endpoint").GetString();
-            string ticket = joined.GetProperty("ticket").GetString();
-
-            // Back to the game thread to touch the scene tree.
-            CallDeferred(nameof(OnJoinReady), endpoint, ticket, username, worldName);
+            if (_pendingIntent.Kind == DeepLink.Kind.World)
+            {
+                await JoinWorldById(_pendingIntent.Arg);
+                _pendingIntent = DeepLink.Intent.None;
+            }
+            else
+            {
+                // Default landing after login: the personal, single-player Home.
+                CallDeferred(nameof(EnterHome));
+            }
         }
         catch (Exception e)
         {
-            GD.PrintErr($"login/join failed: {e.Message}");
+            GD.PrintErr($"login failed: {e.Message}");
             CallDeferred(nameof(ShowLoginError), FriendlyError(e));
         }
+    }
+
+    /// Join the built-in default world (the multiplayer commons) from within Home.
+    private async Task JoinDefaultWorld()
+    {
+        if (_api == null) return;
+        try
+        {
+            _hud?.SetStatus("Finding a world…");
+            var worlds = await _api.GetWorldsAsync();
+            await JoinWorldById(worlds[0].GetProperty("id").GetString());
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"join failed: {e.Message}");
+            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
+        }
+    }
+
+    /// Create/join an instance of a specific world and connect to its relay.
+    private async Task JoinWorldById(string worldId)
+    {
+        try
+        {
+            _hud?.SetStatus("Joining world…");
+            var joined = await _api.CreateInstanceAsync(worldId);
+            string endpoint = joined.GetProperty("endpoint").GetString();
+            string ticket = joined.GetProperty("ticket").GetString();
+            string worldName = joined.TryGetProperty("worldName", out var wn) ? wn.GetString() : "the world";
+            CallDeferred(nameof(OnJoinReady), endpoint, ticket, _username, worldName);
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"join failed: {e.Message}");
+            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
+        }
+    }
+
+    /// The personal Home: a single-player space with no relay connection. Instant, always
+    /// available, and where the player lands after login.
+    private void EnterHome()
+    {
+        _inHome = true;
+        TeardownRemotes();
+        _transport?.Disconnect();
+        _transport = null;
+        if (_local == null) SpawnLocalPlayer();
+        _worldName = "Home";
+        _hud?.ShowHome(_username);
+    }
+
+    private void TeardownRemotes()
+    {
+        foreach (var a in _remotes.Values) a.QueueFree();
+        _remotes.Clear();
     }
 
     private void ShowLoginError(string message) => _hud?.ShowError(message);
