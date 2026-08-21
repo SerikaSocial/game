@@ -19,3 +19,5 @@ project/assembly_name="SerikaSocial"
 [rendering]
 
 renderer/rendering_method="forward_plus"
+renderer/rendering_method.mobile="forward_plus"
+textures/vram_compression/import_etc2_astc=true

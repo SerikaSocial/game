@@ -1,6 +1,13 @@
 <Project Sdk="Godot.NET.Sdk/4.7.1">
   <PropertyGroup>
+    <!--
+      Desktop (Linux/Windows/macOS) builds target net8.0 — the documented Godot 4.7 mono
+      convention. The Android/Quest export template only accepts net9.0 assemblies, so when
+      Godot builds for Android it sets GodotTargetPlatform=android and we retarget to net9.0
+      for that build only. Desktop output is unchanged.
+    -->
     <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>SerikaSocial</RootNamespace>
     <Nullable>disable</Nullable>
