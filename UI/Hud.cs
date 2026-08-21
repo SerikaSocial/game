@@ -21,7 +21,7 @@ public partial class Hud : CanvasLayer
     public Color AvatarColor { get; private set; } = new Color(0.9f, 0.7f, 0.2f);
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.1.1";
+    private const string ClientVersion = "0.2.0";
     private static readonly Color[] PresetColors =
     {
         new(0.95f, 0.72f, 0.20f), // amber
