@@ -9,6 +9,16 @@ using SerikaSocial.Player;
 
 namespace SerikaSocial;
 
+/// Interface shared by LocalPlayer (desktop) and VrPlayer (OpenXR) so Main can treat
+/// them uniformly for pose broadcasting and color/username assignment.
+public interface IPlayer
+{
+    Transform3D PoseTransform();
+    void SetAvatarColor(Color color);
+    void SetUsername(string name);
+    float MouseSensitivity { get; set; }
+}
+
 /// Boots the client: builds the default world, logs in via PKCE, joins an instance, and
 /// wires the transport to spawn/interpolate remote avatars.
 ///
@@ -18,10 +28,13 @@ namespace SerikaSocial;
 public partial class Main : Node3D
 {
     private ISerikaTransport _transport;
-    private LocalPlayer _local;
+    private IPlayer _local;
+    private Node3D _localNode;
+    private bool _vrMode;
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
 
     private double _poseTimer;
+    private double _pingTimer;
     private byte _poseSeq;
     private bool _smoke;
     private double _smokeQuitTimer = 6.0;
@@ -147,14 +160,149 @@ public partial class Main : Node3D
             Roughness = 0.7f,
         };
         AddChild(platform);
+
+        // Seating area — low benches around the platform
+        for (int i = 0; i < 6; i++)
+        {
+            float angle = i * Mathf.Tau / 6f;
+            var bench = new MeshInstance3D
+            {
+                Mesh = new BoxMesh { Size = new Vector3(2, 0.4f, 0.6f) },
+                Position = new Vector3(Mathf.Cos(angle) * 5, 0.2f, Mathf.Sin(angle) * 5),
+                RotationDegrees = new Vector3(0, -angle * 180f / Mathf.Pi, 0),
+            };
+            bench.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(0.15f, 0.16f, 0.19f),
+                Roughness = 0.85f,
+            };
+            AddChild(bench);
+        }
+
+        // Overhead lighting fixtures — glowing spheres on thin posts
+        float[] lightPos = { -8, 0, 8 };
+        foreach (float x in lightPos)
+        {
+            foreach (float z in lightPos)
+            {
+                if (x == 0 && z == 0) continue;
+                var post = new MeshInstance3D
+                {
+                    Mesh = new CylinderMesh { Height = 5, TopRadius = 0.05f, BottomRadius = 0.05f },
+                    Position = new Vector3(x, 2.5f, z),
+                };
+                post.MaterialOverride = new StandardMaterial3D
+                {
+                    AlbedoColor = new Color(0.1f, 0.1f, 0.12f),
+                    Roughness = 0.9f,
+                };
+                AddChild(post);
+
+                var lamp = new OmniLight3D
+                {
+                    Position = new Vector3(x, 4.8f, z),
+                    LightColor = new Color(0.9f, 0.88f, 0.75f),
+                    LightEnergy = 0.6f,
+                    OmniRange = 8f,
+                    OmniAttenuation = 1.5f,
+                    ShadowEnabled = true,
+                };
+                AddChild(lamp);
+
+                var glow = new MeshInstance3D
+                {
+                    Mesh = new SphereMesh { Radius = 0.15f, Height = 0.3f },
+                    Position = new Vector3(x, 4.8f, z),
+                };
+                glow.MaterialOverride = new StandardMaterial3D
+                {
+                    EmissionEnergyMultiplier = 2f,
+                    Emission = new Color(0.9f, 0.88f, 0.75f),
+                    AlbedoColor = new Color(0.9f, 0.88f, 0.75f),
+                };
+                AddChild(glow);
+            }
+        }
+
+        // World signage — "The Commons" near the entrance
+        var sign = new Label3D
+        {
+            Text = "The Commons",
+            Position = new Vector3(0, 3.5f, -15),
+            Billboard = BaseMaterial3D.BillboardModeEnum.Disabled,
+            FontSize = 96,
+            PixelSize = 0.01f,
+        };
+        sign.Modulate = new Color(0.7f, 0.75f, 0.85f);
+        AddChild(sign);
+
+        // Boundary walls — low walls at the edges so the world feels enclosed
+        float[] wallEdges = { -19, 19 };
+        foreach (float edge in wallEdges)
+        {
+            var wallX = new MeshInstance3D
+            {
+                Mesh = new BoxMesh { Size = new Vector3(0.5f, 1.5f, 40) },
+                Position = new Vector3(edge, 0.75f, 0),
+            };
+            wallX.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(0.1f, 0.11f, 0.14f),
+                Roughness = 0.9f,
+            };
+            AddChild(wallX);
+
+            var wallZ = new MeshInstance3D
+            {
+                Mesh = new BoxMesh { Size = new Vector3(40, 1.5f, 0.5f) },
+                Position = new Vector3(0, 0.75f, edge),
+            };
+            wallZ.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(0.1f, 0.11f, 0.14f),
+                Roughness = 0.9f,
+            };
+            AddChild(wallZ);
+        }
+
+        // Spawn point marker — a subtle ring on the floor
+        var spawnRing = new MeshInstance3D
+        {
+            Mesh = new CylinderMesh { Height = 0.02f, TopRadius = 0.8f, BottomRadius = 0.8f },
+            Position = new Vector3(0, 0.11f, 8),
+        };
+        spawnRing.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.3f, 0.5f, 0.8f, 0.6f),
+            Roughness = 0.5f,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+        };
+        AddChild(spawnRing);
     }
 
     private void SpawnLocalPlayer()
     {
-        _local = new LocalPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
-        AddChild(_local);
+        // Detect VR at spawn time — if OpenXR is initialized, use VrPlayer.
+        _vrMode = VrPlayer.IsVrAvailable();
+        if (_vrMode)
+        {
+            var vr = new VrPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
+            AddChild(vr);
+            _local = vr;
+            _localNode = vr;
+            GD.Print("VR mode: OpenXR initialized");
+        }
+        else
+        {
+            var desktop = new LocalPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
+            AddChild(desktop);
+            _local = desktop;
+            _localNode = desktop;
+            GD.Print("Desktop mode");
+        }
         if (_hud != null)
             _local.SetAvatarColor(_hud.AvatarColor);
+        _local.SetUsername(_username);
     }
 
     // ── Login → route (Home, or a world from a deep link) ────────────────────────────
