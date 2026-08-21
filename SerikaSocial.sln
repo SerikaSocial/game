@@ -1,0 +1,21 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SerikaSocial", "SerikaSocial.csproj", "{B63F7510-F7BA-4766-A44A-DC002F11BB40}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		ExportDebug|Any CPU = ExportDebug|Any CPU
+		ExportRelease|Any CPU = ExportRelease|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.ExportDebug|Any CPU.ActiveCfg = ExportDebug|Any CPU
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.ExportDebug|Any CPU.Build.0 = ExportDebug|Any CPU
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.ExportRelease|Any CPU.ActiveCfg = ExportRelease|Any CPU
+		{B63F7510-F7BA-4766-A44A-DC002F11BB40}.ExportRelease|Any CPU.Build.0 = ExportRelease|Any CPU
+	EndGlobalSection
+EndGlobal
