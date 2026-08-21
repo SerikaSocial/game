@@ -1,0 +1,19 @@
+<Project Sdk="Godot.NET.Sdk/4.7.1">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>SerikaSocial</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!--
+    The codec test project (Net/Codec/Tests) references xUnit and must NOT be part of the
+    Godot build. The codec sources themselves ARE compiled here — they're the same files the
+    tests exercise, so what ships is exactly what's verified.
+  -->
+  <ItemGroup>
+    <Compile Remove="Net/Codec/Tests/**/*.cs" />
+    <Compile Remove="proto/**/*.cs" />
+  </ItemGroup>
+</Project>

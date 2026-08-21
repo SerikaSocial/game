@@ -1,0 +1,21 @@
+; Serika Social — Godot 4.7 client. See README.md.
+config_version=5
+
+[application]
+
+config/name="Serika Social"
+config/version="0.1.0"
+run/main_scene="res://Main.tscn"
+config/features=PackedStringArray("4.7", "C#", "Forward Plus")
+
+[dotnet]
+
+project/assembly_name="SerikaSocial"
+
+[physics]
+
+3d/physics_engine="Jolt Physics"
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
