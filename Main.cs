@@ -26,10 +26,13 @@ public partial class Main : Node3D
     private bool _smoke;
     private double _smokeQuitTimer = 6.0;
 
-    // Config (env with sane local defaults).
-    private string ApiBaseUrl => OrDefault("SERIKA_API_URL", "http://localhost:4100");
-    private string AccountsBaseUrl => OrDefault("SERIKA_ACCOUNTS_URL", "http://localhost:3600");
+    // Config. Defaults point at production; override with env vars for local dev
+    // (e.g. SERIKA_API_URL=http://localhost:4100 SERIKA_ACCOUNTS_URL=http://localhost:3600).
+    private string ApiBaseUrl => OrDefault("SERIKA_API_URL", "https://api-social.ado.ink");
+    private string AccountsBaseUrl => OrDefault("SERIKA_ACCOUNTS_URL", "https://accounts.serika.dev");
     private string ClientId => OrDefault("SERIKA_CLIENT_ID", "serika-social-game");
+
+    private Hud _hud;
 
     public override void _Ready()
     {
@@ -47,7 +50,11 @@ public partial class Main : Node3D
         }
         else
         {
-            _ = LoginAndJoin();
+            _hud = new Hud { Name = "Hud" };
+            AddChild(_hud);
+            _hud.LoginPressed += () => _ = LoginAndJoin();
+            _hud.RetryPressed += () => _ = LoginAndJoin();
+            _hud.ShowLogin();
         }
     }
 
@@ -94,31 +101,59 @@ public partial class Main : Node3D
             var api = new ApiClient(ApiBaseUrl);
             var pkce = new PkceFlow();
 
+            _hud?.SetStatus("Opening your browser to sign in…");
             OS.ShellOpen(pkce.AuthorizeUrl(AccountsBaseUrl, ClientId));
             GD.Print("opened browser for login…");
+
+            _hud?.SetStatus("Waiting for you to sign in…");
             string code = await pkce.WaitForCodeAsync(TimeSpan.FromMinutes(3));
 
+            _hud?.SetStatus("Signing in…");
             var user = await api.ExchangeAsync(code, pkce.Verifier);
-            GD.Print($"logged in as {user.GetProperty("username").GetString()}");
+            string username = user.GetProperty("username").GetString();
+            GD.Print($"logged in as {username}");
 
-            // Join the built-in world's default instance (create one).
+            _hud?.SetStatus("Finding a world…");
             var worlds = await api.GetWorldsAsync();
             string worldId = worlds[0].GetProperty("id").GetString();
+            string worldName = worlds[0].GetProperty("name").GetString();
+
+            _hud?.SetStatus($"Joining {worldName}…");
             var joined = await api.CreateInstanceAsync(worldId);
             string endpoint = joined.GetProperty("endpoint").GetString();
             string ticket = joined.GetProperty("ticket").GetString();
 
             // Back to the game thread to touch the scene tree.
-            CallDeferred(nameof(OnJoinReady), endpoint, ticket);
+            CallDeferred(nameof(OnJoinReady), endpoint, ticket, username, worldName);
         }
         catch (Exception e)
         {
             GD.PrintErr($"login/join failed: {e.Message}");
+            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
         }
     }
 
-    private void OnJoinReady(string endpoint, string ticket)
+    private void ShowLoginError(string message) => _hud?.ShowError(message);
+
+    // Turn raw exceptions into something a player can act on.
+    private static string FriendlyError(Exception e)
     {
+        string m = e.Message ?? "";
+        if (m.Contains("invalid_client") || m.Contains("Client not found"))
+            return "This build isn't registered with Serika accounts yet. (OAuth client 'serika-social-game' is missing.)";
+        if (m.Contains("timed out") || m.Contains("Timeout") || m.Contains("cancel"))
+            return "Login timed out. Please try again.";
+        if (m.Contains("refused") || m.Contains("resolve") || m.Contains("host"))
+            return "Couldn't reach the servers. Check your connection and try again.";
+        return $"Login failed: {m}";
+    }
+
+    private string _worldName = "the world";
+
+    private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
+    {
+        _worldName = worldName;
+        _hud?.SetStatus($"Connecting to {worldName}…");
         SpawnLocalPlayer();
         ConnectTo(endpoint, ticket);
     }
@@ -130,7 +165,11 @@ public partial class Main : Node3D
         udp.PeerJoined += OnPeerJoined;
         udp.PeerLeft += OnPeerLeft;
         udp.PoseReceived += OnPoseReceived;
-        udp.Rejected += reason => GD.PrintErr($"relay rejected us: {reason}");
+        udp.Rejected += reason =>
+        {
+            GD.PrintErr($"relay rejected us: {reason}");
+            _hud?.ShowError($"The world server rejected the connection: {reason}");
+        };
         _transport = udp;
         udp.Connect(endpoint, ticket);
     }
@@ -141,6 +180,9 @@ public partial class Main : Node3D
     {
         GD.Print($"SMOKE connected self={selfId} peers={peers.Length}");
         foreach (var p in peers) SpawnRemote(p);
+        int others = peers.Length;
+        string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
+        _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
     }
 
     private void OnPeerJoined(PeerInfo p)
