@@ -53,15 +53,7 @@ public partial class PauseMenu : CanvasLayer
             OffsetBottom = 210,
             Visible = false,
         };
-        var style = new StyleBoxFlat
-        {
-            BgColor = new Color(0.08f, 0.09f, 0.12f, 1f),
-            CornerRadiusTopLeft = 12, CornerRadiusTopRight = 12,
-            CornerRadiusBottomLeft = 12, CornerRadiusBottomRight = 12,
-            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.06f),
-        };
-        _card.AddThemeStyleboxOverride("panel", style);
+        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_card);
 
         var vbox = new VBoxContainer
@@ -189,42 +181,7 @@ public partial class PauseMenu : CanvasLayer
 
     private static Button MakeButton(string text, bool primary)
     {
-        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 42) };
-        if (primary)
-        {
-            var normal = new StyleBoxFlat
-            {
-                BgColor = new Color(0.88f, 0.89f, 0.92f),
-                CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
-                CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
-                ContentMarginTop = 10, ContentMarginBottom = 10,
-            };
-            var hover = (StyleBoxFlat)normal.Duplicate();
-            hover.BgColor = new Color(1f, 1f, 1f);
-            b.AddThemeStyleboxOverride("normal", normal);
-            b.AddThemeStyleboxOverride("hover", hover);
-            b.AddThemeStyleboxOverride("pressed", normal);
-            b.AddThemeColorOverride("font_color", new Color(0.08f, 0.09f, 0.12f));
-        }
-        else
-        {
-            var normal = new StyleBoxFlat
-            {
-                BgColor = new Color(0.15f, 0.16f, 0.20f),
-                CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
-                CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
-                ContentMarginTop = 10, ContentMarginBottom = 10,
-                BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-                BorderColor = new Color(1, 1, 1, 0.08f),
-            };
-            var hover = (StyleBoxFlat)normal.Duplicate();
-            hover.BgColor = new Color(0.2f, 0.21f, 0.25f);
-            b.AddThemeStyleboxOverride("normal", normal);
-            b.AddThemeStyleboxOverride("hover", hover);
-            b.AddThemeStyleboxOverride("pressed", normal);
-            b.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        }
-        b.AddThemeFontSizeOverride("font_size", 15);
-        return b;
+        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 44) };
+        return primary ? Brand.Primary_(b) : Brand.Ghost_(b);
     }
 }
