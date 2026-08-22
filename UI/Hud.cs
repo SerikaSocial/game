@@ -21,7 +21,7 @@ public partial class Hud : CanvasLayer
     public Color AvatarColor { get; private set; } = new Color(0.9f, 0.7f, 0.2f);
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.3.0";
+    private const string ClientVersion = "0.3.1";
     private static readonly Color[] PresetColors =
     {
         new(0.95f, 0.72f, 0.20f), // amber
@@ -172,11 +172,11 @@ public partial class Hud : CanvasLayer
 
         _versionLabel = new Label
         {
-            Text = $"v{ClientVersion}",
+            Text = $"v{ClientVersion}  ·  © 2026 Serika.dev",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
         _versionLabel.AddThemeFontSizeOverride("font_size", 11);
-        _versionLabel.AddThemeColorOverride("font_color", new Color(0.4f, 0.44f, 0.5f));
+        _versionLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(_versionLabel);
 
         _toast = new Label
@@ -272,6 +272,38 @@ public partial class Hud : CanvasLayer
         browse.AddThemeFontSizeOverride("font_size", 14);
         browse.Pressed += () => OS.ShellOpen(WorldsUrl);
         row.AddChild(browse);
+
+        // Close the overlay and return to walking around Home.
+        var back = MakeButton("Stay home", false);
+        back.CustomMinimumSize = new Vector2(140, 42);
+        back.Pressed += () => WorldListClosed?.Invoke();
+        row.AddChild(back);
+    }
+
+    /// Fired when the world-list overlay is dismissed ("Stay home"), so Main can recapture input.
+    public event Action WorldListClosed;
+
+    /// Hide every HUD panel — the playable state (walking around Home or a world).
+    public void HideAll()
+    {
+        Visible = true;
+        _scrim.Visible = false;
+        _card.Visible = false;
+        _homePanel.Visible = false;
+        _homeButton.Visible = false;
+        SetSpinning(false);
+    }
+
+    /// Show the world-list overlay on demand (from the pause menu). Non-forced — the player can
+    /// dismiss it with "Stay home".
+    public void ShowWorldList(string username)
+    {
+        Visible = true;
+        _scrim.Visible = false;
+        _card.Visible = false;
+        _homeButton.Visible = false;
+        _homeLabel.Text = $"Worlds — hi, {username}";
+        _homePanel.Visible = true;
     }
 
     // A small button, top-left, to return to Home from a world.

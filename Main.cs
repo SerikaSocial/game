@@ -92,11 +92,13 @@ public partial class Main : Node3D
         _hud.HomePressed += EnterHome;
         _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
         _hud.JoinWorldPressed += (worldId) => _ = JoinWorldById(worldId);
+        _hud.WorldListClosed += CloseWorldList;
         _hud.ShowLogin();
 
         _pauseMenu = new PauseMenu { Name = "PauseMenu" };
         AddChild(_pauseMenu);
         _pauseMenu.HomePressed += EnterHome;
+        _pauseMenu.WorldsPressed += () => { _pauseMenu.Hide(); OpenWorldList(); };
         _pauseMenu.QuitPressed += () => GetTree().Quit();
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
@@ -208,7 +210,7 @@ public partial class Main : Node3D
             _localNode = desktop;
             _localDesktop = desktop;
             // Equip the default humanoid avatar (Suisei). Falls back to the capsule on failure.
-            desktop.SetAvatar(AvatarLibrary.InstantiateDefault());
+            desktop.SetAvatar(AvatarLibrary.Instantiate(_localAvatarPath ?? AvatarLibrary.CurrentDefaultPath));
             SetupTouchControls(desktop);
             GD.Print("Desktop mode");
         }
@@ -240,6 +242,26 @@ public partial class Main : Node3D
 
     private ApiClient _api;
     private string _username = "traveller";
+    private string _localAvatarPath; // downloaded custom avatar (user://), else null → bundled default
+
+    /// Fetch the logged-in user's current avatar (their chosen one or a default outfit) and cache
+    /// its .ska under user://. Failure is silent — we fall back to the bundled default, then capsule.
+    private async Task FetchCurrentAvatar()
+    {
+        try
+        {
+            string url = await _api.GetCurrentAvatarUrlAsync();
+            if (string.IsNullOrEmpty(url)) return;
+            DirAccess.MakeDirRecursiveAbsolute("user://avatars");
+            string abs = ProjectSettings.GlobalizePath("user://avatars/current.ska");
+            if (await _api.DownloadToAsync(url, abs))
+            {
+                _localAvatarPath = "user://avatars/current.ska";
+                GD.Print($"equipped custom avatar from {url}");
+            }
+        }
+        catch (Exception e) { GD.PrintErr($"avatar fetch failed: {e.Message}"); }
+    }
 
     /// Sign in, then go where the launch intent says: a deep-linked world, or Home.
     private async Task LoginThenRoute()
@@ -260,6 +282,10 @@ public partial class Main : Node3D
             var user = await _api.ExchangeAsync(code, pkce.Verifier);
             _username = user.GetProperty("username").GetString();
             GD.Print($"logged in as {_username}");
+
+            // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
+            SetLoadingStatus("Loading your avatar…");
+            await FetchCurrentAvatar();
 
             if (_pendingIntent.Kind == DeepLink.Kind.World)
             {
@@ -329,10 +355,36 @@ public partial class Main : Node3D
         MoveLocalTo(_homeInfo.Spawn);
         _worldName = "Home";
         HideLoading();
-        _hud?.ShowHome(_username);
-        _chat?.AddSystem("Welcome home. Press T to chat, V to change view, walk into the portal to travel.");
-        MaybeStartTutorial();
+
+        // Home is a fully playable single-player space — no forced modal. Walk around freely;
+        // step into the portal (or open the pause menu → Worlds) to travel.
+        _hud?.HideAll();
+        _inWorldHud?.SetWorld("Home");
+        _inWorldHud?.SetPlayerCount(1);
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
+        if (!DisplayServer.GetName().Equals("headless"))
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+        _inWorldHud?.Toast("Welcome home · walk into the portal to travel · T to chat · Esc for menu", 6);
+
         _ = PopulateWorldList();
+        MaybeStartTutorial();
+    }
+
+    // ── Home world list (opened from the pause menu, not forced) ──────────────────────
+
+    private void OpenWorldList()
+    {
+        _hud?.ShowWorldList(_username);
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        Input.MouseMode = Input.MouseModeEnum.Visible;
+    }
+
+    private void CloseWorldList()
+    {
+        _hud?.HideAll();
+        if (_inHome && _localDesktop != null) _localDesktop.ControlsEnabled = true;
+        if (_inHome && !DisplayServer.GetName().Equals("headless"))
+            Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
     /// Teleport the local player (works for both desktop and VR rigs).

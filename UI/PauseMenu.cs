@@ -10,6 +10,7 @@ public partial class PauseMenu : CanvasLayer
 {
     public event Action Closed;
     public event Action HomePressed;
+    public event Action WorldsPressed;
     public event Action QuitPressed;
 
     private ColorRect _scrim;
@@ -137,6 +138,10 @@ public partial class PauseMenu : CanvasLayer
         _homeButton = MakeButton("Return to Home", false);
         _homeButton.Pressed += () => { Hide(); HomePressed?.Invoke(); };
         vbox.AddChild(_homeButton);
+
+        var worldsButton = MakeButton("Worlds…", false);
+        worldsButton.Pressed += () => WorldsPressed?.Invoke();
+        vbox.AddChild(worldsButton);
 
         _quitButton = MakeButton("Quit to desktop", false);
         _quitButton.Pressed += () => QuitPressed?.Invoke();

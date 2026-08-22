@@ -38,6 +38,33 @@ public sealed class ApiClient
     public async Task<JsonElement> GetIceServersAsync() =>
         await GetAuthedAsync("/v1/rtc/ice");
 
+    /// The avatar the game should equip for the logged-in user (their chosen one, else a default
+    /// outfit). Returns the .ska download URL, or null if none / on error.
+    public async Task<string> GetCurrentAvatarUrlAsync()
+    {
+        try
+        {
+            var res = await GetAuthedAsync("/v1/avatars/current");
+            if (res.TryGetProperty("avatar", out var a) && a.ValueKind == JsonValueKind.Object
+                && a.TryGetProperty("downloadUrl", out var d) && d.ValueKind == JsonValueKind.String)
+                return d.GetString();
+        }
+        catch { /* fall back to bundled default */ }
+        return null;
+    }
+
+    /// Download a .ska to a local path (user://), returning true on success.
+    public async Task<bool> DownloadToAsync(string url, string absPath)
+    {
+        try
+        {
+            var bytes = await _http.GetByteArrayAsync(url);
+            await System.IO.File.WriteAllBytesAsync(absPath, bytes);
+            return true;
+        }
+        catch { return false; }
+    }
+
     /// Create an instance of a world and get a join ticket + relay endpoint back.
     public async Task<JsonElement> CreateInstanceAsync(string worldId)
     {

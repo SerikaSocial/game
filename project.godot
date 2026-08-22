@@ -4,9 +4,15 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="0.3.0"
+config/version="0.3.1"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
+; Custom "made by Serika.dev" splash on a deep-violet background — replaces the Godot logo.
+boot_splash/bg_color=Color(0.055, 0.04, 0.10, 1)
+boot_splash/show_image=true
+boot_splash/image="res://Assets/splash.png"
+boot_splash/fullsize=false
+boot_splash/use_filter=true
 
 [dotnet]
 

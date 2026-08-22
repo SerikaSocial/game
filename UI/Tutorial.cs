@@ -32,7 +32,7 @@ public partial class Tutorial : CanvasLayer
 
     public override void _Ready()
     {
-        Layer = 80;
+        Layer = 120; // above every other overlay so its buttons are always clickable
 
         var dim = new ColorRect
         {
