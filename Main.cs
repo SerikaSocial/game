@@ -59,6 +59,7 @@ public partial class Main : Node3D
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
     private bool _inHome;
     private bool _inWorld;
+    private bool _persistThirdPerson; // survive world switches so camera mode is sticky
     private SpatialAudioManager _audio;
     private VoiceManager _voice;
     private bool _micActive;
@@ -241,6 +242,8 @@ public partial class Main : Node3D
             _localDesktop = desktop;
             // Equip the default humanoid avatar (Suisei). Falls back to the capsule on failure.
             desktop.SetAvatar(AvatarLibrary.Instantiate(_localAvatarPath ?? AvatarLibrary.CurrentDefaultPath));
+            // Restore persisted camera mode across world switches.
+            if (_persistThirdPerson) desktop.SetFirstPerson(false);
             SetupTouchControls(desktop);
             GD.Print("Desktop mode");
         }
@@ -262,6 +265,7 @@ public partial class Main : Node3D
         _touch.Configure(player, () =>
         {
             bool fp = player.ToggleCameraMode();
+            _persistThirdPerson = !fp;
             _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
         });
     }
@@ -721,6 +725,7 @@ public partial class Main : Node3D
             && _localDesktop != null && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
         {
             bool fp = _localDesktop.ToggleCameraMode();
+            _persistThirdPerson = !fp;
             _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
             GetViewport().SetInputAsHandled();
         }

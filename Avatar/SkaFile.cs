@@ -12,7 +12,7 @@ public sealed class SkaMeta
     [JsonPropertyName("name")] public string Name { get; set; } = "Avatar";
     [JsonPropertyName("author")] public string Author { get; set; } = "unknown";
     [JsonPropertyName("sourceFormat")] public string SourceFormat { get; set; } = "glb";
-    [JsonPropertyName("faceYawDegrees")] public float FaceYawDegrees { get; set; } = 180f;
+    [JsonPropertyName("faceYawDegrees")] public float FaceYawDegrees { get; set; } = 0f;
     [JsonPropertyName("heightMeters")] public float HeightMeters { get; set; } = 1.7f;
     [JsonPropertyName("eyeHeightMeters")] public float EyeHeightMeters { get; set; } = 1.6f;
     [JsonPropertyName("humanoid")] public Dictionary<string, string> Humanoid { get; set; } = new();
