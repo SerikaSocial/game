@@ -182,11 +182,14 @@ public static class Worlds
             AlbedoTexture = portraitTex,
             Roughness = 0.6f,
         };
-        root.AddChild(Box(new Vector3(0.06f, 1.0f, 0.7f), new Vector3(-w / 2 + 0.12f, 1.7f, -2.5f), frameMat));
+        // Frame: 0.9m tall × 0.65m wide, on the left wall (X = -w/2 + 0.12).
+        root.AddChild(Box(new Vector3(0.06f, 0.9f, 0.65f), new Vector3(-w / 2 + 0.12f, 1.7f, -2.5f), frameMat));
+        // Art: QuadMesh facing +X (into the room), slightly proud of the frame.
         var portraitArt = new MeshInstance3D
         {
-            Mesh = new BoxMesh { Size = new Vector3(0.04f, 0.8f, 0.55f) },
-            Position = new Vector3(-w / 2 + 0.15f, 1.7f, -2.5f),
+            Mesh = new QuadMesh { Size = new Vector2(0.55f, 0.8f) },
+            Position = new Vector3(-w / 2 + 0.16f, 1.7f, -2.5f),
+            RotationDegrees = new Vector3(0, 90, 0),
         };
         portraitArt.MaterialOverride = portraitMat;
         root.AddChild(portraitArt);
@@ -198,11 +201,13 @@ public static class Worlds
             AlbedoTexture = landscapeTex,
             Roughness = 0.6f,
         };
-        root.AddChild(Box(new Vector3(0.06f, 0.65f, 1.1f), new Vector3(-w / 2 + 0.12f, 1.5f, 0.8f), frameMat));
+        // Frame: 0.6m tall × 1.0m wide.
+        root.AddChild(Box(new Vector3(0.06f, 0.6f, 1.0f), new Vector3(-w / 2 + 0.12f, 1.5f, 0.8f), frameMat));
         var landscapeArt = new MeshInstance3D
         {
-            Mesh = new BoxMesh { Size = new Vector3(0.04f, 0.5f, 0.95f) },
-            Position = new Vector3(-w / 2 + 0.15f, 1.5f, 0.8f),
+            Mesh = new QuadMesh { Size = new Vector2(0.9f, 0.5f) },
+            Position = new Vector3(-w / 2 + 0.16f, 1.5f, 0.8f),
+            RotationDegrees = new Vector3(0, 90, 0),
         };
         landscapeArt.MaterialOverride = landscapeMat;
         root.AddChild(landscapeArt);
@@ -211,22 +216,22 @@ public static class Worlds
         var rug = Box(new Vector3(3.2f, 0.02f, 2.2f), new Vector3(0, 0.02f, 0.5f), Mat(new Color(0.5f, 0.15f, 0.18f), 0.95f));
         root.AddChild(rug);
 
-        // Couch — base + backrest + two armrests + cushions (all collidable).
+        // Couch — base + backrest + two armrests (collidable). Cushions are decorative only.
         var couchMat = Mat(new Color(0.3f, 0.36f, 0.42f), 0.9f);
         root.AddChild(CollidableBox(new Vector3(2.6f, 0.5f, 0.9f), new Vector3(0, 0.25f, 2.3f), couchMat));
         root.AddChild(CollidableBox(new Vector3(2.6f, 0.7f, 0.2f), new Vector3(0, 0.6f, 2.72f), couchMat));
         root.AddChild(CollidableBox(new Vector3(0.2f, 0.6f, 0.9f), new Vector3(-1.2f, 0.55f, 2.3f), couchMat));
         root.AddChild(CollidableBox(new Vector3(0.2f, 0.6f, 0.9f), new Vector3(1.2f, 0.55f, 2.3f), couchMat));
-        // Throw cushions.
+        // Throw cushions (decorative — no collision).
         root.AddChild(Sphere(0.25f, new Vector3(-0.7f, 0.55f, 2.2f), Mat(new Color(0.6f, 0.4f, 0.5f), 0.95f)));
         root.AddChild(Sphere(0.25f, new Vector3(0.7f, 0.55f, 2.2f), Mat(new Color(0.4f, 0.5f, 0.6f), 0.95f)));
 
-        // Coffee table (collidable).
+        // Coffee table top (collidable). Legs are decorative only.
         root.AddChild(CollidableBox(new Vector3(1.4f, 0.08f, 0.7f), new Vector3(0, 0.42f, 1.1f), Mat(new Color(0.28f, 0.18f, 0.11f), 0.5f, 0.1f)));
         foreach (var (lx, lz) in new[] { (-0.6f, -0.28f), (0.6f, -0.28f), (-0.6f, 0.28f), (0.6f, 0.28f) })
-            root.AddChild(CollidableBox(new Vector3(0.08f, 0.42f, 0.08f), new Vector3(lx, 0.21f, 1.1f + lz), Mat(new Color(0.2f, 0.13f, 0.08f))));
+            root.AddChild(Box(new Vector3(0.08f, 0.42f, 0.08f), new Vector3(lx, 0.21f, 1.1f + lz), Mat(new Color(0.2f, 0.13f, 0.08f))));
 
-        // Bookshelf against the left wall (collidable).
+        // Bookshelf against the left wall (collidable). Books are decorative only.
         var shelfMat = Mat(new Color(0.26f, 0.17f, 0.10f), 0.7f);
         root.AddChild(CollidableBox(new Vector3(0.4f, 2.4f, 1.8f), new Vector3(-w / 2 + 0.3f, 1.2f, -1.5f), shelfMat));
         for (int i = 0; i < 4; i++)
@@ -277,15 +282,6 @@ public static class Worlds
         // Portal to the Commons, in the front doorway.
         var portal = Portal.Create("The Commons", new Color(0.4f, 0.6f, 1f), new Vector3(2.6f, 0.05f, d / 2 - 0.6f), 180f);
         root.AddChild(portal);
-
-        // A small welcome sign.
-        root.AddChild(new Label3D
-        {
-            Text = "Home",
-            Position = new Vector3(0, 2.9f, -d / 2 + 0.35f),
-            FontSize = 72, PixelSize = 0.006f,
-            Modulate = new Color(0.9f, 0.82f, 0.7f),
-        });
 
         return new Home(new Vector3(0, 1f, 1.2f), portal, mirror);
     }
@@ -425,10 +421,6 @@ public static class Worlds
                 root.AddChild(Sphere(0.5f, new Vector3(x + 0.4f, 1.5f, z), leafMat));
                 root.AddChild(Sphere(0.5f, new Vector3(x - 0.4f, 1.5f, z), leafMat));
             }
-
-        var sign = new Label3D { Text = "The Commons", Position = new Vector3(0, 3.5f, -15), FontSize = 96, PixelSize = 0.01f };
-        sign.Modulate = new Color(0.7f, 0.75f, 0.85f);
-        root.AddChild(sign);
 
         // Boundary walls — collidable so players can't fall off the edge.
         foreach (float edge in new[] { -19f, 19f })

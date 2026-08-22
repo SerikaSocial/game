@@ -123,7 +123,23 @@ public sealed partial class AvatarInstance : Node3D
 
     private readonly Dictionary<string, AnimBone> _animBones = new();
     private static readonly string[] ProceduralRoles =
-        { "hips", "leftUpperLeg", "rightUpperLeg", "leftUpperArm", "rightUpperArm", "chest", "head" };
+        { "hips", "spine", "chest", "head",
+          "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg",
+          "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm" };
+
+    public enum Emote { None, Sit, Dance, Wave }
+    private Emote _emote = Emote.None;
+    private float _emoteTime;
+    private float _emoteBlend;
+
+    /// Play an emote animation (sit, dance, wave). Pass Emote.None to return to normal.
+    public void PlayEmote(Emote e)
+    {
+        _emote = e;
+        _emoteTime = 0f;
+    }
+
+    public Emote CurrentEmote => _emote;
 
     private float _idleTime;
     private float _walkPhase;
@@ -165,26 +181,107 @@ public sealed partial class AvatarInstance : Node3D
 
         float dt = (float)delta;
         _idleTime += dt;
+        _emoteTime += dt;
         _moveBlend = Mathf.Lerp(_moveBlend, Mathf.Clamp(speed / 4f, 0f, 1.6f), dt * 8f);
         _walkPhase += dt * Mathf.Max(speed, 0f) * 2.2f;
 
+        // Emote blending: ramp in when an emote is active, ramp out when cancelled.
+        float emoteTarget = _emote != Emote.None && speed < 0.5f && onFloor ? 1f : 0f;
+        _emoteBlend = Mathf.Lerp(_emoteBlend, emoteTarget, dt * 6f);
+        if (_emoteBlend < 0.01f && _emote != Emote.None && (speed > 0.5f || !onFloor))
+            _emote = Emote.None;
+
         float b = _moveBlend;
         float t = _idleTime;
+        float eb = _emoteBlend;
+
+        // Default walk/idle values.
         float legSwing = Mathf.Sin(_walkPhase) * 0.55f * b;
         float armSwing = Mathf.Sin(_walkPhase) * 0.4f * b;
         float breathe = Mathf.Sin(t * 1.7f) * 0.025f * (1f - 0.5f * Mathf.Min(b, 1f));
         float armIdle = Mathf.Sin(t * 1.3f) * 0.035f * (1f - Mathf.Min(b, 1f));
+        float lowerLegBend = Mathf.Max(0, -Mathf.Sin(_walkPhase)) * 0.6f * b;
+        float lowerArmBend = 0.3f + Mathf.Abs(Mathf.Sin(_walkPhase)) * 0.2f * b;
 
-        // Airborne: trail the legs a little instead of cycling them.
-        if (!onFloor) legSwing = 0.25f;
+        // Airborne: tuck legs into a jump pose.
+        if (!onFloor)
+        {
+            legSwing = 0.3f;
+            lowerLegBend = 0.7f;
+            armSwing = -0.3f;
+            lowerArmBend = 0.5f;
+        }
+
+        // Apply emote poses (blended over walk/idle).
+        if (eb > 0.01f)
+        {
+            ApplyEmote(eb, t, ref legSwing, ref armSwing, ref breathe, ref armIdle, ref lowerLegBend, ref lowerArmBend);
+        }
 
         Swing("leftUpperLeg", legSwing);
         Swing("rightUpperLeg", -legSwing);
+        Swing("leftLowerLeg", lowerLegBend);
+        Swing("rightLowerLeg", lowerLegBend);
         Swing("leftUpperArm", -armSwing + armIdle);
         Swing("rightUpperArm", armSwing + armIdle);
+        Swing("leftLowerArm", lowerArmBend);
+        Swing("rightLowerArm", lowerArmBend);
         Swing("chest", breathe);
-        Swing("head", Mathf.Sin(t * 0.9f) * 0.02f);
-        Swing("hips", Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b); // subtle stride dip
+        Swing("spine", breathe * 0.5f);
+        Swing("head", Mathf.Sin(t * 0.9f) * 0.02f * (1f - eb));
+        Swing("hips", Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b * (1f - eb));
+    }
+
+    /// Override animation values for the active emote, blended by `eb` (0..1).
+    private void ApplyEmote(float eb, float t,
+        ref float legSwing, ref float armSwing, ref float breathe,
+        ref float armIdle, ref float lowerLegBend, ref float lowerArmBend)
+    {
+        switch (_emote)
+        {
+            case Emote.Sit:
+                // Sitting: legs bent 90°, arms resting in lap.
+                legSwing = Mathf.Lerp(legSwing, 1.4f, eb);       // thighs forward
+                lowerLegBend = Mathf.Lerp(lowerLegBend, 1.4f, eb); // knees bent
+                armSwing = Mathf.Lerp(armSwing, 0.2f, eb);
+                armIdle = Mathf.Lerp(armIdle, 0f, eb);
+                lowerArmBend = Mathf.Lerp(lowerArmBend, 0.4f, eb);
+                breathe = Mathf.Lerp(breathe, Mathf.Sin(t * 1.2f) * 0.03f, eb);
+                break;
+
+            case Emote.Dance:
+            {
+                // Dance: rhythmic sway + arm waving.
+                float beat = Mathf.Sin(t * 4f);
+                float beat2 = Mathf.Sin(t * 4f + Mathf.Pi * 0.5f);
+                legSwing = Mathf.Lerp(legSwing, beat * 0.2f, eb);
+                lowerLegBend = Mathf.Lerp(lowerLegBend, 0.1f + Mathf.Abs(beat) * 0.15f, eb);
+                armSwing = Mathf.Lerp(armSwing, beat2 * 0.8f, eb);
+                armIdle = Mathf.Lerp(armIdle, 0f, eb);
+                lowerArmBend = Mathf.Lerp(lowerArmBend, 0.6f + Mathf.Abs(beat) * 0.3f, eb);
+                breathe = Mathf.Lerp(breathe, beat * 0.08f, eb);
+                // Sway hips and spine.
+                SwingQuat("hips", new Quaternion(Vector3.Up, beat * 0.15f * eb));
+                SwingQuat("spine", new Quaternion(Vector3.Up, -beat * 0.1f * eb));
+                SwingQuat("chest", new Quaternion(Vector3.Up, beat * 0.08f * eb));
+                break;
+            }
+
+            case Emote.Wave:
+            {
+                // Wave: right arm raised, hand waving. Left arm idle.
+                float wave = Mathf.Sin(t * 6f);
+                armSwing = Mathf.Lerp(armSwing, -1.2f, eb);  // right arm up
+                lowerArmBend = Mathf.Lerp(lowerArmBend, 0.3f, eb);
+                // Override right arm specifically for the wave.
+                SwingQuat("rightUpperArm", new Quaternion(Vector3.Right, -1.2f * eb) *
+                    new Quaternion(Vector3.Forward, wave * 0.2f * eb));
+                SwingQuat("rightLowerArm", new Quaternion(Vector3.Right, (0.3f + wave * 0.3f) * eb));
+                armIdle = Mathf.Lerp(armIdle, 0f, eb);
+                breathe = Mathf.Lerp(breathe, Mathf.Sin(t * 1.5f) * 0.03f, eb);
+                break;
+            }
+        }
     }
 
     /// Rotate a bone forward/back about its parent's X axis, on top of its rest rotation.
@@ -192,6 +289,13 @@ public sealed partial class AvatarInstance : Node3D
     {
         if (!_animBones.TryGetValue(role, out var ab)) return;
         Skeleton.SetBonePoseRotation(ab.Index, new Quaternion(Vector3.Right, angle) * ab.Rest);
+    }
+
+    /// Set a bone's rotation to an explicit quaternion (replaces rest rotation entirely).
+    private void SwingQuat(string role, Quaternion quat)
+    {
+        if (!_animBones.TryGetValue(role, out var ab)) return;
+        Skeleton.SetBonePoseRotation(ab.Index, quat * ab.Rest);
     }
 
     private static AnimationPlayer FindAnimPlayer(Node node)

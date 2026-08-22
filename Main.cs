@@ -740,6 +740,26 @@ public partial class Main : Node3D
             ToggleMic();
             GetViewport().SetInputAsHandled();
         }
+
+        // Emote keys: B=sit, N=dance, H=wave. Press again to cancel.
+        if (@event is InputEventKey { Pressed: true, Echo: false } k
+            && (_inWorld || _inHome) && _localDesktop != null
+            && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
+        {
+            AvatarInstance.Emote? emote = k.Keycode switch
+            {
+                Key.B => AvatarInstance.Emote.Sit,
+                Key.N => AvatarInstance.Emote.Dance,
+                Key.H => AvatarInstance.Emote.Wave,
+                _ => null,
+            };
+            if (emote.HasValue)
+            {
+                _localDesktop.PlayEmote(emote.Value);
+                _inWorldHud?.Toast(emote.Value == AvatarInstance.Emote.None ? "Emote cancelled" : $"Emote: {emote.Value}");
+                GetViewport().SetInputAsHandled();
+            }
+        }
     }
 
     public override void _PhysicsProcess(double delta)

@@ -58,7 +58,7 @@ public partial class Mirror : Node3D
         _viewport = new SubViewport
         {
             Size = new Vector2I(texW, texH),
-            RenderTargetUpdateMode = SubViewport.UpdateMode.WhenVisible,
+            RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled,
             RenderTargetClearMode = SubViewport.ClearMode.Always,
             OwnWorld3D = false,
         };
@@ -93,7 +93,7 @@ public partial class Mirror : Node3D
             _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
             return;
         }
-        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.WhenVisible;
+        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
 
         // Mirror plane normal = the surface's +Z (facing out toward the viewer).
         Vector3 mirrorNormal = _surface.GlobalBasis.Z.Normalized();

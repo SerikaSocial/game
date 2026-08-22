@@ -134,6 +134,16 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         return _firstPerson;
     }
 
+    /// Trigger an emote animation on the equipped avatar (sit, dance, wave).
+    public void PlayEmote(AvatarInstance.Emote emote)
+    {
+        if (_avatar == null) return;
+        if (_avatar.CurrentEmote == emote)
+            _avatar.PlayEmote(AvatarInstance.Emote.None);
+        else
+            _avatar.PlayEmote(emote);
+    }
+
     private void ApplyCameraMode()
     {
         _avatar?.SetHeadVisible(!_firstPerson);
@@ -146,7 +156,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     private const float ThirdPersonCameraY = 0.35f;
     private const float ThirdPersonMin = 1.2f;
     private const float ThirdPersonMax = 6.0f;
-    private float _thirdPersonDistance = 3.0f;
+    private float _thirdPersonDistance = 2.0f;
 
     public override void _UnhandledInput(InputEvent @event)
     {
