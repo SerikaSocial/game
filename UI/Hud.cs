@@ -21,7 +21,7 @@ public partial class Hud : CanvasLayer
     public Color AvatarColor { get; private set; } = new Color(0.9f, 0.7f, 0.2f);
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.2.0";
+    private const string ClientVersion = "0.3.0";
     private static readonly Color[] PresetColors =
     {
         new(0.95f, 0.72f, 0.20f), // amber
@@ -61,7 +61,7 @@ public partial class Hud : CanvasLayer
 
         _scrim = new ColorRect
         {
-            Color = new Color(0.03f, 0.04f, 0.06f, 1f),
+            Color = new Color(Brand.Bg0.R, Brand.Bg0.G, Brand.Bg0.B, 0.92f),
             AnchorRight = 1,
             AnchorBottom = 1,
         };
@@ -79,20 +79,7 @@ public partial class Hud : CanvasLayer
             OffsetRight = 240,
             OffsetBottom = 170,
         };
-        var style = new StyleBoxFlat
-        {
-            BgColor = new Color(0.08f, 0.09f, 0.12f, 1f),
-            CornerRadiusTopLeft = 12,
-            CornerRadiusTopRight = 12,
-            CornerRadiusBottomLeft = 12,
-            CornerRadiusBottomRight = 12,
-            BorderWidthTop = 1,
-            BorderWidthBottom = 1,
-            BorderWidthLeft = 1,
-            BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.06f),
-        };
-        _card.AddThemeStyleboxOverride("panel", style);
+        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_card);
 
         var vbox = new VBoxContainer
@@ -226,15 +213,7 @@ public partial class Hud : CanvasLayer
             OffsetRight = 300,
             OffsetBottom = 220,
         };
-        var style = new StyleBoxFlat
-        {
-            BgColor = new Color(0.08f, 0.09f, 0.12f, 0.95f),
-            CornerRadiusTopLeft = 12, CornerRadiusTopRight = 12,
-            CornerRadiusBottomLeft = 12, CornerRadiusBottomRight = 12,
-            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.06f),
-        };
-        _homePanel.AddThemeStyleboxOverride("panel", style);
+        _homePanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_homePanel);
 
         var vbox = new VBoxContainer
@@ -311,49 +290,8 @@ public partial class Hud : CanvasLayer
 
     private static Button MakeButton(string text, bool primary)
     {
-        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 44) };
-        if (primary)
-        {
-            var normal = new StyleBoxFlat
-            {
-                BgColor = new Color(0.88f, 0.89f, 0.92f),
-                CornerRadiusTopLeft = 8,
-                CornerRadiusTopRight = 8,
-                CornerRadiusBottomLeft = 8,
-                CornerRadiusBottomRight = 8,
-                ContentMarginTop = 10,
-                ContentMarginBottom = 10,
-            };
-            var hover = (StyleBoxFlat)normal.Duplicate();
-            hover.BgColor = new Color(1f, 1f, 1f);
-            b.AddThemeStyleboxOverride("normal", normal);
-            b.AddThemeStyleboxOverride("hover", hover);
-            b.AddThemeStyleboxOverride("pressed", normal);
-            b.AddThemeColorOverride("font_color", new Color(0.08f, 0.09f, 0.12f));
-        }
-        else
-        {
-            var normal = new StyleBoxFlat
-            {
-                BgColor = new Color(0.15f, 0.16f, 0.20f),
-                CornerRadiusTopLeft = 8,
-                CornerRadiusTopRight = 8,
-                CornerRadiusBottomLeft = 8,
-                CornerRadiusBottomRight = 8,
-                ContentMarginTop = 10,
-                ContentMarginBottom = 10,
-                BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-                BorderColor = new Color(1, 1, 1, 0.08f),
-            };
-            var hover = (StyleBoxFlat)normal.Duplicate();
-            hover.BgColor = new Color(0.2f, 0.21f, 0.25f);
-            b.AddThemeStyleboxOverride("normal", normal);
-            b.AddThemeStyleboxOverride("hover", hover);
-            b.AddThemeStyleboxOverride("pressed", normal);
-            b.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        }
-        b.AddThemeFontSizeOverride("font_size", 15);
-        return b;
+        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 46) };
+        return primary ? Brand.Primary_(b) : Brand.Ghost_(b);
     }
 
     private static Button MakeWorldButton(string name, string desc, int capacity)

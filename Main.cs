@@ -52,6 +52,7 @@ public partial class Main : Node3D
     private PauseMenu _pauseMenu;
     private InWorldHud _inWorldHud;
     private ChatOverlay _chat;
+    private LoadingScreen _loading;
     private TouchControls _touch; // non-null on touchscreen (mobile) devices
     private readonly Dictionary<uint, string> _peerNames = new();
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
@@ -60,6 +61,9 @@ public partial class Main : Node3D
 
     public override void _Ready()
     {
+        // Apply the purple brand theme to every Control in the client at once.
+        GetTree().Root.Theme = Brand.Theme;
+
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
         Worlds.BuildCommons(_worldRoot); // backdrop behind the login screen
@@ -102,7 +106,30 @@ public partial class Main : Node3D
         AddChild(_chat);
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
+
+        _loading = new LoadingScreen { Name = "LoadingScreen", Visible = false };
+        AddChild(_loading);
+
+        // Dev aid: SERIKA_DEBUG_LOADING=1 shows the loading screen immediately (for screenshots).
+        if (OrDefault("SERIKA_DEBUG_LOADING", "") == "1")
+            ShowLoading("Connecting to The Commons…");
     }
+
+    /// Show the 3D loading screen with a status line during sign-in / connecting.
+    private void ShowLoading(string status)
+    {
+        _loading?.Present();
+        _loading?.SetStatus(status);
+        _hud?.SetStatus(status);
+    }
+
+    private void SetLoadingStatus(string status)
+    {
+        _loading?.SetStatus(status);
+        _hud?.SetStatus(status);
+    }
+
+    private void HideLoading() => _loading?.HideWithFade();
 
     // ── Text chat ─────────────────────────────────────────────────────────────────────
 
@@ -222,14 +249,14 @@ public partial class Main : Node3D
             _api = new ApiClient(ApiBaseUrl);
             var pkce = new PkceFlow();
 
-            _hud?.SetStatus("Opening your browser to sign in…");
+            ShowLoading("Opening your browser to sign in…");
             OS.ShellOpen(pkce.AuthorizeUrl(AccountsBaseUrl, ClientId));
             GD.Print("opened browser for login…");
 
-            _hud?.SetStatus("Waiting for you to sign in…");
+            SetLoadingStatus("Waiting for you to sign in…");
             string code = await pkce.WaitForCodeAsync(TimeSpan.FromMinutes(3));
 
-            _hud?.SetStatus("Signing in…");
+            SetLoadingStatus("Signing in…");
             var user = await _api.ExchangeAsync(code, pkce.Verifier);
             _username = user.GetProperty("username").GetString();
             GD.Print($"logged in as {_username}");
@@ -258,7 +285,7 @@ public partial class Main : Node3D
         if (_api == null) return;
         try
         {
-            _hud?.SetStatus("Finding a world…");
+            ShowLoading("Finding a world…");
             var worlds = await _api.GetWorldsAsync();
             await JoinWorldById(worlds[0].GetProperty("id").GetString());
         }
@@ -274,7 +301,7 @@ public partial class Main : Node3D
     {
         try
         {
-            _hud?.SetStatus("Joining world…");
+            ShowLoading("Joining world…");
             var joined = await _api.CreateInstanceAsync(worldId);
             string endpoint = joined.GetProperty("endpoint").GetString();
             string ticket = joined.GetProperty("ticket").GetString();
@@ -301,6 +328,7 @@ public partial class Main : Node3D
         if (_local == null) SpawnLocalPlayer();
         MoveLocalTo(_homeInfo.Spawn);
         _worldName = "Home";
+        HideLoading();
         _hud?.ShowHome(_username);
         _chat?.AddSystem("Welcome home. Press T to chat, V to change view, walk into the portal to travel.");
         MaybeStartTutorial();
@@ -369,7 +397,11 @@ public partial class Main : Node3D
         _remotes.Clear();
     }
 
-    private void ShowLoginError(string message) => _hud?.ShowError(message);
+    private void ShowLoginError(string message)
+    {
+        HideLoading();
+        _hud?.ShowError(message);
+    }
 
     // Turn raw exceptions into something a player can act on.
     private static string FriendlyError(Exception e)
@@ -389,7 +421,7 @@ public partial class Main : Node3D
     private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
     {
         _worldName = worldName;
-        _hud?.SetStatus($"Connecting to {worldName}…");
+        ShowLoading($"Connecting to {worldName}…");
         BuildCommonsWorld();
         SpawnLocalPlayer();
         MoveLocalTo(new Vector3(0, 1, 8));
@@ -422,6 +454,7 @@ public partial class Main : Node3D
         foreach (var p in peers) { SpawnRemote(p); _peerNames[p.PeerId] = p.Name; }
         int others = peers.Length;
         string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
+        HideLoading();
         _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
         _inWorld = true;
         _inWorldHud.SetWorld(_worldName);
