@@ -40,7 +40,9 @@ public sealed partial class AvatarInstance : Node3D
 
         var inst = new AvatarInstance { Meta = ska.Meta, Name = "Avatar" };
         inst._model = model;
-        // VRM 0.x faces +Z; rotate so the avatar faces Godot-forward (−Z).
+        // Face direction comes straight from the .ska metadata (faceYawDegrees), authored by
+        // the converter per source format. No client-side override — see the orientation notes
+        // in the header comment.
         model.RotationDegrees = new Vector3(0, ska.Meta.FaceYawDegrees, 0);
         inst.AddChild(model);
 
@@ -147,21 +149,30 @@ public sealed partial class AvatarInstance : Node3D
 
     private void SetupAnimation()
     {
+        // Only hand the rig to an embedded AnimationPlayer if it actually ships a locomotion
+        // or idle clip. Most VRM exports embed nothing useful (or a single bind/T-pose), and
+        // handing control to that leaves the avatar frozen in a T-pose — which is exactly what
+        // it did. When there's no real clip we drive the rig procedurally instead.
         _animPlayer = FindAnimPlayer(_model);
-        if (_animPlayer != null && _animPlayer.GetAnimationList().Length > 0)
+        if (_animPlayer != null)
         {
             string pick = null;
             foreach (string name in _animPlayer.GetAnimationList())
             {
-                if (name.Contains("idle", StringComparison.OrdinalIgnoreCase)) { pick = name; break; }
+                string n = name.ToLowerInvariant();
+                if (n.Contains("idle") || n.Contains("walk") || n.Contains("loco") ||
+                    n.Contains("run") || n.Contains("stand"))
+                { pick = name; break; }
             }
-            pick ??= _animPlayer.GetAnimationList()[0];
-            _animPlayer.GetAnimation(pick).LoopMode = Animation.LoopModeEnum.Linear;
-            _animPlayer.Play(pick);
-            return;
+            if (pick != null)
+            {
+                _animPlayer.GetAnimation(pick).LoopMode = Animation.LoopModeEnum.Linear;
+                _animPlayer.Play(pick);
+                return;
+            }
         }
 
-        // No clips — capture rest rotations for the procedural fallback.
+        // Procedural path — capture rest rotations as the baseline for our hand-authored motion.
         _animPlayer = null;
         if (Skeleton == null) return;
         foreach (string role in ProceduralRoles)
@@ -194,14 +205,24 @@ public sealed partial class AvatarInstance : Node3D
         float b = _moveBlend;
         float t = _idleTime;
         float eb = _emoteBlend;
+        float idle = 1f - Mathf.Min(b, 1f); // 1 while standing, 0 while moving
 
-        // Default walk/idle values.
+        // ── Walk cycle ──────────────────────────────────────────────────────────────
+        // Contralateral swing (opposite arm/leg), with the knee only bending on the back
+        // half of each step (heel-off → toe-off) so legs don't hyperextend forward. Arm
+        // swing lags the legs slightly for a more natural, less metronomic gait.
         float legSwing = Mathf.Sin(_walkPhase) * 0.55f * b;
-        float armSwing = Mathf.Sin(_walkPhase) * 0.4f * b;
-        float breathe = Mathf.Sin(t * 1.7f) * 0.025f * (1f - 0.5f * Mathf.Min(b, 1f));
-        float armIdle = Mathf.Sin(t * 1.3f) * 0.035f * (1f - Mathf.Min(b, 1f));
-        float lowerLegBend = Mathf.Max(0, -Mathf.Sin(_walkPhase)) * 0.6f * b;
-        float lowerArmBend = 0.3f + Mathf.Abs(Mathf.Sin(_walkPhase)) * 0.2f * b;
+        float armSwing = Mathf.Sin(_walkPhase - 0.35f) * 0.45f * b;
+        float lowerLegBend = Mathf.Max(0, -Mathf.Sin(_walkPhase)) * 0.7f * b;
+        float lowerArmBend = 0.28f + Mathf.Abs(Mathf.Sin(_walkPhase)) * 0.18f * b;
+
+        // ── Idle life ───────────────────────────────────────────────────────────────
+        // A frozen A-pose reads as dead. Layer three slow, out-of-phase motions that only
+        // exist while standing: chest breathing, a slow weight shift hip↔hip, and a small
+        // wandering head. Different frequencies keep them from looking like one pulse.
+        float breathe = Mathf.Sin(t * 1.7f) * 0.028f * (0.5f + 0.5f * idle);
+        float weightShift = Mathf.Sin(t * 0.8f) * idle;      // −1..1, slow
+        float armIdle = Mathf.Sin(t * 1.15f) * 0.04f * idle; // arms drift with breath
 
         // Airborne: tuck legs into a jump pose.
         if (!onFloor)
@@ -210,6 +231,7 @@ public sealed partial class AvatarInstance : Node3D
             lowerLegBend = 0.7f;
             armSwing = -0.3f;
             lowerArmBend = 0.5f;
+            weightShift = 0f;
         }
 
         // Apply emote poses (blended over walk/idle).
@@ -218,18 +240,33 @@ public sealed partial class AvatarInstance : Node3D
             ApplyEmote(eb, t, ref legSwing, ref armSwing, ref breathe, ref armIdle, ref lowerLegBend, ref lowerArmBend);
         }
 
+        // Weight-shift contribution: when standing on the left foot, the left knee softens
+        // and the hips roll toward that side. Only meaningful while idle (weightShift→0 moving).
+        float wl = Mathf.Max(0, weightShift);
+        float wr = Mathf.Max(0, -weightShift);
+
         Swing("leftUpperLeg", legSwing);
         Swing("rightUpperLeg", -legSwing);
-        Swing("leftLowerLeg", lowerLegBend);
-        Swing("rightLowerLeg", lowerLegBend);
-        Swing("leftUpperArm", -armSwing + armIdle);
-        Swing("rightUpperArm", armSwing + armIdle);
+        Swing("leftLowerLeg", lowerLegBend + wr * 0.10f);   // unloaded knee softens
+        Swing("rightLowerLeg", lowerLegBend + wl * 0.10f);
+        // Arms: the VRM bind pose is a T-pose, so the upper arms must first be rotated down to
+        // the sides (about the character's forward axis, mirrored per side) before the walk
+        // swing (about the side axis) is layered on. Without the down-rotation the avatar just
+        // stands there in a T. ArmRestAngle is the rest droop; tune if a model's arms clip.
+        ApplyArm("leftUpperArm", +1f, -armSwing + armIdle);
+        ApplyArm("rightUpperArm", -1f, armSwing + armIdle);
         Swing("leftLowerArm", lowerArmBend);
         Swing("rightLowerArm", lowerArmBend);
         Swing("chest", breathe);
         Swing("spine", breathe * 0.5f);
-        Swing("head", Mathf.Sin(t * 0.9f) * 0.02f * (1f - eb));
-        Swing("hips", Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b * (1f - eb));
+        // Head: gentle wander while idle, damped out during emotes.
+        SwingQuat("head",
+            new Quaternion(Vector3.Right, Mathf.Sin(t * 0.9f) * 0.025f * idle * (1f - eb)) *
+            new Quaternion(Vector3.Up, Mathf.Sin(t * 0.6f) * 0.05f * idle * (1f - eb)));
+        // Hips: bob with the walk, and roll side-to-side with the idle weight shift.
+        SwingQuat("hips",
+            new Quaternion(Vector3.Right, Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b * (1f - eb)) *
+            new Quaternion(Vector3.Forward, weightShift * 0.04f * (1f - eb)));
     }
 
     /// Override animation values for the active emote, blended by `eb` (0..1).
@@ -284,11 +321,26 @@ public sealed partial class AvatarInstance : Node3D
         }
     }
 
+    /// How far the upper arms droop from the T-pose bind toward the sides, in radians.
+    /// ~66°. Lower it if a model's arms punch into the torso, raise it if they float.
+    private const float ArmRestAngle = 1.15f;
+
     /// Rotate a bone forward/back about its parent's X axis, on top of its rest rotation.
     private void Swing(string role, float angle)
     {
         if (!_animBones.TryGetValue(role, out var ab)) return;
         Skeleton.SetBonePoseRotation(ab.Index, new Quaternion(Vector3.Right, angle) * ab.Rest);
+    }
+
+    /// Pose an upper arm: droop it down to the side (about the forward axis, `sideSign`
+    /// mirrors left/right) and layer the walk/idle swing (about the side axis) on top of the
+    /// rest rotation. This is what turns the T-pose bind into arms-at-sides.
+    private void ApplyArm(string role, float sideSign, float swing)
+    {
+        if (!_animBones.TryGetValue(role, out var ab)) return;
+        var down = new Quaternion(Vector3.Forward, sideSign * ArmRestAngle);
+        var fwd = new Quaternion(Vector3.Right, swing);
+        Skeleton.SetBonePoseRotation(ab.Index, down * fwd * ab.Rest);
     }
 
     /// Set a bone's rotation to an explicit quaternion (replaces rest rotation entirely).

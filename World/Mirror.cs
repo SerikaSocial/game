@@ -64,7 +64,11 @@ public partial class Mirror : Node3D
         };
         AddChild(_viewport);
 
-        _mirrorCam = new Camera3D { Current = false };
+        // Current must be TRUE: `Current` is per-viewport, so this only makes the camera the
+        // active one INSIDE the SubViewport (it never touches the main window's camera). With
+        // it false the SubViewport had no active camera and rendered nothing — the glass just
+        // showed the clear colour (a flat white plane, no reflection). This is the fix for that.
+        _mirrorCam = new Camera3D { Current = true };
         _viewport.AddChild(_mirrorCam);
 
         // The glass quad, textured with the viewport via the mirror shader.
@@ -74,10 +78,26 @@ public partial class Mirror : Node3D
             Position = new Vector3(0, _size.Y * 0.5f, 0),
         };
         var mirrorShader = ResourceLoader.Load<Shader>("res://Shaders/mirror.gdshader");
-        var mat = new ShaderMaterial { Shader = mirrorShader };
-        mat.SetShaderParameter("color", new Color(0.9f, 0.97f, 0.94f));
-        mat.SetShaderParameter("mirror_texture", _viewport.GetTexture());
-        _surface.MaterialOverride = mat;
+        if (mirrorShader != null)
+        {
+            var mat = new ShaderMaterial { Shader = mirrorShader };
+            mat.SetShaderParameter("color", new Color(0.9f, 0.97f, 0.94f));
+            mat.SetShaderParameter("mirror_texture", _viewport.GetTexture());
+            _surface.MaterialOverride = mat;
+        }
+        else
+        {
+            // The shader must be packed with the build (it is, via all_resources) — if this
+            // ever fires in an exported build it's a real regression, so make it loud and
+            // fall back to showing the raw reflection texture rather than a broken-pink quad.
+            GD.PrintErr("Mirror: res://Shaders/mirror.gdshader failed to load — using unshaded fallback");
+            _surface.MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoTexture = _viewport.GetTexture(),
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            };
+        }
         AddChild(_surface);
     }
 

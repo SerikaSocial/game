@@ -83,6 +83,35 @@ public sealed class ApiClient
         return null;
     }
 
+    /// List avatars the player can equip. `mine=false` returns the public/default catalogue
+    /// (no auth needed); `mine=true` returns the caller's own uploads. Returns the `avatars`
+    /// array, or an empty array on error.
+    public async Task<JsonElement> GetAvatarsAsync(bool mine)
+    {
+        try
+        {
+            var res = mine
+                ? await GetAuthedAsync("/v1/avatars/mine/list")
+                : await GetAsync("/v1/avatars/?limit=120");
+            if (res.TryGetProperty("avatars", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                return arr;
+        }
+        catch (Exception e) { GD.PrintErr($"avatar list failed: {e.Message}"); }
+        return JsonDocument.Parse("[]").RootElement;
+    }
+
+    /// Persist the caller's avatar choice server-side so it's worn on the next join too.
+    /// Throws on failure (not permitted, not found).
+    public async Task SelectAvatarAsync(string avatarId) =>
+        await PostAuthedAsync($"/v1/avatars/{avatarId}/select", "{}");
+
+    /// Fetch raw image bytes (avatar/world thumbnails). Returns null on error.
+    public async Task<byte[]> GetImageBytesAsync(string url)
+    {
+        try { return await _http.GetByteArrayAsync(url); }
+        catch { return null; }
+    }
+
     /// Download a .ska to a local path (user://), returning true on success.
     public async Task<bool> DownloadToAsync(string url, string absPath)
     {

@@ -134,6 +134,14 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         return _firstPerson;
     }
 
+    /// Zero all momentum. Called on respawn so a teleport doesn't carry fall speed or a
+    /// sprint into the new position (which would fling you right back off the map).
+    public void ResetMotion()
+    {
+        Velocity = Vector3.Zero;
+        PlayEmote(AvatarInstance.Emote.None);
+    }
+
     /// Trigger an emote animation on the equipped avatar (sit, dance, wave).
     public void PlayEmote(AvatarInstance.Emote emote)
     {

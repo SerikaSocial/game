@@ -51,6 +51,7 @@ public partial class Main : Node3D
 
     private Hud _hud;
     private PauseMenu _pauseMenu;
+    private AvatarSelector _avatarSelector;
     private InWorldHud _inWorldHud;
     private ChatOverlay _chat;
     private LoadingScreen _loading;
@@ -119,7 +120,23 @@ public partial class Main : Node3D
         _pauseMenu.HomePressed += EnterHome;
         _pauseMenu.WorldsPressed += () => { _pauseMenu.Hide(); OpenWorldList(); };
         _pauseMenu.QuitPressed += () => GetTree().Quit();
+        _pauseMenu.RespawnPressed += RespawnLocal;
+        _pauseMenu.CameraTogglePressed += () =>
+        {
+            if (_localDesktop == null) return;
+            bool fp = _localDesktop.ToggleCameraMode();
+            _persistThirdPerson = !fp;
+            _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
+        };
+        _pauseMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
+        _pauseMenu.CopyInvitePressed += CopyInviteLink;
+        _pauseMenu.AvatarsPressed += OpenAvatarSelector;
         _pauseMenu.Closed += OnPauseClosed;
+
+        _avatarSelector = new AvatarSelector { Name = "AvatarSelector" };
+        AddChild(_avatarSelector);
+        _avatarSelector.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
+        _avatarSelector.Closed += OnAvatarSelectorClosed;
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddChild(_inWorldHud);
@@ -313,6 +330,7 @@ public partial class Main : Node3D
             SetLoadingStatus("Signing in…");
             var user = await _api.ExchangeAsync(code, pkce.Verifier);
             _username = user.GetProperty("username").GetString();
+            _currentAvatarId = ReadCurrentAvatarId(user);
             GD.Print($"logged in as {_username}");
 
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
@@ -347,6 +365,7 @@ public partial class Main : Node3D
             ShowLoading("Signing in…");
             var user = await _api.LoginWithEmailAsync(email, password);
             _username = user.GetProperty("username").GetString();
+            _currentAvatarId = ReadCurrentAvatarId(user);
             GD.Print($"logged in as {_username} (email)");
 
             SetLoadingStatus("Loading your avatar…");
@@ -388,8 +407,13 @@ public partial class Main : Node3D
 
     /// Create/join an instance of a specific world and connect to its relay.
     /// Downloads the world file first if a downloadUrl is available (VRChat-style caching).
+    /// The id of the multiplayer world we're currently in, for building invite deep links.
+    /// Null while in Home (single-player, nothing to invite to).
+    private string _currentWorldId;
+
     private async Task JoinWorldById(string worldId)
     {
+        _currentWorldId = worldId;
         try
         {
             // Check if we have a downloadUrl for this world and download it if not cached.
@@ -425,6 +449,7 @@ public partial class Main : Node3D
     {
         _inHome = true;
         _inWorld = false;
+        _currentWorldId = null;
         TeardownRemotes();
         _transport?.Disconnect();
         _transport = null;
@@ -465,10 +490,123 @@ public partial class Main : Node3D
             Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    /// Teleport the local player (works for both desktop and VR rigs).
+    /// Where the local player last spawned in the current world — the target for respawn.
+    private Vector3 _spawnPos = new(0, 1, 0);
+
+    /// Teleport the local player (works for both desktop and VR rigs). Records the position
+    /// as the current spawn so "Respawn" returns here.
     private void MoveLocalTo(Vector3 pos)
     {
+        _spawnPos = pos;
         if (_localNode is Node3D n) n.GlobalPosition = pos;
+    }
+
+    /// Return the local player to the current world's spawn point and kill any momentum —
+    /// the "unstick me" button for falling through geometry, getting wedged, or flung by
+    /// physics. Works in Home and multiplayer alike (ownership means the relay just sees us
+    /// move, no special-casing needed).
+    private void RespawnLocal()
+    {
+        if (_localNode is Node3D n)
+        {
+            n.GlobalPosition = _spawnPos;
+            if (_localDesktop != null) _localDesktop.ResetMotion();
+        }
+        _inWorldHud?.Toast("Respawned", 2);
+    }
+
+    /// Copy a shareable deep link to the current multiplayer world onto the clipboard, so a
+    /// friend can paste it and their client (via the serikasocial:// handler) joins here.
+    private void CopyInviteLink()
+    {
+        if (string.IsNullOrEmpty(_currentWorldId))
+        {
+            _inWorldHud?.Toast("No world to invite to", 2);
+            return;
+        }
+        DisplayServer.ClipboardSet($"serikasocial://world/{_currentWorldId}");
+        _inWorldHud?.Toast("Invite link copied to clipboard", 3);
+    }
+
+    // ── Avatar selector ───────────────────────────────────────────────────────────────
+
+    /// The id of the avatar the player currently wears (from login / after equipping), so the
+    /// selector can mark it and skip re-equipping it.
+    private string _currentAvatarId;
+
+    private void OpenAvatarSelector()
+    {
+        if (_api == null || _avatarSelector == null) return;
+        _pauseMenu?.Hide();
+        _avatarSelector.Configure(_api, _currentAvatarId);
+        _avatarSelector.Open();
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+    }
+
+    private void OnAvatarSelectorClosed()
+    {
+        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false })
+            _localDesktop.ControlsEnabled = true;
+        if (!DisplayServer.GetName().Equals("headless"))
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+    }
+
+    /// Download the chosen avatar, swap the live rig, and persist the choice server-side.
+    /// Each avatar is cached under its own `user://avatars/<id>.ska` so re-equipping a
+    /// previously worn one is instant and never collides with AvatarLibrary's path cache.
+    private async Task EquipAvatar(string id, string downloadUrl, string name)
+    {
+        try
+        {
+            _inWorldHud?.Toast($"Equipping {name}…", 2);
+            DirAccess.MakeDirRecursiveAbsolute("user://avatars");
+            string rel = $"user://avatars/{SanitizeId(id)}.ska";
+            string abs = ProjectSettings.GlobalizePath(rel);
+
+            if (!System.IO.File.Exists(abs) && !await _api.DownloadToAsync(downloadUrl, abs))
+            {
+                _inWorldHud?.Toast("Couldn't download that avatar", 3);
+                return;
+            }
+
+            var avatar = AvatarLibrary.Instantiate(rel);
+            if (avatar == null)
+            {
+                _inWorldHud?.Toast("That avatar couldn't be loaded", 3);
+                return;
+            }
+
+            _localAvatarPath = rel;
+            _currentAvatarId = id;
+            _localDesktop?.SetAvatar(avatar);
+
+            // Persist so it's worn on the next join and by remotes after they resync.
+            try { await _api.SelectAvatarAsync(id); }
+            catch (Exception e) { GD.PrintErr($"avatar select persist failed: {e.Message}"); }
+
+            _inWorldHud?.Toast($"Now wearing {name}", 3);
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"equip failed: {e.Message}");
+            _inWorldHud?.Toast("Couldn't equip that avatar", 3);
+        }
+    }
+
+    /// Pull the user's chosen avatar id out of the login response, or null if none set.
+    private static string ReadCurrentAvatarId(System.Text.Json.JsonElement user) =>
+        user.TryGetProperty("currentAvatarId", out var v)
+        && v.ValueKind == System.Text.Json.JsonValueKind.String
+            ? v.GetString()
+            : null;
+
+    /// Keep avatar ids to filename-safe characters before using one as a path component.
+    private static string SanitizeId(string id)
+    {
+        var sb = new System.Text.StringBuilder(id.Length);
+        foreach (char c in id)
+            sb.Append(char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_');
+        return sb.Length == 0 ? "current" : sb.ToString();
     }
 
     private bool _tutorialShown;
@@ -649,13 +787,17 @@ public partial class Main : Node3D
         _micActive = !_micActive;
         if (_micActive) _voice.StartRecording();
         else _voice.StopRecording();
+        _inWorldHud?.SetMicEnabled(_micActive);
+        if (!_micActive) _inWorldHud?.SetMicLevel(0f);
         _inWorldHud?.Toast(_micActive ? "Microphone ON" : "Microphone OFF");
     }
 
     private void OnVoiceFrameReady(byte[] pcm)
     {
+        byte rms = ComputeRms(pcm);
+        _inWorldHud?.SetMicLevel(rms / 255f); // drive the bottom-left mic pulse from live capture
         if (_transport is not { Connected_: true }) return;
-        var frame = new VoiceFrame { Sequence = 0, Rms = ComputeRms(pcm), Payload = pcm };
+        var frame = new VoiceFrame { Sequence = 0, Rms = rms, Payload = pcm };
         _transport.SendVoice(frame);
     }
 

@@ -1,0 +1,11 @@
+# Third-party addons (phantom_camera, dialogue_manager, etc.) are vendored as-is. We don't
+# want their warnings in our build, and we must not edit their sources (lost on update), so
+# silence the diagnostics they trip here — scoped to addons/ only, our own code stays strict.
+[*.cs]
+# Nullable reference warnings from vendored code.
+dotnet_diagnostic.CS8601.severity = none
+dotnet_diagnostic.CS8602.severity = none
+dotnet_diagnostic.CS8604.severity = none
+# Unused private fields declared by the addon.
+dotnet_diagnostic.CS0169.severity = none
+dotnet_diagnostic.CS0414.severity = none

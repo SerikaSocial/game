@@ -1,10 +1,12 @@
 using System;
 using Godot;
+using SerikaSocial.Avatar;
 
 namespace SerikaSocial;
 
-/// A pause/settings overlay shown when the player presses Escape in-world. Provides mouse
-/// sensitivity, master volume, name tag visibility, and disconnect/quit actions.
+/// A pause/settings overlay shown when the player presses Escape in-world. Provides world
+/// actions (respawn, emotes, camera, invite), mouse sensitivity, master volume, name tag
+/// visibility, and disconnect/quit actions.
 /// Built in code to match the rest of the client's programmatic UI style.
 public partial class PauseMenu : CanvasLayer
 {
@@ -12,6 +14,14 @@ public partial class PauseMenu : CanvasLayer
     public event Action HomePressed;
     public event Action WorldsPressed;
     public event Action QuitPressed;
+    public event Action RespawnPressed;
+    public event Action CameraTogglePressed;
+    public event Action CopyInvitePressed;
+    public event Action AvatarsPressed;
+    public event Action<AvatarInstance.Emote> EmotePressed;
+
+    private Label _worldActionsLabel;
+    private Button _copyInviteButton;
 
     private ColorRect _scrim;
     private Panel _card;
@@ -45,15 +55,15 @@ public partial class PauseMenu : CanvasLayer
 
         _card = new Panel
         {
-            CustomMinimumSize = new Vector2(500, 600),
+            CustomMinimumSize = new Vector2(520, 760),
             AnchorLeft = 0.5f,
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -250,
-            OffsetTop = -300,
-            OffsetRight = 250,
-            OffsetBottom = 300,
+            OffsetLeft = -260,
+            OffsetTop = -380,
+            OffsetRight = 260,
+            OffsetBottom = 380,
             Visible = false,
         };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
@@ -88,6 +98,46 @@ public partial class PauseMenu : CanvasLayer
         hints.AddThemeFontSizeOverride("font_size", 12);
         hints.AddThemeColorOverride("font_color", new Color(0.55f, 0.6f, 0.7f));
         vbox.AddChild(hints);
+
+        vbox.AddChild(new HSeparator());
+
+        // ── World actions ─────────────────────────────────────────────────────────────
+        _worldActionsLabel = new Label { Text = "World" };
+        _worldActionsLabel.AddThemeFontSizeOverride("font_size", 13);
+        _worldActionsLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(_worldActionsLabel);
+
+        // Respawn + camera on one row.
+        var actionRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        actionRow.AddThemeConstantOverride("separation", 10);
+        vbox.AddChild(actionRow);
+
+        var respawnButton = MakeButton("⟲ Respawn", false);
+        respawnButton.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        respawnButton.Pressed += () => { Hide(); RespawnPressed?.Invoke(); };
+        actionRow.AddChild(respawnButton);
+
+        var cameraButton = MakeButton("Camera (V)", false);
+        cameraButton.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        cameraButton.Pressed += () => CameraTogglePressed?.Invoke();
+        actionRow.AddChild(cameraButton);
+
+        // Emotes row.
+        var emoteRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        emoteRow.AddThemeConstantOverride("separation", 10);
+        vbox.AddChild(emoteRow);
+        AddEmoteButton(emoteRow, "🧍 Sit", AvatarInstance.Emote.Sit);
+        AddEmoteButton(emoteRow, "💃 Dance", AvatarInstance.Emote.Dance);
+        AddEmoteButton(emoteRow, "👋 Wave", AvatarInstance.Emote.Wave);
+
+        var avatarsButton = MakeButton("Change avatar…", false);
+        avatarsButton.Pressed += () => AvatarsPressed?.Invoke();
+        vbox.AddChild(avatarsButton);
+
+        // Copy invite link — only meaningful in a multiplayer world.
+        _copyInviteButton = MakeButton("Copy invite link", false);
+        _copyInviteButton.Pressed += () => CopyInvitePressed?.Invoke();
+        vbox.AddChild(_copyInviteButton);
 
         vbox.AddChild(new HSeparator());
 
@@ -175,12 +225,21 @@ public partial class PauseMenu : CanvasLayer
     }
 
     /// Open the menu. `worldName` shows under the title; when the player is already Home the
-    /// "Return to Home" button is pointless and hidden.
+    /// "Return to Home" button and the invite link (single-player Home has no invite) are hidden.
     public void ShowMenu(string worldName, bool alreadyHome)
     {
         _worldLabel.Text = string.IsNullOrEmpty(worldName) ? "" : $"in {worldName}";
         _homeButton.Visible = !alreadyHome;
+        _copyInviteButton.Visible = !alreadyHome;
         Show();
+    }
+
+    private void AddEmoteButton(HBoxContainer row, string text, AvatarInstance.Emote emote)
+    {
+        var b = MakeButton(text, false);
+        b.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        b.Pressed += () => { Hide(); EmotePressed?.Invoke(emote); };
+        row.AddChild(b);
     }
 
     public new void Show()
