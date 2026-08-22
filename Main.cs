@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using Serika.Auth;
@@ -61,6 +62,7 @@ public partial class Main : Node3D
     private SpatialAudioManager _audio;
     private VoiceManager _voice;
     private bool _micActive;
+    private Updater _updater;
 
     public override void _Ready()
     {
@@ -103,6 +105,13 @@ public partial class Main : Node3D
         _hud.JoinWorldPressed += (worldId) => _ = JoinWorldById(worldId);
         _hud.WorldListClosed += CloseWorldList;
         _hud.ShowLogin();
+
+        // Auto-updater: check CDN for a newer version. Non-blocking — runs in the
+        // background and shows a dialog only if an update is available.
+        _updater = new Updater { Name = "Updater" };
+        AddChild(_updater);
+        _updater.CurrentVersion = Hud.ClientVersion;
+        _updater.CheckForUpdates();
 
         _pauseMenu = new PauseMenu { Name = "PauseMenu" };
         AddChild(_pauseMenu);
@@ -374,10 +383,24 @@ public partial class Main : Node3D
     }
 
     /// Create/join an instance of a specific world and connect to its relay.
+    /// Downloads the world file first if a downloadUrl is available (VRChat-style caching).
     private async Task JoinWorldById(string worldId)
     {
         try
         {
+            // Check if we have a downloadUrl for this world and download it if not cached.
+            if (_fetchedWorlds != null)
+            {
+                var match = _fetchedWorlds.Find(w => w.id == worldId);
+                if (match.downloadUrl != null)
+                {
+                    ShowLoading("Downloading world…");
+                    string localPath = await _api.DownloadWorldAsync(match.downloadUrl, worldId);
+                    if (localPath != null)
+                        GD.Print($"world cached at {localPath}");
+                }
+            }
+
             ShowLoading("Joining world…");
             var joined = await _api.CreateInstanceAsync(worldId);
             string endpoint = joined.GetProperty("endpoint").GetString();
@@ -485,7 +508,7 @@ public partial class Main : Node3D
         Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    private List<(string id, string name, string description, int capacity)> _fetchedWorlds;
+    private List<(string id, string name, string description, int capacity, string author, string downloadUrl)> _fetchedWorlds;
 
     private async Task PopulateWorldList()
     {
@@ -493,14 +516,16 @@ public partial class Main : Node3D
         try
         {
             var worlds = await _api.GetWorldsAsync();
-            var list = new List<(string id, string name, string description, int capacity)>();
+            var list = new List<(string id, string name, string description, int capacity, string author, string downloadUrl)>();
             foreach (var w in worlds.EnumerateArray())
             {
                 string id = w.GetProperty("id").GetString();
                 string name = w.GetProperty("name").GetString();
                 string desc = w.TryGetProperty("description", out var d) ? d.GetString() : "";
                 int cap = w.TryGetProperty("capacity", out var c) ? c.GetInt32() : 32;
-                list.Add((id, name, desc ?? "", cap));
+                string author = w.TryGetProperty("author", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null;
+                string dlUrl = w.TryGetProperty("downloadUrl", out var dl) && dl.ValueKind == JsonValueKind.String ? dl.GetString() : null;
+                list.Add((id, name, desc ?? "", cap, author, dlUrl));
             }
             _fetchedWorlds = list;
             CallDeferred(nameof(OnWorldsFetched));

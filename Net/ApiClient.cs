@@ -3,6 +3,8 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Godot;
+using HttpClient = System.Net.Http.HttpClient;
 
 namespace Serika.Net;
 
@@ -45,6 +47,21 @@ public sealed class ApiClient
 
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
+
+    /// Download a world file (.skw) to a local path under user://, returning the absolute path.
+    /// Returns null on failure.
+    public async Task<string> DownloadWorldAsync(string url, string worldId)
+    {
+        try
+        {
+            DirAccess.MakeDirRecursiveAbsolute("user://worlds");
+            string abs = ProjectSettings.GlobalizePath($"user://worlds/{worldId}.skw");
+            if (await DownloadToAsync(url, abs))
+                return abs;
+        }
+        catch (Exception e) { GD.PrintErr($"world download failed: {e.Message}"); }
+        return null;
+    }
 
     /// Fetch the WebRTC ICE server list (STUN + TURN) for a P2P instance. Authed, since TURN
     /// credentials are per-user and short-lived.

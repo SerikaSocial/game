@@ -20,7 +20,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.3.3";
+    public const string ClientVersion = "0.3.3";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -325,7 +325,7 @@ public partial class Hud : CanvasLayer
         return primary ? Brand.Primary_(b) : Brand.Ghost_(b);
     }
 
-    private static Button MakeWorldButton(string name, string desc, int capacity)
+    private static Button MakeWorldButton(string name, string desc, int capacity, string author = null)
     {
         var btn = new Button
         {
@@ -350,7 +350,9 @@ public partial class Hud : CanvasLayer
         btn.AddThemeStyleboxOverride("pressed", normal);
         btn.AddThemeColorOverride("font_color", new Color(0.9f, 0.92f, 0.95f));
         btn.AddThemeFontSizeOverride("font_size", 15);
-        btn.Text = $"{name}    [capacity: {capacity}]";
+        btn.Text = author != null
+            ? $"{name}  by {author}  [{capacity}]"
+            : $"{name}    [capacity: {capacity}]";
         btn.TooltipText = desc;
         return btn;
     }
@@ -442,7 +444,7 @@ public partial class Hud : CanvasLayer
     }
 
     /// Populate the world list in the Home panel. Each entry is a button that fires JoinWorldPressed.
-    public void SetWorlds(List<(string id, string name, string description, int capacity)> worlds)
+    public void SetWorlds(List<(string id, string name, string description, int capacity, string author, string downloadUrl)> worlds)
     {
         if (_worldListContainer == null) return;
         foreach (var child in _worldListContainer.GetChildren())
@@ -463,7 +465,7 @@ public partial class Hud : CanvasLayer
 
         foreach (var w in worlds)
         {
-            var btn = MakeWorldButton(w.name, w.description, w.capacity);
+            var btn = MakeWorldButton(w.name, w.description, w.capacity, w.author);
             var id = w.id;
             btn.Pressed += () => JoinWorldPressed?.Invoke(id);
             _worldListContainer.AddChild(btn);
