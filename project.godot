@@ -1,41 +1,42 @@
-; Serika Social — Godot 4.7 client. See README.md.
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
 config_version=5
 
 [application]
 
 config/name="Serika Social"
-config/version="0.3.2"
+config/version="0.3.3"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
-; Custom "made by Serika.dev" splash on a deep-violet background — replaces the Godot logo.
-boot_splash/bg_color=Color(0.055, 0.04, 0.10, 1)
-boot_splash/show_image=true
+boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
+boot_splash/stretch_mode=0
 boot_splash/image="res://Assets/splash.png"
-boot_splash/fullsize=false
-boot_splash/use_filter=true
+
+[dialogue_manager]
+
+runtime/advanced/uses_dotnet=true
+
+[display]
+
+window/size/viewport_width=1920
+window/size/viewport_height=1080
+window/size/mode=3
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [dotnet]
 
 project/assembly_name="SerikaSocial"
 
-[physics]
+[editor_plugins]
 
-3d/physics_engine="Jolt Physics"
-
-[rendering]
-
-renderer/rendering_method="forward_plus"
-renderer/rendering_method.mobile="forward_plus"
-textures/vram_compression/import_etc2_astc=true
-
-[xr]
-
-openxr/enabled=true
-openxr/default_action_map="res://xr_actions.json"
-openxr/form_factor="handheld"
-openxr/view_configuration="1"
-openxr/reference_space="local"
-openxr/submit_depth_buffer=true
+enabled=PackedStringArray("dialogue_manager", "phantom_camera", "Color grading")
 
 [input]
 
@@ -79,3 +80,24 @@ jump={
 "events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":32,"physical_keycode":0,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
 ]
 }
+
+[internationalization]
+
+locale/translations_pot_files=PackedStringArray("res://Dialogue/tutorial_vr.dialogue", "res://Dialogue/tutorial_desktop.dialogue", "res://Dialogue/tutorial_mobile.dialogue")
+
+[physics]
+
+3d/physics_engine="Jolt Physics"
+
+[rendering]
+
+renderer/rendering_method.mobile="forward_plus"
+textures/vram_compression/import_etc2_astc=true
+
+[xr]
+
+openxr/enabled=true
+openxr/default_action_map="res://xr_actions.json"
+openxr/form_factor="handheld"
+openxr/reference_space="local"
+openxr/submit_depth_buffer=true

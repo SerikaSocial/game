@@ -5,6 +5,7 @@ using Godot;
 using Serika.Auth;
 using Serika.Net;
 using Serika.Net.Codec;
+using SerikaSocial.Audio;
 using SerikaSocial.Avatar;
 using SerikaSocial.Player;
 using SerikaSocial.World;
@@ -57,6 +58,9 @@ public partial class Main : Node3D
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
     private bool _inHome;
     private bool _inWorld;
+    private SpatialAudioManager _audio;
+    private VoiceManager _voice;
+    private bool _micActive;
 
     public override void _Ready()
     {
@@ -65,6 +69,11 @@ public partial class Main : Node3D
 
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
+        _audio = new SpatialAudioManager { Name = "SpatialAudio" };
+        AddChild(_audio);
+        _voice = new VoiceManager { Name = "VoiceManager" };
+        AddChild(_voice);
+        _voice.VoiceFrameReady += OnVoiceFrameReady;
         Worlds.BuildCommons(_worldRoot); // backdrop behind the login screen
 
         var args = ParseArgs();
@@ -87,6 +96,7 @@ public partial class Main : Node3D
         _hud = new Hud { Name = "Hud" };
         AddChild(_hud);
         _hud.LoginPressed += () => _ = LoginThenRoute();
+        _hud.EmailLoginPressed += (email, pass) => _ = LoginWithEmailRoute(email, pass);
         _hud.RetryPressed += () => _ = LoginThenRoute();
         _hud.HomePressed += EnterHome;
         _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
@@ -175,6 +185,7 @@ public partial class Main : Node3D
     /// Swap the active world geometry: free the old root, build the new space into a fresh one.
     private void SwapWorld(System.Action<Node3D> build)
     {
+        _audio?.StopAllAmbient();
         _worldRoot?.QueueFree();
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
@@ -313,6 +324,38 @@ public partial class Main : Node3D
         }
     }
 
+    /// Sign in with email+password (no browser required), then route the same as PKCE.
+    private async Task LoginWithEmailRoute(string email, string password)
+    {
+        try
+        {
+            _api = new ApiClient(ApiBaseUrl);
+
+            ShowLoading("Signing in…");
+            var user = await _api.LoginWithEmailAsync(email, password);
+            _username = user.GetProperty("username").GetString();
+            GD.Print($"logged in as {_username} (email)");
+
+            SetLoadingStatus("Loading your avatar…");
+            await FetchCurrentAvatar();
+
+            if (_pendingIntent.Kind == DeepLink.Kind.World)
+            {
+                await JoinWorldById(_pendingIntent.Arg);
+                _pendingIntent = DeepLink.Intent.None;
+            }
+            else
+            {
+                CallDeferred(nameof(EnterHome));
+            }
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"email login failed: {e.Message}");
+            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
+        }
+    }
+
     /// Join the built-in default world (the multiplayer commons) from within Home.
     private async Task JoinDefaultWorld()
     {
@@ -403,21 +446,43 @@ public partial class Main : Node3D
 
     private bool _tutorialShown;
 
-    /// Show the first-time tutorial once. Frees the mouse and suspends controls while it's up.
+    /// Show the first-time tutorial once via Dialogue Manager. Frees the mouse and suspends
+    /// controls while the dialogue balloon is up. Loads a platform-specific dialogue file.
     private void MaybeStartTutorial()
     {
         if (_tutorialShown || _smoke || Tutorial.AlreadySeen()) return;
         _tutorialShown = true;
 
-        var tut = new Tutorial { Name = "Tutorial" };
-        AddChild(tut);
         if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
         Input.MouseMode = Input.MouseModeEnum.Visible;
-        tut.Completed += () =>
+
+        string dialoguePath;
+        if (_vrMode)
+            dialoguePath = "res://Dialogue/tutorial_vr.dialogue";
+        else if (DisplayServer.IsTouchscreenAvailable())
+            dialoguePath = "res://Dialogue/tutorial_mobile.dialogue";
+        else
+            dialoguePath = "res://Dialogue/tutorial_desktop.dialogue";
+
+        var dialogueRes = ResourceLoader.Load<Resource>(dialoguePath);
+        if (dialogueRes == null)
         {
+            GD.PrintErr($"tutorial dialogue not found at {dialoguePath} — skipping tutorial");
             if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
             Input.MouseMode = Input.MouseModeEnum.Captured;
-        };
+            return;
+        }
+
+        DialogueManagerRuntime.DialogueManager.DialogueEnded += OnTutorialEnded;
+        DialogueManagerRuntime.DialogueManager.ShowExampleDialogueBalloon(dialogueRes, "tutorial_start");
+    }
+
+    private void OnTutorialEnded(Resource _)
+    {
+        DialogueManagerRuntime.DialogueManager.DialogueEnded -= OnTutorialEnded;
+        Tutorial.MarkSeen();
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
+        Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
     private List<(string id, string name, string description, int capacity)> _fetchedWorlds;
@@ -497,6 +562,7 @@ public partial class Main : Node3D
         udp.PeerLeft += OnPeerLeft;
         udp.PoseReceived += OnPoseReceived;
         udp.ChatReceived += OnChatReceived;
+        udp.VoiceReceived += OnVoiceReceived;
         udp.Rejected += reason =>
         {
             GD.PrintErr($"relay rejected us: {reason}");
@@ -545,6 +611,49 @@ public partial class Main : Node3D
     {
         if (_remotes.TryGetValue(peerId, out var a)) a.ApplyPose(frame);
         if (_smoke) GD.Print($"SMOKE pose_from {peerId} seq={frame.Sequence}");
+    }
+
+    // ── Voice chat ────────────────────────────────────────────────────────────────────
+
+    private void ToggleMic()
+    {
+        _micActive = !_micActive;
+        if (_micActive) _voice.StartRecording();
+        else _voice.StopRecording();
+        _inWorldHud?.Toast(_micActive ? "Microphone ON" : "Microphone OFF");
+    }
+
+    private void OnVoiceFrameReady(byte[] pcm)
+    {
+        if (_transport is not { Connected_: true }) return;
+        var frame = new VoiceFrame { Sequence = 0, Rms = ComputeRms(pcm), Payload = pcm };
+        _transport.SendVoice(frame);
+    }
+
+    private void OnVoiceReceived(uint peerId, VoiceFrame frame)
+    {
+        if (!_remotes.TryGetValue(peerId, out var avatar)) return;
+        var player = avatar.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer");
+        if (player == null)
+        {
+            player = new AudioStreamPlayer3D { Name = "VoicePlayer", MaxDistance = 15f, UnitSize = 8f };
+            avatar.AddChild(player);
+        }
+        _voice.PlayFrame(player, frame.Payload);
+    }
+
+    private static byte ComputeRms(byte[] pcm)
+    {
+        long sum = 0;
+        int samples = pcm.Length / 2;
+        for (int i = 0; i < samples; i++)
+        {
+            short s = (short)(pcm[i * 2] | (pcm[i * 2 + 1] << 8));
+            sum += (long)s * s;
+        }
+        if (samples == 0) return 0;
+        double rms = System.Math.Sqrt((double)sum / samples) / 32767.0;
+        return (byte)System.Math.Clamp(rms * 255, 0, 255);
     }
 
     private void SpawnRemote(PeerInfo p)
@@ -596,6 +705,14 @@ public partial class Main : Node3D
             && (_inWorld || _inHome) && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
         {
             OpenChat();
+            GetViewport().SetInputAsHandled();
+        }
+
+        // M toggles the microphone (push-to-talk toggle).
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.M }
+            && (_inWorld || _inHome) && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
+        {
+            ToggleMic();
             GetViewport().SetInputAsHandled();
         }
     }

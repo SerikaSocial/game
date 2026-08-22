@@ -30,6 +30,19 @@ public sealed class ApiClient
         return json.GetProperty("user");
     }
 
+    /// Login with email+password (no browser required). Returns the user object, or throws.
+    public async Task<JsonElement> LoginWithEmailAsync(string email, string password)
+    {
+        var body = JsonSerializer.Serialize(new { email, password });
+        var res = await _http.PostAsync($"{_baseUrl}/v1/session/login",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        if (!res.IsSuccessStatusCode)
+            throw new InvalidOperationException(json.TryGetProperty("error", out var e) ? e.GetString() : "login_failed");
+        SessionToken = json.GetProperty("session_token").GetString();
+        return json.GetProperty("user");
+    }
+
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
 

@@ -30,6 +30,12 @@ public partial class Tutorial : CanvasLayer
 
     public static bool AlreadySeen() => FileAccess.FileExists(SeenPath);
 
+    public static void MarkSeen()
+    {
+        using (var f = FileAccess.Open(SeenPath, FileAccess.ModeFlags.Write))
+            f?.StoreString("seen");
+    }
+
     public override void _Ready()
     {
         Layer = 120; // above every other overlay so its buttons are always clickable

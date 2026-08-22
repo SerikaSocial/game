@@ -13,20 +13,24 @@ namespace SerikaSocial;
 public partial class Hud : CanvasLayer
 {
     public event Action LoginPressed;
+    public event Action<string, string> EmailLoginPressed;
     public event Action RetryPressed;
     public event Action HomePressed;
     public event Action JoinCommonsPressed;
     public event Action<string> JoinWorldPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.3.2";
+    private const string ClientVersion = "0.3.3";
 
     private ColorRect _scrim;
-    private Panel _card;
+    private Control _loginScreen;
     private Label _title;
     private Label _subtitle;
     private Label _status;
-    private Button _loginButton;
+    private LineEdit _emailInput;
+    private LineEdit _passwordInput;
+    private Button _emailLoginButton;
+    private Button _browserLoginButton;
     private Button _retryButton;
     private Button _quitButton;
     private Control _spinner;
@@ -44,60 +48,106 @@ public partial class Hud : CanvasLayer
     {
         Layer = 100;
 
+        // Fullscreen gradient backdrop — no small card, the whole screen IS the login.
         _scrim = new ColorRect
         {
-            Color = new Color(Brand.Bg0.R, Brand.Bg0.G, Brand.Bg0.B, 0.92f),
+            Color = new Color(Brand.Bg0.R, Brand.Bg0.G, Brand.Bg0.B, 0.96f),
             AnchorRight = 1,
             AnchorBottom = 1,
         };
         AddChild(_scrim);
 
-        _card = new Panel
+        // Login screen container — fullscreen, content centered via anchors.
+        _loginScreen = new Control
         {
-            CustomMinimumSize = new Vector2(480, 340),
+            AnchorRight = 1,
+            AnchorBottom = 1,
+            Visible = true,
+        };
+        AddChild(_loginScreen);
+
+        // Centered content panel (scales with viewport via anchor centering).
+        var content = new VBoxContainer
+        {
             AnchorLeft = 0.5f,
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -240,
-            OffsetTop = -170,
-            OffsetRight = 240,
-            OffsetBottom = 170,
+            OffsetLeft = -260,
+            OffsetTop = -280,
+            OffsetRight = 260,
+            OffsetBottom = 280,
         };
-        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
-        AddChild(_card);
-
-        var vbox = new VBoxContainer
-        {
-            AnchorRight = 1,
-            AnchorBottom = 1,
-            OffsetLeft = 36,
-            OffsetTop = 36,
-            OffsetRight = -36,
-            OffsetBottom = -36,
-        };
-        vbox.AddThemeConstantOverride("separation", 12);
-        _card.AddChild(vbox);
+        content.AddThemeConstantOverride("separation", 14);
+        _loginScreen.AddChild(content);
 
         _title = new Label { Text = "Serika Social", HorizontalAlignment = HorizontalAlignment.Center };
-        _title.AddThemeFontSizeOverride("font_size", 28);
-        _title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
-        vbox.AddChild(_title);
+        _title.AddThemeFontSizeOverride("font_size", 36);
+        _title.AddThemeColorOverride("font_color", Brand.TextHi);
+        content.AddChild(_title);
 
         _subtitle = new Label
         {
             Text = "Social VR for everyone",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _subtitle.AddThemeFontSizeOverride("font_size", 14);
-        _subtitle.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
-        vbox.AddChild(_subtitle);
+        _subtitle.AddThemeFontSizeOverride("font_size", 16);
+        _subtitle.AddThemeColorOverride("font_color", Brand.TextDim);
+        content.AddChild(_subtitle);
 
-        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 12) });
+        content.AddChild(new Control { CustomMinimumSize = new Vector2(0, 16) });
+
+        // Email field
+        _emailInput = new LineEdit
+        {
+            PlaceholderText = "Email",
+            CustomMinimumSize = new Vector2(0, 44),
+        };
+        _emailInput.AddThemeFontSizeOverride("font_size", 16);
+        content.AddChild(_emailInput);
+
+        // Password field
+        _passwordInput = new LineEdit
+        {
+            PlaceholderText = "Password",
+            Secret = true,
+            CustomMinimumSize = new Vector2(0, 44),
+        };
+        _passwordInput.AddThemeFontSizeOverride("font_size", 16);
+        content.AddChild(_passwordInput);
+
+        content.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
+
+        // Email login button
+        _emailLoginButton = MakeButton("Sign in", true);
+        _emailLoginButton.Pressed += () =>
+        {
+            var email = _emailInput.Text.Trim();
+            var pass = _passwordInput.Text;
+            if (string.IsNullOrEmpty(email) || string.IsNullOrEmpty(pass)) return;
+            EmailLoginPressed?.Invoke(email, pass);
+        };
+        content.AddChild(_emailLoginButton);
+
+        // Divider
+        var dividerRow = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
+        dividerRow.AddThemeConstantOverride("separation", 8);
+        content.AddChild(dividerRow);
+        var dividerLabel = new Label { Text = "— or —" };
+        dividerLabel.AddThemeFontSizeOverride("font_size", 13);
+        dividerLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        dividerRow.AddChild(dividerLabel);
+
+        // Browser login button
+        _browserLoginButton = MakeButton("Sign in via browser", false);
+        _browserLoginButton.Pressed += () => LoginPressed?.Invoke();
+        content.AddChild(_browserLoginButton);
+
+        content.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
 
         _spinner = new Control { CustomMinimumSize = new Vector2(0, 48), Visible = false };
         _spinner.Draw += DrawSpinner;
-        vbox.AddChild(_spinner);
+        content.AddChild(_spinner);
 
         _status = new Label
         {
@@ -105,34 +155,28 @@ public partial class Hud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        _status.AddThemeFontSizeOverride("font_size", 14);
+        _status.AddThemeFontSizeOverride("font_size", 15);
         _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        vbox.AddChild(_status);
-
-        vbox.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
-
-        _loginButton = MakeButton("Log in with Serika", true);
-        _loginButton.Pressed += () => LoginPressed?.Invoke();
-        vbox.AddChild(_loginButton);
+        content.AddChild(_status);
 
         _retryButton = MakeButton("Retry", true);
         _retryButton.Visible = false;
         _retryButton.Pressed += () => RetryPressed?.Invoke();
-        vbox.AddChild(_retryButton);
+        content.AddChild(_retryButton);
 
         _quitButton = MakeButton("Quit", false);
         _quitButton.Visible = false;
         _quitButton.Pressed += () => GetTree().Quit();
-        vbox.AddChild(_quitButton);
+        content.AddChild(_quitButton);
 
         _versionLabel = new Label
         {
             Text = $"v{ClientVersion}  ·  © 2026 Serika.dev",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _versionLabel.AddThemeFontSizeOverride("font_size", 11);
+        _versionLabel.AddThemeFontSizeOverride("font_size", 12);
         _versionLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(_versionLabel);
+        content.AddChild(_versionLabel);
 
         _toast = new Label
         {
@@ -145,7 +189,7 @@ public partial class Hud : CanvasLayer
             OffsetTop = -52,
             OffsetBottom = -16,
         };
-        _toast.AddThemeFontSizeOverride("font_size", 14);
+        _toast.AddThemeFontSizeOverride("font_size", 15);
         _toast.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
         AddChild(_toast);
 
@@ -163,10 +207,10 @@ public partial class Hud : CanvasLayer
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -300,
-            OffsetTop = -220,
-            OffsetRight = 300,
-            OffsetBottom = 220,
+            OffsetLeft = -340,
+            OffsetTop = -260,
+            OffsetRight = 340,
+            OffsetBottom = 260,
         };
         _homePanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_homePanel);
@@ -243,7 +287,7 @@ public partial class Hud : CanvasLayer
     {
         Visible = true;
         _scrim.Visible = false;
-        _card.Visible = false;
+        _loginScreen.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
         SetSpinning(false);
@@ -255,7 +299,7 @@ public partial class Hud : CanvasLayer
     {
         Visible = true;
         _scrim.Visible = false;
-        _card.Visible = false;
+        _loginScreen.Visible = false;
         _homeButton.Visible = false;
         _homeLabel.Text = $"Worlds — hi, {username}";
         _homePanel.Visible = true;
@@ -318,8 +362,11 @@ public partial class Hud : CanvasLayer
     {
         Visible = true;
         _scrim.Visible = true;
-        _card.Visible = true;
-        _loginButton.Visible = true;
+        _loginScreen.Visible = true;
+        _emailInput.Visible = true;
+        _passwordInput.Visible = true;
+        _emailLoginButton.Visible = true;
+        _browserLoginButton.Visible = true;
         _retryButton.Visible = false;
         _quitButton.Visible = true;
         _homePanel.Visible = false;
@@ -333,8 +380,11 @@ public partial class Hud : CanvasLayer
     public void SetStatus(string message)
     {
         Visible = true;
-        _card.Visible = true;
-        _loginButton.Visible = false;
+        _loginScreen.Visible = true;
+        _emailInput.Visible = false;
+        _passwordInput.Visible = false;
+        _emailLoginButton.Visible = false;
+        _browserLoginButton.Visible = false;
         _retryButton.Visible = false;
         _quitButton.Visible = false;
         _subtitle.Visible = false;
@@ -349,9 +399,12 @@ public partial class Hud : CanvasLayer
     public void ShowError(string message)
     {
         Visible = true;
-        _card.Visible = true;
+        _loginScreen.Visible = true;
         SetSpinning(false);
-        _loginButton.Visible = false;
+        _emailInput.Visible = true;
+        _passwordInput.Visible = true;
+        _emailLoginButton.Visible = true;
+        _browserLoginButton.Visible = false;
         _retryButton.Visible = true;
         _quitButton.Visible = true;
         _subtitle.Visible = false;
@@ -363,7 +416,7 @@ public partial class Hud : CanvasLayer
     public void HideWithToast(string toast)
     {
         _scrim.Visible = false;
-        _card.Visible = false;
+        _loginScreen.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = true;
         SetSpinning(false);
@@ -381,7 +434,7 @@ public partial class Hud : CanvasLayer
     {
         Visible = true;
         _scrim.Visible = false;
-        _card.Visible = false;
+        _loginScreen.Visible = false;
         _homeButton.Visible = false;
         SetSpinning(false);
         _homeLabel.Text = $"Welcome home, {username}";

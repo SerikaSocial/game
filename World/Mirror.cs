@@ -2,13 +2,13 @@ using Godot;
 
 namespace SerikaSocial.World;
 
-/// A planar-reflection mirror so you can see your own avatar. A SubViewport renders the shared
-/// world from a camera that is the reflection of the active camera across the mirror plane; the
-/// result texture is shown on the mirror quad.
+/// A planar-reflection mirror using the frustum-camera technique from Mirror3D
+/// (https://github.com/Joy-less/Mirror3D, MIT). A SubViewport renders the shared world
+/// from a camera that is the reflection of the active camera across the mirror plane.
+/// The frustum offset ensures the projection is correct from the viewer's perspective.
 ///
-/// This is the standard planar-reflection trick: reflect the viewer's transform across the mirror
-/// plane each frame and render the scene from there. It's one extra scene render, so the mirror is
-/// modestly sized and only updates while the player is reasonably close.
+/// This produces a true mirror reflection — you see yourself and the room behind you,
+/// with correct perspective that shifts as you move.
 public partial class Mirror : Node3D
 {
     private readonly Vector2 _size;
@@ -16,8 +16,10 @@ public partial class Mirror : Node3D
     private Camera3D _mirrorCam;
     private MeshInstance3D _surface;
     private float _activeRange;
+    private float _cullNear = 0.05f;
+    private float _cullFar = 50.0f;
 
-    public Mirror(float width = 1.4f, float height = 2.2f, float activeRange = 8f)
+    public Mirror(float width = 1.4f, float height = 2.2f, float activeRange = 12f)
     {
         _size = new Vector2(width, height);
         _activeRange = activeRange;
@@ -49,13 +51,14 @@ public partial class Mirror : Node3D
         };
         AddChild(frame);
 
-        // Offscreen render target.
-        // A SubViewport with OwnWorld3D=false renders the SAME world it's parented into, so the
-        // mirror camera sees the real scene (us, the room, everything).
+        // Offscreen render target — renders the SAME world (OwnWorld3D=false) so the mirror
+        // camera sees the real scene: the player, the room, everything.
+        int texW = Mathf.Max(256, (int)(_size.X * 300));
+        int texH = Mathf.Max(256, (int)(_size.Y * 300));
         _viewport = new SubViewport
         {
-            Size = new Vector2I(720, (int)(720 * _size.Y / _size.X)),
-            RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
+            Size = new Vector2I(texW, texH),
+            RenderTargetUpdateMode = SubViewport.UpdateMode.WhenVisible,
             RenderTargetClearMode = SubViewport.ClearMode.Always,
             OwnWorld3D = false,
         };
@@ -64,21 +67,16 @@ public partial class Mirror : Node3D
         _mirrorCam = new Camera3D { Current = false };
         _viewport.AddChild(_mirrorCam);
 
-        // The glass quad, textured with the viewport.
+        // The glass quad, textured with the viewport via the mirror shader.
         _surface = new MeshInstance3D
         {
             Mesh = new QuadMesh { Size = _size },
             Position = new Vector3(0, _size.Y * 0.5f, 0),
         };
-        var mat = new StandardMaterial3D
-        {
-            AlbedoTexture = _viewport.GetTexture(),
-            // The reflected image is already lit; don't relight it.
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            Metallic = 0.6f,
-            Roughness = 0.05f,
-            TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear,
-        };
+        var mirrorShader = ResourceLoader.Load<Shader>("res://Shaders/mirror.gdshader");
+        var mat = new ShaderMaterial { Shader = mirrorShader };
+        mat.SetShaderParameter("color", new Color(0.9f, 0.97f, 0.94f));
+        mat.SetShaderParameter("mirror_texture", _viewport.GetTexture());
         _surface.MaterialOverride = mat;
         AddChild(_surface);
     }
@@ -89,35 +87,51 @@ public partial class Mirror : Node3D
         if (viewer == null) return;
 
         // Skip the extra render when far away.
-        Vector3 planePos = GlobalPosition;
+        Vector3 planePos = _surface.GlobalPosition;
         if (viewer.GlobalPosition.DistanceTo(planePos) > _activeRange)
         {
             _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
             return;
         }
-        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
+        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.WhenVisible;
 
-        // Mirror plane: passes through the surface, normal = the mirror's +Z (facing out).
-        Basis b = GlobalTransform.Basis;
-        Vector3 n = b.Z.Normalized();
+        // Mirror plane normal = the surface's +Z (facing out toward the viewer).
+        Vector3 mirrorNormal = _surface.GlobalBasis.Z.Normalized();
 
-        // Reflect the viewer's position across the plane.
-        Vector3 toViewer = viewer.GlobalPosition - planePos;
-        float d = toViewer.Dot(n);
-        Vector3 reflectedPos = viewer.GlobalPosition - 2f * d * n;
+        // Build the reflection transform matrix (mirrors through the plane).
+        Transform3D mirrorTransform = GetMirrorTransform(mirrorNormal, _surface.GlobalPosition);
 
-        // Reflect the viewer's look/up directions across the plane normal.
-        Vector3 fwd = -viewer.GlobalTransform.Basis.Z;
-        Vector3 up = viewer.GlobalTransform.Basis.Y;
-        Vector3 rFwd = Reflect(fwd, n);
-        Vector3 rUp = Reflect(up, n);
+        // Apply: mirror_camera = mirror_transform * player_camera
+        _mirrorCam.GlobalTransform = mirrorTransform * viewer.GlobalTransform;
 
-        var t = new Transform3D(Basis.Identity, reflectedPos);
-        _mirrorCam.GlobalTransform = t;
-        // LookingAt handles building the basis; target is a point along the reflected forward.
-        _mirrorCam.LookAtFromPosition(reflectedPos, reflectedPos + rFwd, rUp);
-        _mirrorCam.Fov = viewer.Fov;
+        // Look perpendicular into the mirror plane (toward the midpoint between
+        // the mirror camera and the player camera).
+        Vector3 lookTarget = (_mirrorCam.GlobalPosition / 2f) + (viewer.GlobalPosition / 2f);
+        _mirrorCam.LookAt(lookTarget, _surface.GlobalBasis.Y);
+
+        // Frustum offset: the camera needs to "see" through the mirror surface from
+        // its reflected position. This is the key trick from Mirror3D that makes the
+        // projection correct — without it, the reflection has the wrong perspective.
+        Vector3 cameraToMirror = _surface.GlobalPosition - _mirrorCam.GlobalPosition;
+        float near = Mathf.Abs(cameraToMirror.Dot(mirrorNormal)) + _cullNear;
+        float far = cameraToMirror.Length() + _cullFar;
+
+        // Transform offset to camera's local coordinate system for set_frustum.
+        Vector3 localOffset = _mirrorCam.GlobalBasis.Inverse() * cameraToMirror;
+        var frustumOffset = new Vector2(localOffset.X, localOffset.Y);
+
+        _mirrorCam.SetFrustum(_size.X, frustumOffset, near, far);
     }
 
-    private static Vector3 Reflect(Vector3 v, Vector3 n) => v - 2f * v.Dot(n) * n;
+    /// Calculates the transformation that mirrors through the plane with the given normal
+    /// and offset. This is a reflection matrix — it flips one axis across the plane.
+    private static Transform3D GetMirrorTransform(Vector3 normal, Vector3 offset)
+    {
+        float nx = normal.X, ny = normal.Y, nz = normal.Z;
+        var basisX = new Vector3(1, 0, 0) - 2f * new Vector3(nx * nx, nx * ny, nx * nz);
+        var basisY = new Vector3(0, 1, 0) - 2f * new Vector3(ny * nx, ny * ny, ny * nz);
+        var basisZ = new Vector3(0, 0, 1) - 2f * new Vector3(nz * nx, nz * ny, nz * nz);
+        Vector3 origin = 2f * normal.Dot(offset) * normal;
+        return new Transform3D(basisX, basisY, basisZ, origin);
+    }
 }

@@ -45,15 +45,15 @@ public partial class PauseMenu : CanvasLayer
 
         _card = new Panel
         {
-            CustomMinimumSize = new Vector2(460, 560),
+            CustomMinimumSize = new Vector2(500, 600),
             AnchorLeft = 0.5f,
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -230,
-            OffsetTop = -280,
-            OffsetRight = 230,
-            OffsetBottom = 280,
+            OffsetLeft = -250,
+            OffsetTop = -300,
+            OffsetRight = 250,
+            OffsetBottom = 300,
             Visible = false,
         };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
@@ -81,7 +81,7 @@ public partial class PauseMenu : CanvasLayer
         var hints = new Label
         {
             Text = "WASD move · Shift sprint · Space jump · Ctrl crouch\n" +
-                   "V camera · scroll to zoom (3rd person) · T chat · Esc resume",
+                   "V camera · scroll to zoom (3rd person) · T chat · M mic · Esc resume",
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
