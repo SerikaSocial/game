@@ -16,6 +16,8 @@ public interface ISerikaTransport
     event System.Action<uint> PeerLeft;
     event System.Action<uint, PoseFrame> PoseReceived;
     event System.Action<uint, VoiceFrame> VoiceReceived;
+    /// A world text-chat line from another peer: (senderPeerId, text).
+    event System.Action<uint, string> ChatReceived;
     /// Fired if the relay rejects us (bad/used ticket, full) with the reason string.
     event System.Action<string> Rejected;
 
@@ -25,6 +27,8 @@ public interface ISerikaTransport
     void Connect(string endpoint, string ticket);
     void SendPose(PoseFrame frame);
     void SendVoice(VoiceFrame frame);
+    /// Send a world text-chat line to everyone in the instance.
+    void SendChat(string text);
     /// Drain inbound datagrams and fire callbacks; also sends keepalives. Call every frame,
     /// passing seconds elapsed since the last call (drives retransmit + keepalive timers).
     void Poll(double dt);

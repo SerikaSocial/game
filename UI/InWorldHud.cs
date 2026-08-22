@@ -11,6 +11,9 @@ public partial class InWorldHud : CanvasLayer
     private Label _ping;
     private double _pingTimer;
 
+    private Label _toast;
+    private double _toastTimer;
+
     public override void _Ready()
     {
         Layer = 50;
@@ -48,6 +51,28 @@ public partial class InWorldHud : CanvasLayer
         _ping.AddThemeFontSizeOverride("font_size", 11);
         _ping.AddThemeColorOverride("font_color", new Color(0.5f, 0.54f, 0.6f));
         container.AddChild(_ping);
+
+        // Transient centre-bottom toast (e.g. "First-person view").
+        _toast = new Label
+        {
+            AnchorLeft = 0, AnchorTop = 1, AnchorRight = 1, AnchorBottom = 1,
+            OffsetTop = -96, OffsetBottom = -64,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Visible = false,
+        };
+        _toast.AddThemeFontSizeOverride("font_size", 15);
+        _toast.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 1f));
+        _toast.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 0.7f));
+        _toast.AddThemeConstantOverride("outline_size", 4);
+        AddChild(_toast);
+    }
+
+    /// Show a short-lived status message centred near the bottom of the screen.
+    public void Toast(string message, double seconds = 2.0)
+    {
+        _toast.Text = message;
+        _toast.Visible = true;
+        _toastTimer = seconds;
     }
 
     public void SetWorld(string name)
@@ -72,6 +97,12 @@ public partial class InWorldHud : CanvasLayer
         if (_pingTimer >= 2.0)
         {
             _pingTimer = 0;
+        }
+
+        if (_toast.Visible)
+        {
+            _toastTimer -= delta;
+            if (_toastTimer <= 0) _toast.Visible = false;
         }
     }
 }

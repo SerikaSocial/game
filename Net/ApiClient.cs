@@ -33,6 +33,11 @@ public sealed class ApiClient
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
 
+    /// Fetch the WebRTC ICE server list (STUN + TURN) for a P2P instance. Authed, since TURN
+    /// credentials are per-user and short-lived.
+    public async Task<JsonElement> GetIceServersAsync() =>
+        await GetAuthedAsync("/v1/rtc/ice");
+
     /// Create an instance of a world and get a join ticket + relay endpoint back.
     public async Task<JsonElement> CreateInstanceAsync(string worldId)
     {
@@ -47,6 +52,15 @@ public sealed class ApiClient
     private async Task<JsonElement> GetAsync(string path)
     {
         var res = await _http.GetAsync($"{_baseUrl}{path}");
+        return JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+    }
+
+    private async Task<JsonElement> GetAuthedAsync(string path)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}{path}");
+        if (SessionToken != null)
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        var res = await _http.SendAsync(req);
         return JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
     }
 

@@ -27,6 +27,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public event Action<uint> PeerLeft;
     public event Action<uint, PoseFrame> PoseReceived;
     public event Action<uint, VoiceFrame> VoiceReceived;
+    public event Action<uint, string> ChatReceived;
     public event Action<string> Rejected;
 
     public bool Connected_ => _welcomed;
@@ -55,6 +56,14 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     {
         if (!_welcomed) return;
         Send(RelayProtocol.WriteOutbound(MsgType.Voice, frame.Encode()));
+    }
+
+    public void SendChat(string text)
+    {
+        if (!_welcomed || string.IsNullOrEmpty(text)) return;
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        if (bytes.Length > 400) Array.Resize(ref bytes, 400); // relay caps at 400 bytes
+        Send(RelayProtocol.WriteOutbound(MsgType.Chat, bytes));
     }
 
     /// Drive once per frame. `dt` is seconds since last call, used for retransmit/keepalive.
@@ -147,6 +156,13 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 try { VoiceReceived?.Invoke(sender, VoiceFrame.Decode(buf.AsSpan(5, n - 5))); }
                 catch (CodecException) { }
+                break;
+            }
+            case MsgType.Chat:
+            {
+                uint sender = RelayProtocol.ReadU32(buf, 1);
+                string text = System.Text.Encoding.UTF8.GetString(buf, 5, n - 5);
+                ChatReceived?.Invoke(sender, text);
                 break;
             }
             case MsgType.Reject:

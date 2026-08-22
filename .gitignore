@@ -15,3 +15,7 @@ build/
 .env
 .env.*
 !.env.example
+
+# Bundled avatar binaries are large and often carry third-party model licenses; generate them
+# locally with tools/ska/vrm2ska.py rather than committing them. See Assets/Avatars/README.md.
+Assets/Avatars/*.ska

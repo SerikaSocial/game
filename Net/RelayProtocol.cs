@@ -16,6 +16,7 @@ public enum MsgType : byte
     Voice = 0x06,
     Ping = 0x07,
     Reject = 0x08,
+    Chat = 0x09,
 }
 
 public static class RelayProtocol

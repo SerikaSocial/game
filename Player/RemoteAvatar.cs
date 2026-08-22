@@ -1,5 +1,6 @@
 using Godot;
 using Serika.Net.Codec;
+using SerikaSocial.Avatar;
 
 namespace SerikaSocial.Player;
 
@@ -14,6 +15,10 @@ public partial class RemoteAvatar : Node3D
 
     public uint PeerId { get; private set; }
 
+    private MeshInstance3D _capsule;
+    private AvatarInstance _avatar;
+    private Label3D _nameTag;
+
     public static RemoteAvatar Create(uint peerId, string name)
     {
         var a = new RemoteAvatar { PeerId = peerId, Name = $"Remote_{peerId}" };
@@ -23,24 +28,39 @@ public partial class RemoteAvatar : Node3D
 
     private void BuildBody(string displayName)
     {
-        // M1 default character: a capsule. VRM/humanoid is M2.
-        var mesh = new MeshInstance3D
+        // Capsule stand-in, shown until (and if) an avatar is equipped.
+        _capsule = new MeshInstance3D
         {
             Mesh = new CapsuleMesh { Height = 1.8f, Radius = 0.3f },
             Position = new Vector3(0, 0.9f, 0),
         };
-        var mat = new StandardMaterial3D { AlbedoColor = ColorFromId(PeerId) };
-        mesh.MaterialOverride = mat;
-        AddChild(mesh);
+        _capsule.MaterialOverride = new StandardMaterial3D { AlbedoColor = ColorFromId(PeerId) };
+        AddChild(_capsule);
 
-        AddChild(new Label3D
+        _nameTag = new Label3D
         {
             Text = displayName,
             Position = new Vector3(0, 2.1f, 0),
             Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
             FontSize = 48,
             PixelSize = 0.005f,
-        });
+        };
+        AddChild(_nameTag);
+
+        // Equip the current default avatar. Failure leaves the capsule in place.
+        EquipAvatar(AvatarLibrary.CurrentDefaultPath);
+    }
+
+    /// Equip an avatar from a `.ska` path; hides the capsule and floats the name tag at head height.
+    public void EquipAvatar(string skaPath)
+    {
+        var avatar = AvatarLibrary.Instantiate(skaPath);
+        if (avatar == null) return;
+        _avatar?.QueueFree();
+        _avatar = avatar;
+        AddChild(avatar);
+        _capsule.Visible = false;
+        _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
     }
 
     public void ApplyPose(PoseFrame f)

@@ -5,7 +5,9 @@ using Godot;
 using Serika.Auth;
 using Serika.Net;
 using Serika.Net.Codec;
+using SerikaSocial.Avatar;
 using SerikaSocial.Player;
+using SerikaSocial.World;
 
 namespace SerikaSocial;
 
@@ -29,6 +31,7 @@ public partial class Main : Node3D
 {
     private ISerikaTransport _transport;
     private IPlayer _local;
+    private LocalPlayer _localDesktop; // non-null in desktop mode; drives FP/TP toggle
     private Node3D _localNode;
     private bool _vrMode;
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
@@ -48,13 +51,18 @@ public partial class Main : Node3D
     private Hud _hud;
     private PauseMenu _pauseMenu;
     private InWorldHud _inWorldHud;
+    private ChatOverlay _chat;
+    private TouchControls _touch; // non-null on touchscreen (mobile) devices
+    private readonly Dictionary<uint, string> _peerNames = new();
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
     private bool _inHome;
     private bool _inWorld;
 
     public override void _Ready()
     {
-        BuildWorld();
+        _worldRoot = new Node3D { Name = "WorldRoot" };
+        AddChild(_worldRoot);
+        Worlds.BuildCommons(_worldRoot); // backdrop behind the login screen
 
         var args = ParseArgs();
         if (args.ContainsKey("serika-smoke"))
@@ -89,196 +97,69 @@ public partial class Main : Node3D
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddChild(_inWorldHud);
+
+        _chat = new ChatOverlay { Name = "ChatOverlay" };
+        AddChild(_chat);
+        _chat.MessageSubmitted += OnChatSubmitted;
+        _chat.Closed += OnChatClosed;
+    }
+
+    // ── Text chat ─────────────────────────────────────────────────────────────────────
+
+    /// Open the chat box (T). Releases the mouse and suppresses movement while typing.
+    private void OpenChat()
+    {
+        if (_chat.IsTyping) return;
+        _chat.OpenInput();
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        _wasMouseCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
+        if (_wasMouseCaptured) Input.MouseMode = Input.MouseModeEnum.Visible;
+    }
+
+    private bool _wasMouseCaptured;
+
+    private void OnChatSubmitted(string text)
+    {
+        // Echo locally, then send to the room (if connected).
+        _chat.AddChat(_username, text);
+        _transport?.SendChat(text);
+    }
+
+    /// Restore control/mouse after the chat box closes (whether via Enter or Escape).
+    private void OnChatClosed()
+    {
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
+        if (_wasMouseCaptured) Input.MouseMode = Input.MouseModeEnum.Captured;
+    }
+
+    private void OnChatReceived(uint senderId, string text)
+    {
+        string name = _peerNames.GetValueOrDefault(senderId, $"peer{senderId}");
+        _chat.AddChat(name, text);
     }
 
     // ── World ───────────────────────────────────────────────────────────────────────
 
-    private void BuildWorld()
+    private Node3D _worldRoot;
+    private Worlds.Home _homeInfo;
+
+    /// Swap the active world geometry: free the old root, build the new space into a fresh one.
+    private void SwapWorld(System.Action<Node3D> build)
     {
-        AddChild(new WorldEnvironment
-        {
-            Environment = new Godot.Environment
-            {
-                BackgroundMode = Godot.Environment.BGMode.Sky,
-                Sky = new Sky { SkyMaterial = new ProceduralSkyMaterial() },
-                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
-                AmbientLightColor = new Color(0.4f, 0.45f, 0.55f),
-                AmbientLightEnergy = 0.5f,
-                FogEnabled = true,
-                FogLightColor = new Color(0.5f, 0.55f, 0.65f),
-                FogLightEnergy = 0.3f,
-                FogDensity = 0.001f,
-            },
-        });
-
-        var sun = new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f };
-        sun.RotationDegrees = new Vector3(-50, -30, 0);
-        AddChild(sun);
-
-        // "The Commons": a 40m floor with decorative elements.
-        var floor = new StaticBody3D { Name = "Floor" };
-        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(40, 40) } };
-        floorMesh.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(0.18f, 0.20f, 0.24f),
-            Roughness = 0.9f,
-        };
-        floor.AddChild(floorMesh);
-        var floorCol = new CollisionShape3D { Shape = new WorldBoundaryShape3D() };
-        floor.AddChild(floorCol);
-        AddChild(floor);
-
-        // Decorative pillars at the corners
-        float[] corners = { -15, 15 };
-        foreach (float x in corners)
-        {
-            foreach (float z in corners)
-            {
-                var pillar = new MeshInstance3D
-                {
-                    Mesh = new BoxMesh { Size = new Vector3(1, 4, 1) },
-                    Position = new Vector3(x, 2, z),
-                };
-                pillar.MaterialOverride = new StandardMaterial3D
-                {
-                    AlbedoColor = new Color(0.12f, 0.13f, 0.16f),
-                    Roughness = 0.8f,
-                };
-                AddChild(pillar);
-            }
-        }
-
-        // Central platform — a gathering spot
-        var platform = new MeshInstance3D
-        {
-            Mesh = new CylinderMesh { Height = 0.2f, TopRadius = 3, BottomRadius = 3 },
-            Position = new Vector3(0, 0.1f, 0),
-        };
-        platform.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(0.22f, 0.24f, 0.28f),
-            Roughness = 0.7f,
-        };
-        AddChild(platform);
-
-        // Seating area — low benches around the platform
-        for (int i = 0; i < 6; i++)
-        {
-            float angle = i * Mathf.Tau / 6f;
-            var bench = new MeshInstance3D
-            {
-                Mesh = new BoxMesh { Size = new Vector3(2, 0.4f, 0.6f) },
-                Position = new Vector3(Mathf.Cos(angle) * 5, 0.2f, Mathf.Sin(angle) * 5),
-                RotationDegrees = new Vector3(0, -angle * 180f / Mathf.Pi, 0),
-            };
-            bench.MaterialOverride = new StandardMaterial3D
-            {
-                AlbedoColor = new Color(0.15f, 0.16f, 0.19f),
-                Roughness = 0.85f,
-            };
-            AddChild(bench);
-        }
-
-        // Overhead lighting fixtures — glowing spheres on thin posts
-        float[] lightPos = { -8, 0, 8 };
-        foreach (float x in lightPos)
-        {
-            foreach (float z in lightPos)
-            {
-                if (x == 0 && z == 0) continue;
-                var post = new MeshInstance3D
-                {
-                    Mesh = new CylinderMesh { Height = 5, TopRadius = 0.05f, BottomRadius = 0.05f },
-                    Position = new Vector3(x, 2.5f, z),
-                };
-                post.MaterialOverride = new StandardMaterial3D
-                {
-                    AlbedoColor = new Color(0.1f, 0.1f, 0.12f),
-                    Roughness = 0.9f,
-                };
-                AddChild(post);
-
-                var lamp = new OmniLight3D
-                {
-                    Position = new Vector3(x, 4.8f, z),
-                    LightColor = new Color(0.9f, 0.88f, 0.75f),
-                    LightEnergy = 0.6f,
-                    OmniRange = 8f,
-                    OmniAttenuation = 1.5f,
-                    ShadowEnabled = true,
-                };
-                AddChild(lamp);
-
-                var glow = new MeshInstance3D
-                {
-                    Mesh = new SphereMesh { Radius = 0.15f, Height = 0.3f },
-                    Position = new Vector3(x, 4.8f, z),
-                };
-                glow.MaterialOverride = new StandardMaterial3D
-                {
-                    EmissionEnergyMultiplier = 2f,
-                    Emission = new Color(0.9f, 0.88f, 0.75f),
-                    AlbedoColor = new Color(0.9f, 0.88f, 0.75f),
-                };
-                AddChild(glow);
-            }
-        }
-
-        // World signage — "The Commons" near the entrance
-        var sign = new Label3D
-        {
-            Text = "The Commons",
-            Position = new Vector3(0, 3.5f, -15),
-            Billboard = BaseMaterial3D.BillboardModeEnum.Disabled,
-            FontSize = 96,
-            PixelSize = 0.01f,
-        };
-        sign.Modulate = new Color(0.7f, 0.75f, 0.85f);
-        AddChild(sign);
-
-        // Boundary walls — low walls at the edges so the world feels enclosed
-        float[] wallEdges = { -19, 19 };
-        foreach (float edge in wallEdges)
-        {
-            var wallX = new MeshInstance3D
-            {
-                Mesh = new BoxMesh { Size = new Vector3(0.5f, 1.5f, 40) },
-                Position = new Vector3(edge, 0.75f, 0),
-            };
-            wallX.MaterialOverride = new StandardMaterial3D
-            {
-                AlbedoColor = new Color(0.1f, 0.11f, 0.14f),
-                Roughness = 0.9f,
-            };
-            AddChild(wallX);
-
-            var wallZ = new MeshInstance3D
-            {
-                Mesh = new BoxMesh { Size = new Vector3(40, 1.5f, 0.5f) },
-                Position = new Vector3(0, 0.75f, edge),
-            };
-            wallZ.MaterialOverride = new StandardMaterial3D
-            {
-                AlbedoColor = new Color(0.1f, 0.11f, 0.14f),
-                Roughness = 0.9f,
-            };
-            AddChild(wallZ);
-        }
-
-        // Spawn point marker — a subtle ring on the floor
-        var spawnRing = new MeshInstance3D
-        {
-            Mesh = new CylinderMesh { Height = 0.02f, TopRadius = 0.8f, BottomRadius = 0.8f },
-            Position = new Vector3(0, 0.11f, 8),
-        };
-        spawnRing.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(0.3f, 0.5f, 0.8f, 0.6f),
-            Roughness = 0.5f,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-        };
-        AddChild(spawnRing);
+        _worldRoot?.QueueFree();
+        _worldRoot = new Node3D { Name = "WorldRoot" };
+        AddChild(_worldRoot);
+        build(_worldRoot);
     }
+
+    /// Build the cosy Home and wire its Commons portal to join the multiplayer world.
+    private void BuildHomeWorld()
+    {
+        SwapWorld(root => _homeInfo = Worlds.BuildHome(root));
+        _homeInfo.CommonsPortal.Entered += () => { if (_api != null) _ = JoinDefaultWorld(); };
+    }
+
+    private void BuildCommonsWorld() => SwapWorld(Worlds.BuildCommons);
 
     private void SpawnLocalPlayer()
     {
@@ -298,11 +179,34 @@ public partial class Main : Node3D
             AddChild(desktop);
             _local = desktop;
             _localNode = desktop;
+            _localDesktop = desktop;
+            // Equip the default humanoid avatar (Suisei). Falls back to the capsule on failure.
+            desktop.SetAvatar(AvatarLibrary.InstantiateDefault());
+            SetupTouchControls(desktop);
             GD.Print("Desktop mode");
         }
         if (_hud != null)
             _local.SetAvatarColor(_hud.AvatarColor);
         _local.SetUsername(_username);
+    }
+
+    /// Create the mobile touch overlay on touchscreen devices and bind it to the player. Rebound
+    /// each spawn since the player instance changes; created once.
+    private void SetupTouchControls(LocalPlayer player)
+    {
+        if (!DisplayServer.IsTouchscreenAvailable()) return;
+        if (_touch == null)
+        {
+            var layer = new CanvasLayer { Name = "TouchLayer", Layer = 40 };
+            AddChild(layer);
+            _touch = new TouchControls { Name = "TouchControls" };
+            layer.AddChild(_touch);
+        }
+        _touch.Configure(player, () =>
+        {
+            bool fp = player.ToggleCameraMode();
+            _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
+        });
     }
 
     // ── Login → route (Home, or a world from a deep link) ────────────────────────────
@@ -393,10 +297,39 @@ public partial class Main : Node3D
         TeardownRemotes();
         _transport?.Disconnect();
         _transport = null;
+        BuildHomeWorld();
         if (_local == null) SpawnLocalPlayer();
+        MoveLocalTo(_homeInfo.Spawn);
         _worldName = "Home";
         _hud?.ShowHome(_username);
+        _chat?.AddSystem("Welcome home. Press T to chat, V to change view, walk into the portal to travel.");
+        MaybeStartTutorial();
         _ = PopulateWorldList();
+    }
+
+    /// Teleport the local player (works for both desktop and VR rigs).
+    private void MoveLocalTo(Vector3 pos)
+    {
+        if (_localNode is Node3D n) n.GlobalPosition = pos;
+    }
+
+    private bool _tutorialShown;
+
+    /// Show the first-time tutorial once. Frees the mouse and suspends controls while it's up.
+    private void MaybeStartTutorial()
+    {
+        if (_tutorialShown || _smoke || Tutorial.AlreadySeen()) return;
+        _tutorialShown = true;
+
+        var tut = new Tutorial { Name = "Tutorial" };
+        AddChild(tut);
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        Input.MouseMode = Input.MouseModeEnum.Visible;
+        tut.Completed += () =>
+        {
+            if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
+            Input.MouseMode = Input.MouseModeEnum.Captured;
+        };
     }
 
     private List<(string id, string name, string description, int capacity)> _fetchedWorlds;
@@ -457,7 +390,9 @@ public partial class Main : Node3D
     {
         _worldName = worldName;
         _hud?.SetStatus($"Connecting to {worldName}…");
+        BuildCommonsWorld();
         SpawnLocalPlayer();
+        MoveLocalTo(new Vector3(0, 1, 8));
         ConnectTo(endpoint, ticket);
     }
 
@@ -468,6 +403,7 @@ public partial class Main : Node3D
         udp.PeerJoined += OnPeerJoined;
         udp.PeerLeft += OnPeerLeft;
         udp.PoseReceived += OnPoseReceived;
+        udp.ChatReceived += OnChatReceived;
         udp.Rejected += reason =>
         {
             GD.PrintErr($"relay rejected us: {reason}");
@@ -482,26 +418,33 @@ public partial class Main : Node3D
     private void OnConnected(uint selfId, PeerInfo[] peers)
     {
         GD.Print($"SMOKE connected self={selfId} peers={peers.Length}");
-        foreach (var p in peers) SpawnRemote(p);
+        _peerNames.Clear();
+        foreach (var p in peers) { SpawnRemote(p); _peerNames[p.PeerId] = p.Name; }
         int others = peers.Length;
         string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
         _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
         _inWorld = true;
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
+        _chat.AddSystem($"Welcome to {_worldName}.");
     }
 
     private void OnPeerJoined(PeerInfo p)
     {
         GD.Print($"SMOKE peer_join {p.PeerId} {p.Name}");
         SpawnRemote(p);
+        _peerNames[p.PeerId] = p.Name;
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
+        _chat.AddSystem($"{p.Name} joined the world");
     }
 
     private void OnPeerLeft(uint peerId)
     {
         if (_remotes.Remove(peerId, out var a)) a.QueueFree();
+        string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
+        _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
+        _chat.AddSystem($"{name} left the world");
     }
 
     private void OnPoseReceived(uint peerId, PoseFrame frame)
@@ -525,6 +468,23 @@ public partial class Main : Node3D
         if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && _inWorld && !_pauseMenu.IsOpen)
         {
             _pauseMenu.Show();
+            GetViewport().SetInputAsHandled();
+        }
+
+        // V toggles first/third person (desktop only).
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.V }
+            && _localDesktop != null && _chat is { IsTyping: false })
+        {
+            bool fp = _localDesktop.ToggleCameraMode();
+            _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
+            GetViewport().SetInputAsHandled();
+        }
+
+        // T opens the text chat (in Home or a world), when not already typing.
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.T }
+            && (_inWorld || _inHome) && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
+        {
+            OpenChat();
             GetViewport().SetInputAsHandled();
         }
     }
