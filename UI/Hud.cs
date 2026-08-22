@@ -18,21 +18,8 @@ public partial class Hud : CanvasLayer
     public event Action JoinCommonsPressed;
     public event Action<string> JoinWorldPressed;
 
-    public Color AvatarColor { get; private set; } = new Color(0.9f, 0.7f, 0.2f);
-
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    private const string ClientVersion = "0.3.1";
-    private static readonly Color[] PresetColors =
-    {
-        new(0.95f, 0.72f, 0.20f), // amber
-        new(0.35f, 0.65f, 0.95f), // sky
-        new(0.55f, 0.85f, 0.45f), // lime
-        new(0.92f, 0.45f, 0.55f), // coral
-        new(0.75f, 0.55f, 0.95f), // lavender
-        new(0.45f, 0.85f, 0.80f), // teal
-        new(0.98f, 0.85f, 0.45f), // gold
-        new(0.80f, 0.80f, 0.85f), // silver
-    };
+    private const string ClientVersion = "0.3.2";
 
     private ColorRect _scrim;
     private Panel _card;
@@ -45,8 +32,6 @@ public partial class Hud : CanvasLayer
     private Control _spinner;
     private Label _toast;
     private Label _versionLabel;
-    private HBoxContainer _colorPicker;
-    private Label _colorLabel;
 
     private Panel _homePanel;
     private Label _homeLabel;
@@ -125,36 +110,6 @@ public partial class Hud : CanvasLayer
         vbox.AddChild(_status);
 
         vbox.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
-
-        // Avatar color picker
-        _colorLabel = new Label
-        {
-            Text = "Avatar color",
-            HorizontalAlignment = HorizontalAlignment.Center,
-        };
-        _colorLabel.AddThemeFontSizeOverride("font_size", 13);
-        _colorLabel.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
-        vbox.AddChild(_colorLabel);
-
-        _colorPicker = new HBoxContainer
-        {
-            Alignment = BoxContainer.AlignmentMode.Center,
-        };
-        _colorPicker.AddThemeConstantOverride("separation", 8);
-        vbox.AddChild(_colorPicker);
-        for (int i = 0; i < PresetColors.Length; i++)
-        {
-            var swatch = new ColorSwatch(PresetColors[i], i == 0);
-            swatch.Pressed += () =>
-            {
-                AvatarColor = swatch.Color;
-                foreach (var child in _colorPicker.GetChildren())
-                    if (child is ColorSwatch s) s.Selected = s == swatch;
-            };
-            _colorPicker.AddChild(swatch);
-        }
-
-        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
 
         _loginButton = MakeButton("Log in with Serika", true);
         _loginButton.Pressed += () => LoginPressed?.Invoke();
@@ -371,8 +326,6 @@ public partial class Hud : CanvasLayer
         _homeButton.Visible = false;
         SetSpinning(false);
         _subtitle.Visible = true;
-        _colorLabel.Visible = true;
-        _colorPicker.Visible = true;
         _status.Text = "";
     }
 
@@ -385,8 +338,6 @@ public partial class Hud : CanvasLayer
         _retryButton.Visible = false;
         _quitButton.Visible = false;
         _subtitle.Visible = false;
-        _colorLabel.Visible = false;
-        _colorPicker.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
         SetSpinning(true);
@@ -404,8 +355,6 @@ public partial class Hud : CanvasLayer
         _retryButton.Visible = true;
         _quitButton.Visible = true;
         _subtitle.Visible = false;
-        _colorLabel.Visible = false;
-        _colorPicker.Visible = false;
         _status.AddThemeColorOverride("font_color", new Color(1f, 0.45f, 0.45f));
         _status.Text = message;
     }
@@ -494,42 +443,5 @@ public partial class Hud : CanvasLayer
             var p = center + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * radius;
             _spinner.DrawCircle(p, 2.2f, new Color(0.6f, 0.7f, 0.9f, alpha));
         }
-    }
-}
-
-/// A clickable color swatch for the avatar color picker.
-public partial class ColorSwatch : Button
-{
-    public Color Color { get; }
-    public bool Selected { get; set; }
-
-    public ColorSwatch(Color color, bool selected)
-    {
-        Color = color;
-        Selected = selected;
-        CustomMinimumSize = new Vector2(32, 32);
-        UpdateStyle();
-        Pressed += () => { Selected = true; UpdateStyle(); };
-    }
-
-    private void UpdateStyle()
-    {
-        var normal = new StyleBoxFlat
-        {
-            BgColor = Color,
-            CornerRadiusTopLeft = 6, CornerRadiusTopRight = 6,
-            CornerRadiusBottomLeft = 6, CornerRadiusBottomRight = 6,
-            BorderWidthTop = Selected ? 2 : 0,
-            BorderWidthBottom = Selected ? 2 : 0,
-            BorderWidthLeft = Selected ? 2 : 0,
-            BorderWidthRight = Selected ? 2 : 0,
-            BorderColor = new Color(1, 1, 1, 0.9f),
-            ContentMarginLeft = 4, ContentMarginRight = 4,
-            ContentMarginTop = 4, ContentMarginBottom = 4,
-        };
-        AddThemeStyleboxOverride("normal", normal);
-        var hover = (StyleBoxFlat)normal.Duplicate();
-        hover.BgColor = Color.Lightened(0.15f);
-        AddThemeStyleboxOverride("hover", hover);
     }
 }

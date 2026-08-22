@@ -138,12 +138,15 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     {
         _avatar?.SetHeadVisible(!_firstPerson);
         // Third-person: dolly the camera back and up a touch; first-person: at the eye.
-        _camera.Position = _firstPerson ? Vector3.Zero : new Vector3(0, 0.35f, ThirdPersonDistance);
+        _camera.Position = _firstPerson ? Vector3.Zero : new Vector3(0, ThirdPersonCameraY, _thirdPersonDistance);
         // The name tag only makes sense floating above you in third person.
         _nameTag.Visible = !_firstPerson;
     }
 
-    private const float ThirdPersonDistance = 3.0f;
+    private const float ThirdPersonCameraY = 0.35f;
+    private const float ThirdPersonMin = 1.2f;
+    private const float ThirdPersonMax = 6.0f;
+    private float _thirdPersonDistance = 3.0f;
 
     public override void _UnhandledInput(InputEvent @event)
     {
@@ -155,6 +158,19 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             var r = _camera.Rotation;
             r.X = Mathf.Clamp(r.X, -1.4f, 1.4f);
             _camera.Rotation = r;
+        }
+
+        // Scroll wheel zooms the third-person camera.
+        if (!_firstPerson && @event is InputEventMouseButton { Pressed: true } mb)
+        {
+            if (mb.ButtonIndex == MouseButton.WheelUp)
+                _thirdPersonDistance = Mathf.Clamp(_thirdPersonDistance - 0.4f, ThirdPersonMin, ThirdPersonMax);
+            else if (mb.ButtonIndex == MouseButton.WheelDown)
+                _thirdPersonDistance = Mathf.Clamp(_thirdPersonDistance + 0.4f, ThirdPersonMin, ThirdPersonMax);
+            else
+                return;
+            ApplyCameraMode();
+            GetViewport().SetInputAsHandled();
         }
     }
 
@@ -228,21 +244,26 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         Velocity = v;
         MoveAndSlide();
 
-        // Head bob — only when moving on the ground
+        // Animate the equipped avatar from actual movement state (embedded clips override this).
+        var planar = new Vector2(Velocity.X, Velocity.Z);
+        _avatar?.Animate(delta, planar.Length(), IsOnFloor());
+
+        // Head bob — only when moving on the ground, and only meaningful in first person.
+        float baseCamY = _firstPerson ? 0f : ThirdPersonCameraY;
         bool moving = input.LengthSquared() > 0.01f && IsOnFloor();
-        if (moving)
+        if (moving && _firstPerson)
         {
             _bobTimer += (float)delta * BobFrequency * (sprinting ? 1.4f : 1f);
             float bob = Mathf.Sin(_bobTimer) * BobAmplitude * (sprinting ? 1.5f : 1f);
             var camPos = _camera.Position;
-            camPos.Y = bob;
+            camPos.Y = baseCamY + bob;
             _camera.Position = camPos;
         }
         else
         {
             _bobTimer = 0;
             var camPos = _camera.Position;
-            camPos.Y = Mathf.Lerp(camPos.Y, 0, (float)delta * 8f);
+            camPos.Y = Mathf.Lerp(camPos.Y, baseCamY, (float)delta * 8f);
             _camera.Position = camPos;
         }
     }
@@ -254,9 +275,4 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         return new Transform3D(basis, GlobalPosition);
     }
 
-    public void SetAvatarColor(Color color)
-    {
-        if (_bodyMesh?.MaterialOverride is StandardMaterial3D mat)
-            mat.AlbedoColor = color;
-    }
 }

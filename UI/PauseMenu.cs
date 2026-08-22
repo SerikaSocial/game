@@ -15,6 +15,8 @@ public partial class PauseMenu : CanvasLayer
 
     private ColorRect _scrim;
     private Panel _card;
+    private Label _title;
+    private Label _worldLabel;
     private Button _resumeButton;
     private Button _homeButton;
     private Button _quitButton;
@@ -43,15 +45,15 @@ public partial class PauseMenu : CanvasLayer
 
         _card = new Panel
         {
-            CustomMinimumSize = new Vector2(440, 420),
+            CustomMinimumSize = new Vector2(460, 560),
             AnchorLeft = 0.5f,
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -220,
-            OffsetTop = -210,
-            OffsetRight = 220,
-            OffsetBottom = 210,
+            OffsetLeft = -230,
+            OffsetTop = -280,
+            OffsetRight = 230,
+            OffsetBottom = 280,
             Visible = false,
         };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
@@ -65,10 +67,34 @@ public partial class PauseMenu : CanvasLayer
         vbox.AddThemeConstantOverride("separation", 14);
         _card.AddChild(vbox);
 
-        var title = new Label { Text = "Settings", HorizontalAlignment = HorizontalAlignment.Center };
-        title.AddThemeFontSizeOverride("font_size", 22);
-        title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
-        vbox.AddChild(title);
+        _title = new Label { Text = "Paused", HorizontalAlignment = HorizontalAlignment.Center };
+        _title.AddThemeFontSizeOverride("font_size", 24);
+        _title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
+        vbox.AddChild(_title);
+
+        _worldLabel = new Label { Text = "", HorizontalAlignment = HorizontalAlignment.Center };
+        _worldLabel.AddThemeFontSizeOverride("font_size", 13);
+        _worldLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(_worldLabel);
+
+        // Controls cheat-sheet so the menu is also where players (re)learn the keys.
+        var hints = new Label
+        {
+            Text = "WASD move · Shift sprint · Space jump · Ctrl crouch\n" +
+                   "V camera · scroll to zoom (3rd person) · T chat · Esc resume",
+            HorizontalAlignment = HorizontalAlignment.Center,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        hints.AddThemeFontSizeOverride("font_size", 12);
+        hints.AddThemeColorOverride("font_color", new Color(0.55f, 0.6f, 0.7f));
+        vbox.AddChild(hints);
+
+        vbox.AddChild(new HSeparator());
+
+        var settingsLabel = new Label { Text = "Settings" };
+        settingsLabel.AddThemeFontSizeOverride("font_size", 13);
+        settingsLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(settingsLabel);
 
         // Mouse sensitivity
         var sensRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
@@ -128,10 +154,10 @@ public partial class PauseMenu : CanvasLayer
         _nameTagsToggle.Toggled += on => NameTagsVisible = on;
         tagRow.AddChild(_nameTagsToggle);
 
-        vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 8) });
+        vbox.AddChild(new HSeparator());
 
         // Buttons
-        _resumeButton = MakeButton("Resume", true);
+        _resumeButton = MakeButton("Resume (Esc)", true);
         _resumeButton.Pressed += Hide;
         vbox.AddChild(_resumeButton);
 
@@ -146,6 +172,15 @@ public partial class PauseMenu : CanvasLayer
         _quitButton = MakeButton("Quit to desktop", false);
         _quitButton.Pressed += () => QuitPressed?.Invoke();
         vbox.AddChild(_quitButton);
+    }
+
+    /// Open the menu. `worldName` shows under the title; when the player is already Home the
+    /// "Return to Home" button is pointless and hidden.
+    public void ShowMenu(string worldName, bool alreadyHome)
+    {
+        _worldLabel.Text = string.IsNullOrEmpty(worldName) ? "" : $"in {worldName}";
+        _homeButton.Visible = !alreadyHome;
+        Show();
     }
 
     public new void Show()

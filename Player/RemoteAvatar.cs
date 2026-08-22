@@ -76,10 +76,15 @@ public partial class RemoteAvatar : Node3D
         if (!_hasTarget) return;
         // Critically-damped-ish lerp; good enough for M1, replaced by proper snapshot
         // interpolation with a timestamp buffer in M2.
+        var prev = Position;
         float t = (float)Mathf.Min(1.0, delta * 12.0);
         Position = Position.Lerp(_targetPos, t);
         Quaternion current = Quaternion;
         Quaternion = current.Slerp(_targetRot, t).Normalized();
+
+        // Feed the procedural walk/idle cycle with the observed planar speed.
+        float speed = delta > 0 ? (new Vector2(Position.X, Position.Z) - new Vector2(prev.X, prev.Z)).Length() / (float)delta : 0f;
+        _avatar?.Animate(delta, speed, true);
     }
 
     /// Stable per-peer colour so avatars are visually distinguishable without textures.

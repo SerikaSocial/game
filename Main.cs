@@ -16,7 +16,6 @@ namespace SerikaSocial;
 public interface IPlayer
 {
     Transform3D PoseTransform();
-    void SetAvatarColor(Color color);
     void SetUsername(string name);
     float MouseSensitivity { get; set; }
 }
@@ -100,6 +99,7 @@ public partial class Main : Node3D
         _pauseMenu.HomePressed += EnterHome;
         _pauseMenu.WorldsPressed += () => { _pauseMenu.Hide(); OpenWorldList(); };
         _pauseMenu.QuitPressed += () => GetTree().Quit();
+        _pauseMenu.Closed += OnPauseClosed;
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddChild(_inWorldHud);
@@ -192,6 +192,16 @@ public partial class Main : Node3D
 
     private void SpawnLocalPlayer()
     {
+        // A previous player rig (e.g. Home's, when joining a world) must not survive — it
+        // kept simulating and rendering, so you'd literally see yourself in the lobby.
+        if (_localNode != null)
+        {
+            _localNode.QueueFree();
+            _localNode = null;
+            _local = null;
+            _localDesktop = null;
+        }
+
         // Detect VR at spawn time — if OpenXR is initialized, use VrPlayer.
         _vrMode = VrPlayer.IsVrAvailable();
         if (_vrMode)
@@ -214,8 +224,6 @@ public partial class Main : Node3D
             SetupTouchControls(desktop);
             GD.Print("Desktop mode");
         }
-        if (_hud != null)
-            _local.SetAvatarColor(_hud.AvatarColor);
         _local.SetUsername(_username);
     }
 
@@ -472,6 +480,7 @@ public partial class Main : Node3D
 
     private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
     {
+        _inHome = false;
         _worldName = worldName;
         ShowLoading($"Connecting to {worldName}…");
         BuildCommonsWorld();
@@ -548,17 +557,34 @@ public partial class Main : Node3D
 
     // ── Per-frame ────────────────────────────────────────────────────────────────────
 
+    // ── Pause menu ──────────────────────────────────────────────────────────────────
+
+    /// Esc opens the pause menu whenever we're somewhere playable — Home included. The menu
+    /// itself handles Esc-closes; while it's up the player's movement/look are suspended.
+    private void OpenPauseMenu()
+    {
+        _pauseMenu.ShowMenu(_worldName, _inHome);
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+    }
+
+    private void OnPauseClosed()
+    {
+        // Re-enable controls unless another overlay that owns input is up right after us.
+        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false })
+            _localDesktop.ControlsEnabled = true;
+    }
+
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && _inWorld && !_pauseMenu.IsOpen)
+        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && (_inWorld || _inHome) && !_pauseMenu.IsOpen)
         {
-            _pauseMenu.Show();
+            OpenPauseMenu();
             GetViewport().SetInputAsHandled();
         }
 
         // V toggles first/third person (desktop only).
         if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.V }
-            && _localDesktop != null && _chat is { IsTyping: false })
+            && _localDesktop != null && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
         {
             bool fp = _localDesktop.ToggleCameraMode();
             _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");

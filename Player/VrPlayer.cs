@@ -76,11 +76,6 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     }
 
     public void SetUsername(string name) => _nameTag.Text = name;
-    public void SetAvatarColor(Color color)
-    {
-        if (_bodyMesh?.MaterialOverride is StandardMaterial3D mat)
-            mat.AlbedoColor = color;
-    }
 
     private void AddHandVisual(XRController3D controller, Color color)
     {

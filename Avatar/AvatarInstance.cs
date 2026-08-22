@@ -47,6 +47,7 @@ public sealed partial class AvatarInstance : Node3D
         inst.Skeleton = FindSkeleton(model);
         if (inst.Skeleton != null) inst.ResolveHumanoid();
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
+        inst.SetupAnimation();
 
         return inst;
     }
@@ -98,6 +99,107 @@ public sealed partial class AvatarInstance : Node3D
         foreach (var child in node.GetChildren())
         {
             var found = FindSkeleton(child);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    // ── Animation ─────────────────────────────────────────────────────────────────
+    //
+    // Most .ska payloads (VRM sources) ship with no animation clips at all, which left every
+    // character frozen in its rest pose. If the GLB does embed clips we play one looped;
+    // otherwise we procedurally swing the humanoid limbs from movement state — walk cycle
+    // while moving, gentle breathing/sway while idle. Driven by `Animate` each frame from
+    // the owning player/remote-avatar script.
+
+    private AnimationPlayer _animPlayer;
+
+    private readonly struct AnimBone
+    {
+        public readonly int Index;
+        public readonly Quaternion Rest; // rest-pose local rotation, our swing baseline
+        public AnimBone(int index, Quaternion rest) { Index = index; Rest = rest; }
+    }
+
+    private readonly Dictionary<string, AnimBone> _animBones = new();
+    private static readonly string[] ProceduralRoles =
+        { "hips", "leftUpperLeg", "rightUpperLeg", "leftUpperArm", "rightUpperArm", "chest", "head" };
+
+    private float _idleTime;
+    private float _walkPhase;
+    private float _moveBlend; // 0 = idle, 1 = walking, >1 = sprinting
+
+    private void SetupAnimation()
+    {
+        _animPlayer = FindAnimPlayer(_model);
+        if (_animPlayer != null && _animPlayer.GetAnimationList().Length > 0)
+        {
+            string pick = null;
+            foreach (string name in _animPlayer.GetAnimationList())
+            {
+                if (name.Contains("idle", StringComparison.OrdinalIgnoreCase)) { pick = name; break; }
+            }
+            pick ??= _animPlayer.GetAnimationList()[0];
+            _animPlayer.GetAnimation(pick).LoopMode = Animation.LoopModeEnum.Linear;
+            _animPlayer.Play(pick);
+            return;
+        }
+
+        // No clips — capture rest rotations for the procedural fallback.
+        _animPlayer = null;
+        if (Skeleton == null) return;
+        foreach (string role in ProceduralRoles)
+        {
+            int idx = BoneOf(role);
+            if (idx < 0) continue;
+            _animBones[role] = new AnimBone(idx, Skeleton.GetBoneRest(idx).Basis.GetRotationQuaternion());
+        }
+    }
+
+    /// Advance the avatar's animation. `speed` is planar m/s; pass 0 when standing still.
+    /// Call every frame from the owning node (`_PhysicsProcess`/`_Process`).
+    public void Animate(double delta, float speed, bool onFloor)
+    {
+        if (Skeleton == null || _animBones.Count == 0) return;
+        if (_animPlayer != null) return; // embedded clips drive the rig
+
+        float dt = (float)delta;
+        _idleTime += dt;
+        _moveBlend = Mathf.Lerp(_moveBlend, Mathf.Clamp(speed / 4f, 0f, 1.6f), dt * 8f);
+        _walkPhase += dt * Mathf.Max(speed, 0f) * 2.2f;
+
+        float b = _moveBlend;
+        float t = _idleTime;
+        float legSwing = Mathf.Sin(_walkPhase) * 0.55f * b;
+        float armSwing = Mathf.Sin(_walkPhase) * 0.4f * b;
+        float breathe = Mathf.Sin(t * 1.7f) * 0.025f * (1f - 0.5f * Mathf.Min(b, 1f));
+        float armIdle = Mathf.Sin(t * 1.3f) * 0.035f * (1f - Mathf.Min(b, 1f));
+
+        // Airborne: trail the legs a little instead of cycling them.
+        if (!onFloor) legSwing = 0.25f;
+
+        Swing("leftUpperLeg", legSwing);
+        Swing("rightUpperLeg", -legSwing);
+        Swing("leftUpperArm", -armSwing + armIdle);
+        Swing("rightUpperArm", armSwing + armIdle);
+        Swing("chest", breathe);
+        Swing("head", Mathf.Sin(t * 0.9f) * 0.02f);
+        Swing("hips", Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b); // subtle stride dip
+    }
+
+    /// Rotate a bone forward/back about its parent's X axis, on top of its rest rotation.
+    private void Swing(string role, float angle)
+    {
+        if (!_animBones.TryGetValue(role, out var ab)) return;
+        Skeleton.SetBonePoseRotation(ab.Index, new Quaternion(Vector3.Right, angle) * ab.Rest);
+    }
+
+    private static AnimationPlayer FindAnimPlayer(Node node)
+    {
+        if (node is AnimationPlayer ap) return ap;
+        foreach (var child in node.GetChildren())
+        {
+            var found = FindAnimPlayer(child);
             if (found != null) return found;
         }
         return null;
