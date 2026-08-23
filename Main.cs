@@ -85,7 +85,7 @@ public partial class Main : Node3D
         _voice = new VoiceManager { Name = "VoiceManager" };
         AddChild(_voice);
         _voice.VoiceFrameReady += OnVoiceFrameReady;
-        Worlds.BuildCommons(_worldRoot); // backdrop behind the login screen
+        Worlds.BuildLoginBackdrop(_worldRoot); // neutral backdrop behind the login screen
 
         var args = ParseArgs();
         if (args.ContainsKey("serika-animtest"))
@@ -116,11 +116,22 @@ public partial class Main : Node3D
         _hud.EmailLoginPressed += (email, pass) => _ = LoginWithEmailRoute(email, pass);
         _hud.RetryPressed += () => _ = LoginThenRoute();
         _hud.HomePressed += EnterHome;
-        _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
+        _hud.JoinCommonsPressed += () => OpenWorldList();
         _hud.JoinWorldPressed += (worldId) => _ = ShowWorldDetailFor(worldId);
         _hud.JoinWorldFromDetailPressed += (worldId) => _ = JoinWorldById(worldId);
         _hud.WorldListClosed += CloseWorldList;
-        _hud.ShowLogin();
+
+        // Loading screen must exist before TryRestoreSession so it can be shown
+        // during session restore and startup checks.
+        _loading = new LoadingScreen { Name = "LoadingScreen", Visible = false };
+        AddChild(_loading);
+
+        // Dev aid: SERIKA_DEBUG_LOADING=1 shows the loading screen immediately (for screenshots).
+        if (OrDefault("SERIKA_DEBUG_LOADING", "") == "1")
+            ShowLoading("Connecting to The Commons…");
+
+        // Try to restore a saved session before showing the login screen.
+        _ = TryRestoreSession();
 
         // Auto-updater: check CDN for a newer version. Non-blocking — runs in the
         // background and shows a dialog only if an update is available.
@@ -195,12 +206,6 @@ public partial class Main : Node3D
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
 
-        _loading = new LoadingScreen { Name = "LoadingScreen", Visible = false };
-        AddChild(_loading);
-
-        // Dev aid: SERIKA_DEBUG_LOADING=1 shows the loading screen immediately (for screenshots).
-        if (OrDefault("SERIKA_DEBUG_LOADING", "") == "1")
-            ShowLoading("Connecting to The Commons…");
     }
 
     /// Show the 3D loading screen with a status line during sign-in / connecting.
@@ -253,6 +258,11 @@ public partial class Main : Node3D
         _chat.AddChat(name, text);
     }
 
+    public override void _ExitTree()
+    {
+        ClearInstanceLock();
+    }
+
     // ── World ───────────────────────────────────────────────────────────────────────
 
     private Node3D _worldRoot;
@@ -268,14 +278,12 @@ public partial class Main : Node3D
         build(_worldRoot);
     }
 
-    /// Build the cosy Home and wire its Commons portal to join the multiplayer world.
+    /// Build the cosy Home and wire its portal to open the world browser.
     private void BuildHomeWorld()
     {
         SwapWorld(root => _homeInfo = Worlds.BuildHome(root));
-        _homeInfo.CommonsPortal.Entered += () => { if (_api != null) _ = JoinDefaultWorld(); };
+        _homeInfo.CommonsPortal.Entered += () => { if (_api != null) OpenWorldList(); };
     }
-
-    private void BuildCommonsWorld() => SwapWorld(Worlds.BuildCommons);
 
     private void SpawnLocalPlayer()
     {
@@ -339,6 +347,14 @@ public partial class Main : Node3D
             bool fp = player.ToggleCameraMode();
             _persistThirdPerson = !fp;
             _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
+        },
+        onMenuToggle: () => CallDeferred(nameof(OpenPauseMenu)),
+        onChatToggle: () => CallDeferred(nameof(OpenChat)),
+        onMicToggle: () => CallDeferred(nameof(ToggleMic)),
+        onActionToggle: () =>
+        {
+            if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
+            else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
         });
     }
 
@@ -428,22 +444,15 @@ public partial class Main : Node3D
             _currentAvatarId = ReadCurrentAvatarId(user);
             GD.Print($"logged in as {_username}");
 
+            SaveSession(_api.SessionToken);
+
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
             await FetchDefaultOutfit();
             _ = FetchBlockList();
 
-            if (_pendingIntent.Kind == DeepLink.Kind.World)
-            {
-                await JoinWorldById(_pendingIntent.Arg);
-                _pendingIntent = DeepLink.Intent.None;
-            }
-            else
-            {
-                // Default landing after login: the personal, single-player Home.
-                CallDeferred(nameof(EnterHome));
-            }
+            await RouteAfterLogin();
         }
         catch (Exception e)
         {
@@ -465,20 +474,14 @@ public partial class Main : Node3D
             _currentAvatarId = ReadCurrentAvatarId(user);
             GD.Print($"logged in as {_username} (email)");
 
+            SaveSession(_api.SessionToken);
+
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
             await FetchDefaultOutfit();
             _ = FetchBlockList();
 
-            if (_pendingIntent.Kind == DeepLink.Kind.World)
-            {
-                await JoinWorldById(_pendingIntent.Arg);
-                _pendingIntent = DeepLink.Intent.None;
-            }
-            else
-            {
-                CallDeferred(nameof(EnterHome));
-            }
+            await RouteAfterLogin();
         }
         catch (Exception e)
         {
@@ -487,20 +490,166 @@ public partial class Main : Node3D
         }
     }
 
-    /// Join the built-in default world (the multiplayer commons) from within Home.
-    private async Task JoinDefaultWorld()
+    // JoinDefaultWorld removed — all worlds are joined remotely via the world browser.
+    // The Home portal now opens the world list directly.
+
+    // ── Login persistence ───────────────────────────────────────────────────────────
+
+    private const string SessionPath = "user://session.json";
+    private const string LockDir = "user://locks";
+
+    /// Check whether another live Godot instance is already running (sharing the same
+    /// user:// directory). Each instance writes a per-PID lock file; stale locks from
+    /// crashed processes are cleaned up here. Used to force a second client to log in
+    /// with a different account instead of silently sharing the first one's session.
+    private static bool IsAnotherInstanceRunning()
     {
-        if (_api == null) return;
         try
         {
-            ShowLoading("Finding a world…");
-            var worlds = await _api.GetWorldsAsync();
-            await JoinWorldById(worlds[0].GetProperty("id").GetString());
+            var absDir = ProjectSettings.GlobalizePath(LockDir);
+            if (!System.IO.Directory.Exists(absDir)) return false;
+
+            int ourPid = System.Environment.ProcessId;
+            bool found = false;
+            foreach (var file in System.IO.Directory.GetFiles(absDir, "*.lock"))
+            {
+                try
+                {
+                    int pid = int.Parse(System.IO.Path.GetFileNameWithoutExtension(file));
+                    if (pid == ourPid) continue;
+                    try { System.Diagnostics.Process.GetProcessById(pid); found = true; }
+                    catch { try { System.IO.File.Delete(file); } catch { } }
+                }
+                catch { }
+            }
+            return found;
         }
-        catch (Exception e)
+        catch { return false; }
+    }
+
+    private static void WriteInstanceLock()
+    {
+        try
         {
-            GD.PrintErr($"join failed: {e.Message}");
-            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
+            var absDir = ProjectSettings.GlobalizePath(LockDir);
+            System.IO.Directory.CreateDirectory(absDir);
+            System.IO.File.WriteAllText(
+                System.IO.Path.Combine(absDir, $"{System.Environment.ProcessId}.lock"),
+                System.Environment.ProcessId.ToString());
+        }
+        catch { }
+    }
+
+    private static void ClearInstanceLock()
+    {
+        try
+        {
+            var absPath = System.IO.Path.Combine(
+                ProjectSettings.GlobalizePath(LockDir),
+                $"{System.Environment.ProcessId}.lock");
+            if (System.IO.File.Exists(absPath)) System.IO.File.Delete(absPath);
+        }
+        catch { }
+    }
+
+    private async Task TryRestoreSession()
+    {
+        WriteInstanceLock();
+        ShowLoading("Starting up…");
+
+        if (IsAnotherInstanceRunning())
+        {
+            GD.Print("another instance is already running — requiring separate login");
+            SetLoadingStatus("Another instance is running — please log in");
+            CallDeferred(nameof(ShowLoginScreen));
+            return;
+        }
+
+        string token = LoadSession();
+        if (string.IsNullOrEmpty(token))
+        {
+            CallDeferred(nameof(ShowLoginScreen));
+            return;
+        }
+
+        SetLoadingStatus("Restoring your session…");
+        try
+        {
+            _api = new ApiClient(ApiBaseUrl);
+            var user = await _api.VerifySessionAsync(token);
+            if (user.ValueKind == JsonValueKind.Object && user.TryGetProperty("id", out _))
+            {
+                _username = user.GetProperty("username").GetString();
+                _currentAvatarId = ReadCurrentAvatarId(user);
+                GD.Print($"session restored as {_username}");
+
+                SetLoadingStatus("Loading your avatar…");
+                await FetchCurrentAvatar();
+                await FetchDefaultOutfit();
+                _ = FetchBlockList();
+
+                await RouteAfterLogin();
+                return;
+            }
+        }
+        catch (Exception e) { GD.PrintErr($"session restore failed: {e.Message}"); }
+
+        // Token expired or invalid — clear it and show login.
+        ClearSession();
+        CallDeferred(nameof(ShowLoginScreen));
+    }
+
+    private void ShowLoginScreen()
+    {
+        HideLoading();
+        _hud?.ShowLogin();
+    }
+
+    private void SaveSession(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return;
+        try
+        {
+            var abs = ProjectSettings.GlobalizePath(SessionPath);
+            System.IO.File.WriteAllText(abs, token);
+            GD.Print("session token saved");
+        }
+        catch (Exception e) { GD.PrintErr($"failed to save session: {e.Message}"); }
+    }
+
+    private string LoadSession()
+    {
+        try
+        {
+            var abs = ProjectSettings.GlobalizePath(SessionPath);
+            if (System.IO.File.Exists(abs))
+                return System.IO.File.ReadAllText(abs).Trim();
+        }
+        catch { }
+        return null;
+    }
+
+    private void ClearSession()
+    {
+        try
+        {
+            var abs = ProjectSettings.GlobalizePath(SessionPath);
+            if (System.IO.File.Exists(abs)) System.IO.File.Delete(abs);
+        }
+        catch { }
+    }
+
+    /// Route after a fresh login or session restore: deep-linked world, or Home.
+    private async Task RouteAfterLogin()
+    {
+        if (_pendingIntent.Kind == DeepLink.Kind.World)
+        {
+            await JoinWorldById(_pendingIntent.Arg);
+            _pendingIntent = DeepLink.Intent.None;
+        }
+        else
+        {
+            CallDeferred(nameof(EnterHome));
         }
     }
 
@@ -684,10 +833,17 @@ public partial class Main : Node3D
             _localDesktop?.SetAvatar(avatar);
 
             // Persist so it's worn on the next join and by remotes after they resync.
+            bool persisted = true;
             try { await _api.SelectAvatarAsync(id); }
-            catch (Exception e) { GD.PrintErr($"avatar select persist failed: {e.Message}"); }
+            catch (Exception e)
+            {
+                GD.PrintErr($"avatar select persist failed: {e.Message}");
+                persisted = false;
+            }
 
-            _inWorldHud?.Toast($"Now wearing {name}", 3);
+            _inWorldHud?.Toast(
+                persisted ? $"Now wearing {name}" : $"Now wearing {name} (save failed — won't persist)",
+                persisted ? 3 : 5);
         }
         catch (Exception e)
         {
@@ -898,14 +1054,17 @@ public partial class Main : Node3D
 
     private string _worldName = "the world";
 
+    private Vector3 _worldSpawn = new(0, 1, 8);
+
     private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
     {
+        GD.Print($"OnJoinReady worldId={_currentWorldId} name={worldName}");
         _inHome = false;
         _worldName = worldName;
         ShowLoading($"Connecting to {worldName}…");
-        SwapWorld(root => Worlds.BuildWorldForId(_currentWorldId, root));
+        SwapWorld(root => _worldSpawn = Worlds.BuildWorldForId(_currentWorldId, root));
         SpawnLocalPlayer();
-        MoveLocalTo(new Vector3(0, 1, 8));
+        MoveLocalTo(_worldSpawn);
         ConnectTo(endpoint, ticket);
     }
 
@@ -1069,7 +1228,7 @@ public partial class Main : Node3D
     private void ApplyRemoteAvatar(uint peerId, string path)
     {
         if (!_remotes.TryGetValue(peerId, out var a)) return;
-        a.EquipAvatar(path);
+        a.EquipAvatar(path, isReal: true);
         a.SetLoading(false);
     }
 

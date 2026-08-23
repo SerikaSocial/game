@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.1.0"
+config/version="1.1.4"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
@@ -101,7 +101,7 @@ textures/vram_compression/import_etc2_astc=true
 ; Android/Quest or when the client is launched with `--vr` — via VrPlayer.TryInitVr().
 openxr/enabled=false
 openxr/default_action_map="res://xr_actions.json"
-openxr/form_factor="handheld"
+openxr/form_factor="head_mounted"
 openxr/reference_space="local"
 openxr/submit_depth_buffer=true
-openxr/extensions/hand_tracking=false
+openxr/extensions/hand_tracking=true

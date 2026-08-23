@@ -9,25 +9,27 @@ namespace SerikaSocial.World;
 ///
 /// This produces a true mirror reflection — you see yourself and the room behind you,
 /// with correct perspective that shifts as you move.
+[GlobalClass]
 public partial class Mirror : Node3D
 {
     private readonly Vector2 _size;
+    private float _frustumScale;
     private SubViewport _viewport;
     private Camera3D _mirrorCam;
     private MeshInstance3D _surface;
     private float _activeRange;
-    private float _cullNear = 0.05f;
     private float _cullFar = 50.0f;
 
-    public Mirror(float width = 1.4f, float height = 2.2f, float activeRange = 12f)
+    public Mirror(float width = 1.4f, float height = 2.2f, float activeRange = 12f, float frustumScale = 1.0f)
     {
         _size = new Vector2(width, height);
         _activeRange = activeRange;
+        _frustumScale = frustumScale;
     }
 
-    public static Mirror Create(Vector3 position, float yawDeg, float width = 1.4f, float height = 2.2f)
+    public static Mirror Create(Vector3 position, float yawDeg, float width = 1.4f, float height = 2.2f, float frustumScale = 1.0f)
     {
-        var m = new Mirror(width, height)
+        var m = new Mirror(width, height, 12f, frustumScale)
         {
             Name = "Mirror",
             Position = position,
@@ -38,11 +40,14 @@ public partial class Mirror : Node3D
 
     public override void _Ready()
     {
-        // Ornate frame around the glass.
+        // Ornate frame around the glass. Both frame and surface are on visual layer 2 so the
+        // reflection camera can cull them: otherwise the near-plane push would reveal the back
+        // of the wall in an ugly outline. The main player cameras render all layers by default.
         var frame = new MeshInstance3D
         {
             Mesh = new BoxMesh { Size = new Vector3(_size.X + 0.16f, _size.Y + 0.16f, 0.08f) },
             Position = new Vector3(0, _size.Y * 0.5f, -0.04f),
+            Layers = 1u << 1,
         };
         frame.MaterialOverride = new StandardMaterial3D
         {
@@ -61,14 +66,23 @@ public partial class Mirror : Node3D
             RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled,
             RenderTargetClearMode = SubViewport.ClearMode.Always,
             OwnWorld3D = false,
+            // Ensure the viewport renders with the same 3D world and environment as the main view.
+            CanvasItemDefaultTextureFilter = Viewport.DefaultCanvasItemTextureFilter.LinearWithMipmaps,
         };
         AddChild(_viewport);
 
         // Current must be TRUE: `Current` is per-viewport, so this only makes the camera the
         // active one INSIDE the SubViewport (it never touches the main window's camera). With
-        // it false the SubViewport had no active camera and rendered nothing — the glass just
-        // showed the clear colour (a flat white plane, no reflection). This is the fix for that.
-        _mirrorCam = new Camera3D { Current = true };
+        // it false the SubViewport had no active camera and rendered nothing.
+        _mirrorCam = new Camera3D
+        {
+            Current = true,
+            // TopLevel so its GlobalTransform is written in world space, not influenced by the
+            // SubViewport's (identity) transform chain. This makes the reflection math reliable.
+            TopLevel = true,
+            // Do not render the mirror frame/surface (layer 2), only the room beyond it (layer 1).
+            CullMask = 1048575u & ~(1u << 1),
+        };
         _viewport.AddChild(_mirrorCam);
 
         // The glass quad, textured with the viewport via the mirror shader.
@@ -76,6 +90,7 @@ public partial class Mirror : Node3D
         {
             Mesh = new QuadMesh { Size = _size },
             Position = new Vector3(0, _size.Y * 0.5f, 0),
+            Layers = 1u << 1,
         };
         var mirrorShader = ResourceLoader.Load<Shader>("res://Shaders/mirror.gdshader");
         if (mirrorShader != null)
@@ -88,7 +103,7 @@ public partial class Mirror : Node3D
         else
         {
             // The shader must be packed with the build (it is, via all_resources) — if this
-            // ever fires in an exported build it's a real regression, so make it loud and
+            // ever fires in an exported build it is a real regression, so make it loud and
             // fall back to showing the raw reflection texture rather than a broken-pink quad.
             GD.PrintErr("Mirror: res://Shaders/mirror.gdshader failed to load — using unshaded fallback");
             _surface.MaterialOverride = new StandardMaterial3D
@@ -99,6 +114,17 @@ public partial class Mirror : Node3D
             };
         }
         AddChild(_surface);
+
+        // Invisible collision wall so the player can't walk through the mirror.
+        var collider = new StaticBody3D
+        {
+            Position = new Vector3(0, _size.Y * 0.5f, 0),
+        };
+        collider.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(_size.X, _size.Y, 0.04f) },
+        });
+        AddChild(collider);
     }
 
     public override void _Process(double _)
@@ -115,12 +141,12 @@ public partial class Mirror : Node3D
 
         // Skip the extra render when far away.
         Vector3 planePos = _surface.GlobalPosition;
-        if (viewer.GlobalPosition.DistanceTo(planePos) > _activeRange)
+        Vector3 viewerPos = viewer.GlobalPosition;
+        if (viewerPos.DistanceTo(planePos) > _activeRange)
         {
             _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
             return;
         }
-        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
 
         // Mirror plane normal = the surface's +Z (facing out toward the viewer).
         Vector3 mirrorNormal = _surface.GlobalBasis.Z.Normalized();
@@ -131,10 +157,28 @@ public partial class Mirror : Node3D
         // Apply: mirror_camera = mirror_transform * player_camera
         _mirrorCam.GlobalTransform = mirrorTransform * viewer.GlobalTransform;
 
-        // Copy camera FOV and properties from viewer
-        _mirrorCam.Fov = viewer.Fov;
-        _mirrorCam.Near = viewer.Near;
-        _mirrorCam.Far = viewer.Far;
+        // The reflection matrix produces a left-handed (improper) coordinate system.
+        // Flip the camera's right (X) axis to restore right-handedness so the image
+        // is not inside-out. This is the key fix for the "head gone" / distorted view.
+        var b = _mirrorCam.GlobalBasis;
+        b.X = -b.X;
+        _mirrorCam.GlobalBasis = b;
+
+        // Near clip: place it exactly at the mirror plane so the wall behind the
+        // mirror is culled. No raycast needed — the distance from the reflected
+        // camera to the mirror plane is the correct near value.
+        Vector3 cameraToMirrorOffset = planePos - _mirrorCam.GlobalPosition;
+        float distToPlane = Mathf.Abs(mirrorNormal.Dot(cameraToMirrorOffset));
+        float near = Mathf.Max(0.01f, distToPlane - 0.02f);
+
+        // Asymmetric frustum offset: shift the projection so the mirror quad
+        // fills the viewport with correct perspective. The offset is the mirror
+        // center position in the reflected camera's local space.
+        Vector3 camToMirrorLocal = _mirrorCam.GlobalBasis.Inverse() * cameraToMirrorOffset;
+        Vector2 frustumOffset = new Vector2(-camToMirrorLocal.X, -camToMirrorLocal.Y);
+        _mirrorCam.SetFrustum(_size.X * _frustumScale, frustumOffset, near, viewer.Far);
+
+        _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
     }
 
     /// Calculates the transformation that mirrors through the plane with the given normal

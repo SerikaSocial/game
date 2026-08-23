@@ -13,6 +13,7 @@ public partial class RemoteAvatar : Node3D
     private Quaternion _targetRot = Quaternion.Identity;
     private bool _hasTarget;
     private bool _streamingBones;   // peer sends real bone rotations → don't animate locally
+    private bool _hasRealAvatar;
 
     public uint PeerId { get; private set; }
 

@@ -19,6 +19,22 @@ public sealed class ApiClient
 
     public ApiClient(string baseUrl) => _baseUrl = baseUrl.TrimEnd('/');
 
+    /// Verify a saved session token by calling /v1/session/me. Returns the user object
+    /// if the token is still valid, or null if expired/invalid. Used for login persistence.
+    public async Task<JsonElement> VerifySessionAsync(string token)
+    {
+        try
+        {
+            SessionToken = token;
+            var res = await GetAuthedAsync("/v1/session/me");
+            if (res.TryGetProperty("id", out _) )
+                return res;
+        }
+        catch { }
+        SessionToken = null;
+        return default;
+    }
+
     /// Exchange a PKCE code for our session token. Returns the logged-in user's id, or
     /// throws with the server's error code (e.g. "banned").
     public async Task<JsonElement> ExchangeAsync(string code, string codeVerifier)
@@ -59,7 +75,7 @@ public sealed class ApiClient
         try
         {
             DirAccess.MakeDirRecursiveAbsolute("user://worlds");
-            string abs = ProjectSettings.GlobalizePath($"user://worlds/{worldId}.skw");
+            string abs = ProjectSettings.GlobalizePath($"user://worlds/{worldId}.serikaworld");
             if (await DownloadToAsync(url, abs))
                 return abs;
         }

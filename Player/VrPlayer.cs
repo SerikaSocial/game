@@ -21,6 +21,8 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private XRCamera3D _camera;
     private XRController3D _leftHand;
     private XRController3D _rightHand;
+    private XRNode3D _leftHandTracker;
+    private XRNode3D _rightHandTracker;
 
     private float _gravity = 9.8f;
     private float _snapTurnCooldown;
@@ -55,14 +57,27 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         _origin.AddChild(_camera);
 
         _leftHand = new XRController3D { Name = "LeftHand", Tracker = "/user/hand/left" };
+        _leftHand.ShowWhenTracked = true;
         _origin.AddChild(_leftHand);
 
         _rightHand = new XRController3D { Name = "RightHand", Tracker = "/user/hand/right" };
+        _rightHand.ShowWhenTracked = true;
         _origin.AddChild(_rightHand);
 
-        // Hand visuals — simple boxes so you can see your controllers
+        // Separate hand tracking targets (optical hand tracking or controller-inferred).
+        _leftHandTracker = new XRNode3D { Name = "LeftHandTracker", Tracker = "/user/hand_tracker/left" };
+        _leftHandTracker.ShowWhenTracked = true;
+        _origin.AddChild(_leftHandTracker);
+
+        _rightHandTracker = new XRNode3D { Name = "RightHandTracker", Tracker = "/user/hand_tracker/right" };
+        _rightHandTracker.ShowWhenTracked = true;
+        _origin.AddChild(_rightHandTracker);
+
+        // Hand visuals — simple boxes so you can see your controllers/hands
         AddHandVisual(_leftHand, new Color(0.3f, 0.6f, 0.9f));
         AddHandVisual(_rightHand, new Color(0.9f, 0.4f, 0.3f));
+        AddHandVisual(_leftHandTracker, new Color(0.2f, 0.5f, 0.8f));
+        AddHandVisual(_rightHandTracker, new Color(0.8f, 0.3f, 0.2f));
 
         // Name tag floating above head
         _nameTag = new Label3D
@@ -77,7 +92,7 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
 
     public void SetUsername(string name) => _nameTag.Text = name;
 
-    private void AddHandVisual(XRController3D controller, Color color)
+    private void AddHandVisual(Node3D parent, Color color)
     {
         var mesh = new MeshInstance3D
         {
@@ -88,7 +103,7 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
             AlbedoColor = color,
             Roughness = 0.5f,
         };
-        controller.AddChild(mesh);
+        parent.AddChild(mesh);
     }
 
     public override void _PhysicsProcess(double delta)
@@ -112,7 +127,8 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
             var right = camBasis.X with { Y = 0 };
             if (right.LengthSquared() > 0) right = right.Normalized();
 
-            bool sprinting = _leftHand.GetFloat("grip") > 0.5f || _rightHand.GetFloat("grip") > 0.5f;
+            bool sprinting = _leftHand.GetFloat("grip") > 0.5f || _rightHand.GetFloat("grip") > 0.5f
+                || _leftHand.GetFloat("squeeze") > 0.5f || _rightHand.GetFloat("squeeze") > 0.5f;
             float speed = sprinting ? SprintSpeed : WalkSpeed;
 
             var dir = (forward * -moveVec.Y + right * moveVec.X) * speed;
@@ -135,8 +151,8 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
             _snapTurnCooldown = 0.3f;
         }
 
-        // Jump: right hand trigger
-        if (_rightHand.GetFloat("trigger") > 0.5f && IsOnFloor())
+        // Jump: right hand trigger or pinch
+        if ((_rightHand.GetFloat("trigger") > 0.5f || _rightHand.GetInput("pinch").AsBool()) && IsOnFloor())
             v.Y = 4.5f;
 
         Velocity = v;

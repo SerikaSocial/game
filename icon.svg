@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Serika Social app icon. Brand purple, hue 262 — keep in sync with UI/Brand.cs
+       (Primary #7C3AED) and web/app/globals.css. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#5B21B6"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#C4B5FD"/>
+      <stop offset="100%" stop-color="#A78BFA"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" ry="56" fill="url(#bg)"/>
+
+  <!-- Orbit ring: the "social" half of the mark. -->
+  <ellipse cx="128" cy="128" rx="86" ry="42" fill="none" stroke="url(#ring)"
+           stroke-width="9" opacity="0.65" transform="rotate(-28 128 128)"/>
+  <circle cx="196" cy="92" r="13" fill="#DDD6FE"/>
+  <circle cx="60" cy="164" r="10" fill="#C4B5FD" opacity="0.9"/>
+
+  <!-- S monogram -->
+  <path d="M162 92c-9-11-23-17-38-17-24 0-40 12-40 30 0 16 12 24 34 29l14 3c12 3 17 7 17 14
+           0 9-10 15-24 15-15 0-27-6-35-16l-16 18c11 13 29 21 50 21 27 0 45-13 45-33
+           0-17-11-26-34-31l-15-3c-11-2-16-6-16-13 0-8 9-14 22-14 12 0 22 5 29 13z"
+        fill="#FFFFFF"/>
+</svg>
