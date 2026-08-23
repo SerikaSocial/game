@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using Godot;
 
 namespace SerikaSocial;
@@ -18,9 +19,11 @@ public partial class Hud : CanvasLayer
     public event Action HomePressed;
     public event Action JoinCommonsPressed;
     public event Action<string> JoinWorldPressed;
+    /// Fired when the player clicks Join in the world detail panel.
+    public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.0.0";
+    public const string ClientVersion = "1.1.0";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -39,10 +42,23 @@ public partial class Hud : CanvasLayer
 
     private Panel _homePanel;
     private Label _homeLabel;
-    private VBoxContainer _worldListContainer;
+    private GridContainer _worldListContainer;
     private Button _homeButton;
 
+    // World detail panel
+    private Panel _worldDetailPanel;
+    private Label _detailName;
+    private Label _detailDesc;
+    private Label _detailStats;
+    private VBoxContainer _detailInstanceList;
+    private HBoxContainer _detailTagsRow;
+    private Button _detailJoinButton;
+    private string _detailWorldId;
+
     private bool _spinning;
+
+    // Store world data so we can show detail without re-fetching
+    private readonly Dictionary<string, (string name, string description, int capacity, string author, string downloadUrl)> _worldCache = new();
 
     public override void _Ready()
     {
@@ -194,6 +210,7 @@ public partial class Hud : CanvasLayer
         AddChild(_toast);
 
         BuildHomePanel();
+        BuildWorldDetailPanel();
         BuildHomeButton();
     }
 
@@ -207,10 +224,10 @@ public partial class Hud : CanvasLayer
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -340,
-            OffsetTop = -260,
-            OffsetRight = 340,
-            OffsetBottom = 260,
+            OffsetLeft = -440,
+            OffsetTop = -320,
+            OffsetRight = 440,
+            OffsetBottom = 320,
         };
         _homePanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_homePanel);
@@ -240,20 +257,22 @@ public partial class Hud : CanvasLayer
 
         vbox.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
 
-        // Scrollable world list
+        // Scrollable world grid
         var scroll = new ScrollContainer
         {
-            CustomMinimumSize = new Vector2(0, 200),
+            CustomMinimumSize = new Vector2(0, 240),
             SizeFlagsVertical = Control.SizeFlags.ExpandFill,
         };
         scroll.AddThemeStyleboxOverride("panel", new StyleBoxFlat { BgColor = new Color(0, 0, 0, 0) });
         vbox.AddChild(scroll);
 
-        _worldListContainer = new VBoxContainer
+        _worldListContainer = new GridContainer
         {
+            Columns = 3,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
-        _worldListContainer.AddThemeConstantOverride("separation", 8);
+        _worldListContainer.AddThemeConstantOverride("h_separation", 12);
+        _worldListContainer.AddThemeConstantOverride("v_separation", 12);
         scroll.AddChild(_worldListContainer);
 
         var row = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
@@ -279,6 +298,207 @@ public partial class Hud : CanvasLayer
         row.AddChild(back);
     }
 
+    // ── World Detail panel ──────────────────────────────────────────────────────────
+    private void BuildWorldDetailPanel()
+    {
+        _worldDetailPanel = new Panel
+        {
+            Visible = false,
+            AnchorLeft = 0.5f,
+            AnchorTop = 0.5f,
+            AnchorRight = 0.5f,
+            AnchorBottom = 0.5f,
+            OffsetLeft = -340,
+            OffsetTop = -280,
+            OffsetRight = 340,
+            OffsetBottom = 280,
+        };
+        _worldDetailPanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
+        AddChild(_worldDetailPanel);
+
+        var vbox = new VBoxContainer
+        {
+            AnchorRight = 1, AnchorBottom = 1,
+            OffsetLeft = 28, OffsetTop = 28, OffsetRight = -28, OffsetBottom = -28,
+        };
+        vbox.AddThemeConstantOverride("separation", 14);
+        _worldDetailPanel.AddChild(vbox);
+
+        // Header row: back button + title
+        var header = new HBoxContainer();
+        header.AddThemeConstantOverride("separation", 12);
+        vbox.AddChild(header);
+
+        var backBtn = Brand.Ghost_(new Button { Text = "← Back" });
+        backBtn.Pressed += () =>
+        {
+            _worldDetailPanel.Visible = false;
+            _homePanel.Visible = true;
+        };
+        header.AddChild(backBtn);
+
+        _detailName = new Label { Text = "" };
+        _detailName.AddThemeFontSizeOverride("font_size", 24);
+        _detailName.AddThemeColorOverride("font_color", Brand.TextHi);
+        header.AddChild(_detailName);
+
+        // Tags row
+        _detailTagsRow = new HBoxContainer();
+        _detailTagsRow.AddThemeConstantOverride("separation", 6);
+        vbox.AddChild(_detailTagsRow);
+
+        // Description
+        _detailDesc = new Label
+        {
+            Text = "",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            CustomMinimumSize = new Vector2(0, 60),
+        };
+        _detailDesc.AddThemeFontSizeOverride("font_size", 14);
+        _detailDesc.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
+        vbox.AddChild(_detailDesc);
+
+        // Stats
+        _detailStats = new Label { Text = "" };
+        _detailStats.AddThemeFontSizeOverride("font_size", 13);
+        _detailStats.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(_detailStats);
+
+        vbox.AddChild(new HSeparator());
+
+        // Instance list heading
+        var instanceLabel = new Label { Text = "Active Servers" };
+        instanceLabel.AddThemeFontSizeOverride("font_size", 14);
+        instanceLabel.AddThemeColorOverride("font_color", Brand.TextHi);
+        vbox.AddChild(instanceLabel);
+
+        var instanceScroll = new ScrollContainer
+        {
+            CustomMinimumSize = new Vector2(0, 100),
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+        };
+        instanceScroll.AddThemeStyleboxOverride("panel", new StyleBoxFlat { BgColor = new Color(0, 0, 0, 0) });
+        vbox.AddChild(instanceScroll);
+
+        _detailInstanceList = new VBoxContainer();
+        _detailInstanceList.AddThemeConstantOverride("separation", 6);
+        instanceScroll.AddChild(_detailInstanceList);
+
+        // Join button
+        _detailJoinButton = MakeButton("Join World", true);
+        _detailJoinButton.CustomMinimumSize = new Vector2(0, 48);
+        _detailJoinButton.Pressed += () =>
+        {
+            if (!string.IsNullOrEmpty(_detailWorldId))
+                JoinWorldFromDetailPressed?.Invoke(_detailWorldId);
+        };
+        vbox.AddChild(_detailJoinButton);
+    }
+
+    /// Show the world detail panel with data from the API.
+    public void ShowWorldDetail(JsonElement world)
+    {
+        string id = world.GetProperty("id").GetString() ?? "";
+        string name = world.TryGetProperty("name", out var n) ? n.GetString() ?? "Unknown" : "Unknown";
+        string desc = world.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "";
+        int capacity = world.TryGetProperty("capacity", out var cap) ? cap.GetInt32() : 32;
+        int visitCount = world.TryGetProperty("visitCount", out var vc) ? vc.GetInt32() : 0;
+        string author = world.TryGetProperty("author", out var au) && au.ValueKind == JsonValueKind.String
+            ? au.GetString() : null;
+        bool isBuiltin = world.TryGetProperty("isBuiltin", out var bi) && bi.GetBoolean();
+
+        _detailWorldId = id;
+        _detailName.Text = name;
+        _detailDesc.Text = string.IsNullOrEmpty(desc) ? "No description provided." : desc;
+
+        var statsText = $"Capacity: {capacity}  ·  Visits: {visitCount:N0}";
+        if (!string.IsNullOrEmpty(author)) statsText += $"  ·  By {author}";
+        if (isBuiltin) statsText += "  ·  Built-in";
+        _detailStats.Text = statsText;
+
+        // Tags
+        foreach (var c in _detailTagsRow.GetChildren()) c.QueueFree();
+        if (world.TryGetProperty("tags", out var tags) && tags.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var tag in tags.EnumerateArray())
+            {
+                string tagStr = tag.GetString();
+                if (string.IsNullOrEmpty(tagStr)) continue;
+                var tagLabel = new Label { Text = tagStr };
+                tagLabel.AddThemeFontSizeOverride("font_size", 11);
+                tagLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.6f, 0.9f));
+                // Tag pill background
+                var tagPanel = new PanelContainer();
+                tagPanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg3, 8));
+                tagPanel.AddChild(tagLabel);
+                _detailTagsRow.AddChild(tagPanel);
+            }
+        }
+
+        // Instances
+        foreach (var c in _detailInstanceList.GetChildren()) c.QueueFree();
+        if (world.TryGetProperty("instances", out var instances) && instances.ValueKind == JsonValueKind.Array
+            && instances.GetArrayLength() > 0)
+        {
+            foreach (var inst in instances.EnumerateArray())
+            {
+                int playerCount = inst.TryGetProperty("playerCount", out var pc) ? pc.GetInt32() : 0;
+                int instCap = inst.TryGetProperty("capacity", out var ic) ? ic.GetInt32() : capacity;
+                int access = inst.TryGetProperty("access", out var ac) ? ac.GetInt32() : 0;
+                int mode = inst.TryGetProperty("mode", out var md) ? md.GetInt32() : 0;
+                string region = inst.TryGetProperty("region", out var rg) && rg.ValueKind == JsonValueKind.String
+                    ? rg.GetString() : null;
+
+                string[] accessLabels = { "Public", "Friends+", "Friends", "Invite", "Group" };
+                string[] modeLabels = { "Relay", "P2P" };
+
+                var row = new HBoxContainer();
+                row.AddThemeConstantOverride("separation", 8);
+
+                // Status dot
+                bool full = playerCount >= instCap;
+                var dot = new ColorRect
+                {
+                    CustomMinimumSize = new Vector2(8, 8),
+                    Color = full ? new Color(0.5f, 0.5f, 0.5f) : new Color(0.3f, 0.9f, 0.5f),
+                };
+                row.AddChild(dot);
+
+                var infoLabel = new Label
+                {
+                    Text = $"{(access < accessLabels.Length ? accessLabels[access] : "Instance")} · " +
+                           $"{(mode < modeLabels.Length ? modeLabels[mode] : "—")}" +
+                           (region != null ? $" · {region}" : ""),
+                };
+                infoLabel.AddThemeFontSizeOverride("font_size", 12);
+                infoLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
+                infoLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+                row.AddChild(infoLabel);
+
+                var countLabel = new Label { Text = $"{playerCount}/{instCap}" };
+                countLabel.AddThemeFontSizeOverride("font_size", 12);
+                countLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+                row.AddChild(countLabel);
+
+                _detailInstanceList.AddChild(row);
+            }
+        }
+        else
+        {
+            var noServers = new Label
+            {
+                Text = "No active servers. Join to start one.",
+                HorizontalAlignment = HorizontalAlignment.Center,
+            };
+            noServers.AddThemeFontSizeOverride("font_size", 12);
+            noServers.AddThemeColorOverride("font_color", Brand.TextDim);
+            _detailInstanceList.AddChild(noServers);
+        }
+
+        _homePanel.Visible = false;
+        _worldDetailPanel.Visible = true;
+    }
+
     /// Fired when the world-list overlay is dismissed ("Stay home"), so Main can recapture input.
     public event Action WorldListClosed;
 
@@ -290,6 +510,7 @@ public partial class Hud : CanvasLayer
         _loginScreen.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
+        _worldDetailPanel.Visible = false;
         SetSpinning(false);
     }
 
@@ -301,6 +522,7 @@ public partial class Hud : CanvasLayer
         _scrim.Visible = false;
         _loginScreen.Visible = false;
         _homeButton.Visible = false;
+        _worldDetailPanel.Visible = false;
         _homeLabel.Text = $"Worlds — hi, {username}";
         _homePanel.Visible = true;
     }
@@ -325,38 +547,6 @@ public partial class Hud : CanvasLayer
         return primary ? Brand.Primary_(b) : Brand.Ghost_(b);
     }
 
-    private static Button MakeWorldButton(string name, string desc, int capacity, string author = null)
-    {
-        var btn = new Button
-        {
-            CustomMinimumSize = new Vector2(0, 64),
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-        };
-        var normal = new StyleBoxFlat
-        {
-            BgColor = new Color(0.12f, 0.13f, 0.16f),
-            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
-            CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
-            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
-            BorderColor = new Color(1, 1, 1, 0.05f),
-            ContentMarginLeft = 16, ContentMarginRight = 16,
-            ContentMarginTop = 12, ContentMarginBottom = 12,
-        };
-        var hover = (StyleBoxFlat)normal.Duplicate();
-        hover.BgColor = new Color(0.16f, 0.17f, 0.21f);
-        hover.BorderColor = new Color(1, 1, 1, 0.12f);
-        btn.AddThemeStyleboxOverride("normal", normal);
-        btn.AddThemeStyleboxOverride("hover", hover);
-        btn.AddThemeStyleboxOverride("pressed", normal);
-        btn.AddThemeColorOverride("font_color", new Color(0.9f, 0.92f, 0.95f));
-        btn.AddThemeFontSizeOverride("font_size", 15);
-        btn.Text = author != null
-            ? $"{name}  by {author}  [{capacity}]"
-            : $"{name}    [capacity: {capacity}]";
-        btn.TooltipText = desc;
-        return btn;
-    }
-
     // ── Public state transitions ─────────────────────────────────────────────────────
 
     /// The initial screen: a single Log in button.
@@ -373,6 +563,7 @@ public partial class Hud : CanvasLayer
         _quitButton.Visible = true;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
+        _worldDetailPanel.Visible = false;
         SetSpinning(false);
         _subtitle.Visible = true;
         _status.Text = "";
@@ -392,6 +583,7 @@ public partial class Hud : CanvasLayer
         _subtitle.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = false;
+        _worldDetailPanel.Visible = false;
         SetSpinning(true);
         _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
         _status.Text = message;
@@ -421,6 +613,7 @@ public partial class Hud : CanvasLayer
         _loginScreen.Visible = false;
         _homePanel.Visible = false;
         _homeButton.Visible = true;
+        _worldDetailPanel.Visible = false;
         SetSpinning(false);
         if (!string.IsNullOrEmpty(toast))
         {
@@ -438,23 +631,24 @@ public partial class Hud : CanvasLayer
         _scrim.Visible = false;
         _loginScreen.Visible = false;
         _homeButton.Visible = false;
-        SetSpinning(false);
-        _homeLabel.Text = $"Welcome home, {username}";
+        _worldDetailPanel.Visible = false;
+        _homeLabel.Text = $"Welcome, {username}";
         _homePanel.Visible = true;
     }
 
-    /// Populate the world list in the Home panel. Each entry is a button that fires JoinWorldPressed.
+    /// Populate the world grid in the Home panel. Each entry is a card that opens world detail.
     public void SetWorlds(List<(string id, string name, string description, int capacity, string author, string downloadUrl)> worlds)
     {
         if (_worldListContainer == null) return;
         foreach (var child in _worldListContainer.GetChildren())
             child.QueueFree();
+        _worldCache.Clear();
 
         if (worlds.Count == 0)
         {
             var empty = new Label
             {
-                Text = "No worlds available right now.",
+                Text = "No worlds available yet. Check back later or visit social.serika.dev.",
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
             empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
@@ -465,11 +659,111 @@ public partial class Hud : CanvasLayer
 
         foreach (var w in worlds)
         {
-            var btn = MakeWorldButton(w.name, w.description, w.capacity, w.author);
-            var id = w.id;
-            btn.Pressed += () => JoinWorldPressed?.Invoke(id);
-            _worldListContainer.AddChild(btn);
+            _worldCache[w.id] = (w.name, w.description, w.capacity, w.author, w.downloadUrl);
+            var card = MakeWorldCard(w.id, w.name, w.description, w.capacity, w.author);
+            _worldListContainer.AddChild(card);
         }
+    }
+
+    /// Deterministic hue from a seed string (same algorithm as the web frontend).
+    private static float WorldHue(string seed)
+    {
+        float h = 262f;
+        for (int i = 0; i < seed.Length; i++)
+            h = (h + seed[i] * 7f) % 360f;
+        return h;
+    }
+
+    private Button MakeWorldCard(string id, string name, string desc, int capacity, string author = null)
+    {
+        var btn = new Button
+        {
+            CustomMinimumSize = new Vector2(250, 130),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            ClipContents = true,
+        };
+
+        // Gradient background using the world name as seed (matches web)
+        float hue = WorldHue(name ?? id);
+        float hue2 = (hue + 40f) % 360f;
+        var col1 = Color.FromHsv(hue / 360f, 0.45f, 0.28f);
+        var col2 = Color.FromHsv(hue2 / 360f, 0.4f, 0.22f);
+
+        var normal = new StyleBoxFlat
+        {
+            BgColor = col1,
+            CornerRadiusTopLeft = 12, CornerRadiusTopRight = 12,
+            CornerRadiusBottomLeft = 12, CornerRadiusBottomRight = 12,
+            BorderWidthTop = 1, BorderWidthBottom = 1, BorderWidthLeft = 1, BorderWidthRight = 1,
+            BorderColor = new Color(1, 1, 1, 0.08f),
+            ContentMarginLeft = 16, ContentMarginRight = 16,
+            ContentMarginTop = 14, ContentMarginBottom = 14,
+        };
+        var hover = (StyleBoxFlat)normal.Duplicate();
+        hover.BgColor = col1.Lerp(new Color(1, 1, 1), 0.08f);
+        hover.BorderColor = new Color(0.55f, 0.35f, 0.8f, 0.6f);
+        hover.BorderWidthTop = 2; hover.BorderWidthBottom = 2;
+        hover.BorderWidthLeft = 2; hover.BorderWidthRight = 2;
+        btn.AddThemeStyleboxOverride("normal", normal);
+        btn.AddThemeStyleboxOverride("hover", hover);
+        btn.AddThemeStyleboxOverride("pressed", normal);
+        btn.AddThemeStyleboxOverride("focus", normal);
+
+        // Use a VBoxContainer for the card content (name, desc, capacity)
+        var vbox = new VBoxContainer();
+        vbox.AddThemeConstantOverride("separation", 6);
+        vbox.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        vbox.OffsetLeft = 16; vbox.OffsetTop = 14;
+        vbox.OffsetRight = -16; vbox.OffsetBottom = -14;
+        btn.AddChild(vbox);
+
+        var nameLabel = new Label
+        {
+            Text = name,
+            TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis,
+        };
+        nameLabel.AddThemeFontSizeOverride("font_size", 18);
+        nameLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.98f));
+        vbox.AddChild(nameLabel);
+
+        var descLabel = new Label
+        {
+            Text = string.IsNullOrEmpty(desc) ? "" : (desc.Length > 60 ? desc[..60] + "…" : desc),
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            CustomMinimumSize = new Vector2(0, 30),
+        };
+        descLabel.AddThemeFontSizeOverride("font_size", 11);
+        descLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.82f, 0.88f, 0.7f));
+        vbox.AddChild(descLabel);
+
+        vbox.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
+
+        var footer = new HBoxContainer();
+        footer.AddThemeConstantOverride("separation", 8);
+        vbox.AddChild(footer);
+
+        if (!string.IsNullOrEmpty(author))
+        {
+            var authorLabel = new Label { Text = $"by {author}" };
+            authorLabel.AddThemeFontSizeOverride("font_size", 10);
+            authorLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.72f, 0.8f, 0.6f));
+            footer.AddChild(authorLabel);
+        }
+
+        footer.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        var capLabel = new Label { Text = $"👥 {capacity}" };
+        capLabel.AddThemeFontSizeOverride("font_size", 11);
+        capLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.82f, 0.88f, 0.6f));
+        footer.AddChild(capLabel);
+
+        // Clicking opens detail panel instead of immediately joining
+        btn.Pressed += () => JoinWorldPressed?.Invoke(id);
+
+        // Clear the button's own text — content is rendered by children
+        btn.Text = "";
+
+        return btn;
     }
 
     private void SetSpinning(bool on)

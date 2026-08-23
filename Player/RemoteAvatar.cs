@@ -12,6 +12,7 @@ public partial class RemoteAvatar : Node3D
     private Vector3 _targetPos;
     private Quaternion _targetRot = Quaternion.Identity;
     private bool _hasTarget;
+    private bool _streamingBones;   // peer sends real bone rotations → don't animate locally
 
     public uint PeerId { get; private set; }
 
@@ -42,18 +43,47 @@ public partial class RemoteAvatar : Node3D
             Text = displayName,
             Position = new Vector3(0, 2.1f, 0),
             Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-            FontSize = 48,
-            PixelSize = 0.005f,
+            // Rendered at a high font size for crispness, then scaled down small in world
+            // space via PixelSize so the tag reads as a compact label, not a giant banner.
+            FontSize = 64,
+            PixelSize = 0.0016f,
+            OutlineSize = 12,
+            OutlineModulate = new Color(0, 0, 0, 0.7f),
         };
         AddChild(_nameTag);
 
-        // Equip the current default avatar. Failure falls back to the bean so nobody is a capsule.
-        EquipAvatar(AvatarLibrary.CurrentDefaultPath);
+        // Start on the shared default outfit (NOT the local player's avatar — that's what made
+        // every remote look like the viewer). Main swaps in this peer's real avatar once it
+        // resolves; failure falls back to the bean so nobody is left a capsule.
+        EquipAvatar(AvatarLibrary.DefaultOutfitPath);
+    }
+
+    private AvatarLoadingIndicator _loading;
+
+    /// Show/hide a spinner over this peer while their own avatar downloads.
+    public void SetLoading(bool on)
+    {
+        if (on)
+        {
+            if (_loading != null) return;
+            _loading = AvatarLoadingIndicator.Create(_avatar?.Height ?? 1.7f, "Loading…");
+            AddChild(_loading);
+        }
+        else if (_loading != null)
+        {
+            _loading.QueueFree();
+            _loading = null;
+        }
     }
 
     /// Equip an avatar from a `.ska` path; hides the capsule and floats the name tag at head height.
     /// If the path is null or fails to load, the bean fallback is used instead.
-    public void EquipAvatar(string skaPath)
+    ///
+    /// `isReal` marks whether this is the peer's *own* resolved avatar (vs the shared default
+    /// outfit shown until it resolves). Streamed bone poses are only applied to the peer's real
+    /// avatar: replaying one avatar's bones on a different skeleton is what produced the
+    /// "arms stuck up" pose while everyone was still showing as the default outfit.
+    public void EquipAvatar(string skaPath, bool isReal = false)
     {
         var avatar = AvatarLibrary.InstantiateOrDefault(skaPath);
         _avatar?.QueueFree();
@@ -61,6 +91,8 @@ public partial class RemoteAvatar : Node3D
         AddChild(avatar);
         _capsule.Visible = false;
         _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
+        _hasRealAvatar = isReal;
+        _streamingBones = false; // re-decide against the new skeleton
     }
 
     /// Replace this remote's avatar with the bean — used when the user has blocked them,
@@ -81,6 +113,23 @@ public partial class RemoteAvatar : Node3D
         _targetPos = pos;
         _targetRot = rot;
         if (!_hasTarget) { Position = pos; _hasTarget = true; } // snap on first frame
+
+        // Replay the sender's actual rig — but only onto the peer's OWN resolved avatar, since
+        // bone rotations are meaningless on a different skeleton. While the peer is still on the
+        // shared default outfit, animate them procedurally from observed motion instead.
+        if (_hasRealAvatar && f.Bones != null && f.Bones.Count > 0 && !AllIdentity(f.Bones))
+        {
+            _streamingBones = true;
+            _avatar?.ApplyBonePose(f.Bones);
+        }
+    }
+
+    private static bool AllIdentity(System.Collections.Generic.List<Quat> bones)
+    {
+        foreach (var q in bones)
+            if (Mathf.Abs(q.W) < 0.9999f || Mathf.Abs(q.X) > 1e-4f ||
+                Mathf.Abs(q.Y) > 1e-4f || Mathf.Abs(q.Z) > 1e-4f) return false;
+        return true;
     }
 
     public override void _Process(double delta)
@@ -94,7 +143,9 @@ public partial class RemoteAvatar : Node3D
         Quaternion current = Quaternion;
         Quaternion = current.Slerp(_targetRot, t).Normalized();
 
-        // Feed the procedural walk/idle cycle with the observed planar speed.
+        // Only guess an animation from observed motion when the peer isn't streaming bones;
+        // otherwise the local procedural cycle would fight the pose we just applied.
+        if (_streamingBones) return;
         float speed = delta > 0 ? (new Vector2(Position.X, Position.Z) - new Vector2(prev.X, prev.Z)).Length() / (float)delta : 0f;
         _avatar?.Animate(delta, speed, true);
     }

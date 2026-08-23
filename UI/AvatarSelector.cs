@@ -30,6 +30,22 @@ public partial class AvatarSelector : CanvasLayer
     private bool _showingMine;
     private bool _loading;
 
+    // Detail panel
+    private PanelContainer _detailCard;
+    private Label _detailName;
+    private Label _detailAuthor;
+    private Label _detailSource;
+    private Label _detailPerf;
+    private Label _detailHeight;
+    private Label _detailAdded;
+    private Button _detailEquipBtn;
+    private string _detailId;
+    private string _detailDownloadUrl;
+    private string _detailDisplayName;
+
+    private static readonly string[] SourceLabels = { "Built-in", "VRM", "glTF", "FBX", "PMX" };
+    private static readonly string[] PerfLabels = { "Excellent", "Good", "Medium", "Poor", "Very Poor" };
+
     public void Configure(ApiClient api, string currentAvatarId)
     {
         _api = api;
@@ -45,11 +61,14 @@ public partial class AvatarSelector : CanvasLayer
         _scrim.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(_scrim);
 
+        var center = new CenterContainer();
+        center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        AddChild(center);
+
         _card = new PanelContainer();
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
-        _card.SetAnchorsPreset(Control.LayoutPreset.Center);
-        _card.CustomMinimumSize = new Vector2(860, 620);
-        AddChild(_card);
+        _card.CustomMinimumSize = new Vector2(920, 620);
+        center.AddChild(_card);
 
         var pad = new MarginContainer();
         foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
@@ -104,12 +123,149 @@ public partial class AvatarSelector : CanvasLayer
         _grid.AddThemeConstantOverride("h_separation", 14);
         _grid.AddThemeConstantOverride("v_separation", 14);
         scroll.AddChild(_grid);
+
+        BuildDetailPanel();
+    }
+
+    private void BuildDetailPanel()
+    {
+        _detailCard = new PanelContainer { Visible = false };
+        _detailCard.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
+        _detailCard.CustomMinimumSize = new Vector2(500, 400);
+
+        // We can't add to the same CenterContainer, so add as a direct child on the layer.
+        // Position it centered.
+        var detailCenter = new CenterContainer { Visible = false };
+        detailCenter.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        AddChild(detailCenter);
+        detailCenter.AddChild(_detailCard);
+
+        var pad = new MarginContainer();
+        foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+            pad.AddThemeConstantOverride(s, 28);
+        _detailCard.AddChild(pad);
+
+        var col = new VBoxContainer();
+        col.AddThemeConstantOverride("separation", 14);
+        pad.AddChild(col);
+
+        // Header with back button
+        var headerRow = new HBoxContainer();
+        headerRow.AddThemeConstantOverride("separation", 12);
+        col.AddChild(headerRow);
+
+        var backBtn = Brand.Ghost_(new Button { Text = "← Back" });
+        backBtn.Pressed += () =>
+        {
+            _detailCard.Visible = false;
+            _detailCard.GetParent<CenterContainer>().Visible = false;
+            _card.Visible = true;
+        };
+        headerRow.AddChild(backBtn);
+
+        _detailName = new Label { Text = "" };
+        _detailName.AddThemeFontSizeOverride("font_size", 24);
+        _detailName.AddThemeColorOverride("font_color", Brand.TextHi);
+        headerRow.AddChild(_detailName);
+
+        _detailAuthor = new Label { Text = "" };
+        _detailAuthor.AddThemeFontSizeOverride("font_size", 14);
+        _detailAuthor.AddThemeColorOverride("font_color", Brand.TextDim);
+        col.AddChild(_detailAuthor);
+
+        col.AddChild(new HSeparator());
+
+        // Stats grid (2 columns)
+        var statsGrid = new GridContainer { Columns = 2 };
+        statsGrid.AddThemeConstantOverride("h_separation", 24);
+        statsGrid.AddThemeConstantOverride("v_separation", 10);
+        col.AddChild(statsGrid);
+
+        void AddStat(string label, out Label valueLabel)
+        {
+            var lbl = new Label { Text = label };
+            lbl.AddThemeFontSizeOverride("font_size", 12);
+            lbl.AddThemeColorOverride("font_color", Brand.TextDim);
+            statsGrid.AddChild(lbl);
+            valueLabel = new Label { Text = "—" };
+            valueLabel.AddThemeFontSizeOverride("font_size", 14);
+            valueLabel.AddThemeColorOverride("font_color", Brand.TextHi);
+            statsGrid.AddChild(valueLabel);
+        }
+
+        AddStat("Source", out _detailSource);
+        AddStat("Performance", out _detailPerf);
+        AddStat("Height", out _detailHeight);
+        AddStat("Added", out _detailAdded);
+
+        col.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
+
+        // Equip button
+        _detailEquipBtn = Brand.Primary_(new Button { Text = "Equip", CustomMinimumSize = new Vector2(0, 48) });
+        _detailEquipBtn.Pressed += () =>
+        {
+            if (string.IsNullOrEmpty(_detailDownloadUrl)) return;
+            _currentAvatarId = _detailId;
+            AvatarChosen?.Invoke(_detailId, _detailDownloadUrl, _detailDisplayName);
+            Hide();
+        };
+        col.AddChild(_detailEquipBtn);
+    }
+
+    private void ShowDetail(JsonElement a)
+    {
+        _detailId = a.GetProperty("id").GetString() ?? "";
+        _detailDisplayName = Prop(a, "name") ?? "Untitled";
+        _detailDownloadUrl = Prop(a, "downloadUrl");
+        string author = Prop(a, "author") ?? "unknown";
+        bool isCurrent = _detailId == _currentAvatarId;
+
+        _detailName.Text = _detailDisplayName;
+        _detailAuthor.Text = $"by {author}";
+
+        int srcFmt = a.TryGetProperty("sourceFormat", out var sf) ? sf.GetInt32() : 0;
+        _detailSource.Text = srcFmt < SourceLabels.Length ? SourceLabels[srcFmt] : "Unknown";
+
+        int perf = a.TryGetProperty("perfRank", out var pr) ? pr.GetInt32() : 0;
+        _detailPerf.Text = perf < PerfLabels.Length ? PerfLabels[perf] : "—";
+
+        if (a.TryGetProperty("heightMeters", out var hm) && hm.ValueKind == JsonValueKind.Number)
+            _detailHeight.Text = $"{hm.GetDouble():F2} m";
+        else
+            _detailHeight.Text = "—";
+
+        if (a.TryGetProperty("createdAt", out var ca) && ca.ValueKind == JsonValueKind.String)
+        {
+            if (DateTime.TryParse(ca.GetString(), out var dt))
+                _detailAdded.Text = dt.ToString("yyyy-MM-dd");
+            else
+                _detailAdded.Text = ca.GetString() ?? "—";
+        }
+        else
+            _detailAdded.Text = "—";
+
+        if (isCurrent)
+        {
+            _detailEquipBtn.Text = "Equipped ✓";
+            _detailEquipBtn.Disabled = true;
+        }
+        else
+        {
+            _detailEquipBtn.Text = "Equip";
+            _detailEquipBtn.Disabled = string.IsNullOrEmpty(_detailDownloadUrl);
+        }
+
+        _card.Visible = false;
+        _detailCard.Visible = true;
+        _detailCard.GetParent<CenterContainer>().Visible = true;
     }
 
     public void Open()
     {
         _scrim.Visible = true;
         _card.Visible = true;
+        _detailCard.Visible = false;
+        _detailCard.GetParent<CenterContainer>().Visible = false;
         Visible = true;
         Input.MouseMode = Input.MouseModeEnum.Visible;
         SwitchTab(false);
@@ -119,6 +275,8 @@ public partial class AvatarSelector : CanvasLayer
     {
         _scrim.Visible = false;
         _card.Visible = false;
+        _detailCard.Visible = false;
+        _detailCard.GetParent<CenterContainer>().Visible = false;
         Visible = false;
         Closed?.Invoke();
     }
@@ -129,6 +287,15 @@ public partial class AvatarSelector : CanvasLayer
     {
         if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && IsOpen)
         {
+            // If detail is showing, go back to grid; otherwise close entirely
+            if (_detailCard.Visible)
+            {
+                _detailCard.Visible = false;
+                _detailCard.GetParent<CenterContainer>().Visible = false;
+                _card.Visible = true;
+                GetViewport().SetInputAsHandled();
+                return;
+            }
             Hide();
             GetViewport().SetInputAsHandled();
         }
@@ -226,18 +393,12 @@ public partial class AvatarSelector : CanvasLayer
         authorLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         inner.AddChild(authorLabel);
 
-        var equip = isCurrent
-            ? Brand.Ghost_(new Button { Text = "Equipped ✓" })
-            : Brand.Primary_(new Button { Text = "Equip" });
-        equip.Disabled = isCurrent || string.IsNullOrEmpty(downloadUrl);
-        equip.Pressed += () =>
-        {
-            if (string.IsNullOrEmpty(downloadUrl)) return;
-            _currentAvatarId = id;
-            AvatarChosen?.Invoke(id, downloadUrl, name);
-            Hide();
-        };
-        inner.AddChild(equip);
+        // "View" button that opens the detail panel
+        var viewBtn = Brand.Primary_(new Button { Text = isCurrent ? "Equipped ✓" : "View" });
+        // Capture the JsonElement for this avatar
+        var avatarData = a;
+        viewBtn.Pressed += () => ShowDetail(avatarData);
+        inner.AddChild(viewBtn);
     }
 
     private async Task LoadThumbAsync(TextureRect target, string url)

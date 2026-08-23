@@ -4,10 +4,9 @@ using SerikaSocial.Avatar;
 
 namespace SerikaSocial;
 
-/// A pause/settings overlay shown when the player presses Escape in-world. Provides world
-/// actions (respawn, emotes, camera, invite), mouse sensitivity, master volume, name tag
-/// visibility, and disconnect/quit actions.
-/// Built in code to match the rest of the client's programmatic UI style.
+/// VRChat-style Launch Pad & Pause Menu: wide rectangular layout (800x520),
+/// dark purple glassmorphism styling, header stats (FPS/Clock), tabbed views (Launch Pad, Settings, Social),
+/// quick action grids with icons, and zero container overflow.
 public partial class PauseMenu : CanvasLayer
 {
     public event Action Closed;
@@ -20,16 +19,25 @@ public partial class PauseMenu : CanvasLayer
     public event Action AvatarsPressed;
     public event Action<AvatarInstance.Emote> EmotePressed;
 
-    private Label _worldActionsLabel;
-    private Button _copyInviteButton;
-
     private ColorRect _scrim;
-    private Panel _card;
-    private Label _title;
-    private Label _worldLabel;
-    private Button _resumeButton;
+    private PanelContainer _card;
+
+    // Header elements
+    private Label _clockLabel;
+    private Label _fpsLabel;
+    private Label _locationLabel;
+
+    // Content container & tabs
+    private VBoxContainer _tabLaunchPad;
+    private VBoxContainer _tabSettings;
+    private VBoxContainer _tabSocial;
+    private Button _tabBtnLaunch;
+    private Button _tabBtnSettings;
+    private Button _tabBtnSocial;
+    private Button _copyInviteButton;
     private Button _homeButton;
-    private Button _quitButton;
+
+    // Settings
     private HSlider _sensitivitySlider;
     private HSlider _volumeSlider;
     private CheckButton _nameTagsToggle;
@@ -40,124 +48,257 @@ public partial class PauseMenu : CanvasLayer
     public float MasterVolume { get; private set; } = 1.0f;
     public bool NameTagsVisible { get; private set; } = true;
 
+    private double _clockTimer;
+
     public override void _Ready()
     {
         Layer = 90;
 
         _scrim = new ColorRect
         {
-            Color = new Color(0.02f, 0.03f, 0.05f, 0.8f),
+            Color = new Color(0.02f, 0.03f, 0.05f, 0.82f),
             AnchorRight = 1,
             AnchorBottom = 1,
             Visible = false,
         };
         AddChild(_scrim);
 
-        _card = new Panel
+        var centerContainer = new CenterContainer();
+        centerContainer.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        AddChild(centerContainer);
+
+        // Main rectangular container (820x520) — fixed wide format like VRChat Launch Pad
+        _card = new PanelContainer
         {
-            CustomMinimumSize = new Vector2(520, 760),
-            AnchorLeft = 0.5f,
-            AnchorTop = 0.5f,
-            AnchorRight = 0.5f,
-            AnchorBottom = 0.5f,
-            OffsetLeft = -260,
-            OffsetTop = -380,
-            OffsetRight = 260,
-            OffsetBottom = 380,
+            CustomMinimumSize = new Vector2(820, 520),
             Visible = false,
         };
-        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
-        AddChild(_card);
+        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16, 1, Brand.Border));
+        centerContainer.AddChild(_card);
 
-        var vbox = new VBoxContainer
+        var margin = new MarginContainer();
+        foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+            margin.AddThemeConstantOverride(side, 20);
+        _card.AddChild(margin);
+
+        var mainVBox = new VBoxContainer();
+        mainVBox.AddThemeConstantOverride("separation", 12);
+        margin.AddChild(mainVBox);
+
+        // ── TOP HEADER (User info, Clock, FPS) ─────────────────────────────────────────
+        var header = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        header.AddThemeConstantOverride("separation", 12);
+        mainVBox.AddChild(header);
+
+        var userBadge = new HBoxContainer();
+        userBadge.AddThemeConstantOverride("separation", 8);
+        var dot = new ColorRect
         {
-            AnchorRight = 1, AnchorBottom = 1,
-            OffsetLeft = 28, OffsetTop = 28, OffsetRight = -28, OffsetBottom = -28,
+            CustomMinimumSize = new Vector2(10, 10),
+            Color = Brand.Success,
+            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
         };
+        userBadge.AddChild(dot);
+        _locationLabel = new Label { Text = "The Commons" };
+        _locationLabel.AddThemeFontSizeOverride("font_size", 15);
+        _locationLabel.AddThemeColorOverride("font_color", Brand.TextHi);
+        userBadge.AddChild(_locationLabel);
+        header.AddChild(userBadge);
+
+        header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        _clockLabel = new Label { Text = DateTime.Now.ToString("HH:mm") };
+        _clockLabel.AddThemeFontSizeOverride("font_size", 16);
+        _clockLabel.AddThemeColorOverride("font_color", Brand.Accent);
+        header.AddChild(_clockLabel);
+
+        header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        _fpsLabel = new Label { Text = $"FPS: {Engine.GetFramesPerSecond()}" };
+        _fpsLabel.AddThemeFontSizeOverride("font_size", 13);
+        _fpsLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        header.AddChild(_fpsLabel);
+
+        mainVBox.AddChild(new HSeparator());
+
+        // ── CENTER SCROLLABLE CONTENT ──────────────────────────────────────────────────
+        var scroll = new ScrollContainer
+        {
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+        };
+        scroll.AddThemeStyleboxOverride("panel", new StyleBoxEmpty());
+        mainVBox.AddChild(scroll);
+
+        var contentStack = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        scroll.AddChild(contentStack);
+
+        // Build Tabs
+        _tabLaunchPad = BuildLaunchPadTab();
+        _tabSettings = BuildSettingsTab();
+        _tabSocial = BuildSocialTab();
+
+        contentStack.AddChild(_tabLaunchPad);
+        contentStack.AddChild(_tabSettings);
+        contentStack.AddChild(_tabSocial);
+
+        mainVBox.AddChild(new HSeparator());
+
+        // ── BOTTOM NAVIGATION & ACTIONS BAR ───────────────────────────────────────────
+        var bottomBar = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        bottomBar.AddThemeConstantOverride("separation", 10);
+        mainVBox.AddChild(bottomBar);
+
+        // Tab selection buttons
+        _tabBtnLaunch = MakeNavTab("🚀 Launch Pad", true);
+        _tabBtnLaunch.Pressed += () => SwitchTab(0);
+        bottomBar.AddChild(_tabBtnLaunch);
+
+        _tabBtnSettings = MakeNavTab("⚙️ Settings", false);
+        _tabBtnSettings.Pressed += () => SwitchTab(1);
+        bottomBar.AddChild(_tabBtnSettings);
+
+        _tabBtnSocial = MakeNavTab("👥 Social", false);
+        _tabBtnSocial.Pressed += () => SwitchTab(2);
+        bottomBar.AddChild(_tabBtnSocial);
+
+        bottomBar.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+
+        var quitBtn = Brand.Ghost_(new Button { Text = "🚪 Quit", CustomMinimumSize = new Vector2(90, 42) });
+        quitBtn.AddThemeColorOverride("font_color", Brand.Danger);
+        quitBtn.Pressed += () => QuitPressed?.Invoke();
+        bottomBar.AddChild(quitBtn);
+
+        var resumeBtn = Brand.Primary_(new Button { Text = "⚡ Resume (Esc)", CustomMinimumSize = new Vector2(140, 42) });
+        resumeBtn.Pressed += Hide;
+        bottomBar.AddChild(resumeBtn);
+
+        SwitchTab(0);
+    }
+
+    private Button MakeNavTab(string label, bool active)
+    {
+        var btn = new Button
+        {
+            Text = label,
+            CustomMinimumSize = new Vector2(130, 42),
+        };
+        return active ? Brand.Primary_(btn) : Brand.Ghost_(btn);
+    }
+
+    private void SwitchTab(int index)
+    {
+        _tabLaunchPad.Visible = index == 0;
+        _tabSettings.Visible = index == 1;
+        _tabSocial.Visible = index == 2;
+
+        Brand.Primary_(_tabBtnLaunch); if (index != 0) Brand.Ghost_(_tabBtnLaunch);
+        Brand.Primary_(_tabBtnSettings); if (index != 1) Brand.Ghost_(_tabBtnSettings);
+        Brand.Primary_(_tabBtnSocial); if (index != 2) Brand.Ghost_(_tabBtnSocial);
+    }
+
+    // ── TAB 1: LAUNCH PAD ─────────────────────────────────────────────────────────────
+    private VBoxContainer BuildLaunchPadTab()
+    {
+        var vbox = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         vbox.AddThemeConstantOverride("separation", 14);
-        _card.AddChild(vbox);
 
-        _title = new Label { Text = "Paused", HorizontalAlignment = HorizontalAlignment.Center };
-        _title.AddThemeFontSizeOverride("font_size", 24);
-        _title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
-        vbox.AddChild(_title);
+        var actionsTitle = new Label { Text = "Quick Actions" };
+        actionsTitle.AddThemeFontSizeOverride("font_size", 14);
+        actionsTitle.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(actionsTitle);
 
-        _worldLabel = new Label { Text = "", HorizontalAlignment = HorizontalAlignment.Center };
-        _worldLabel.AddThemeFontSizeOverride("font_size", 13);
-        _worldLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(_worldLabel);
-
-        // Controls cheat-sheet so the menu is also where players (re)learn the keys.
-        var hints = new Label
+        // 3-Column Grid for Quick Actions
+        var grid = new GridContainer
         {
-            Text = "WASD move · Shift sprint · Space jump · Ctrl crouch\n" +
-                   "V camera · scroll to zoom (3rd person) · T chat · M mic · Esc resume",
-            HorizontalAlignment = HorizontalAlignment.Center,
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            Columns = 3,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
-        hints.AddThemeFontSizeOverride("font_size", 12);
-        hints.AddThemeColorOverride("font_color", new Color(0.55f, 0.6f, 0.7f));
-        vbox.AddChild(hints);
+        grid.AddThemeConstantOverride("h_separation", 12);
+        grid.AddThemeConstantOverride("v_separation", 12);
+        vbox.AddChild(grid);
 
-        vbox.AddChild(new HSeparator());
+        _homeButton = ActionCard("🏠 Go Home", "Return to your private home", () => { Hide(); HomePressed?.Invoke(); });
+        grid.AddChild(_homeButton);
 
-        // ── World actions ─────────────────────────────────────────────────────────────
-        _worldActionsLabel = new Label { Text = "World" };
-        _worldActionsLabel.AddThemeFontSizeOverride("font_size", 13);
-        _worldActionsLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(_worldActionsLabel);
+        grid.AddChild(ActionCard("⟲ Respawn", "Reset position to world spawn", () => { Hide(); RespawnPressed?.Invoke(); }));
+        grid.AddChild(ActionCard("📷 Camera (V)", "Toggle 1st / 3rd person view", () => CameraTogglePressed?.Invoke()));
 
-        // Respawn + camera on one row.
-        var actionRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        actionRow.AddThemeConstantOverride("separation", 10);
-        vbox.AddChild(actionRow);
+        _copyInviteButton = ActionCard("🔗 Copy Invite", "Copy world link to clipboard", () => CopyInvitePressed?.Invoke());
+        grid.AddChild(_copyInviteButton);
 
-        var respawnButton = MakeButton("⟲ Respawn", false);
-        respawnButton.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-        respawnButton.Pressed += () => { Hide(); RespawnPressed?.Invoke(); };
-        actionRow.AddChild(respawnButton);
+        grid.AddChild(ActionCard("🧍 Sit", "Trigger sitting pose", () => { Hide(); EmotePressed?.Invoke(AvatarInstance.Emote.Sit); }));
+        grid.AddChild(ActionCard("💃 Dance", "Trigger dance animation", () => { Hide(); EmotePressed?.Invoke(AvatarInstance.Emote.Dance); }));
 
-        var cameraButton = MakeButton("Camera (V)", false);
-        cameraButton.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-        cameraButton.Pressed += () => CameraTogglePressed?.Invoke();
-        actionRow.AddChild(cameraButton);
+        var linksTitle = new Label { Text = "Shortcuts" };
+        linksTitle.AddThemeFontSizeOverride("font_size", 14);
+        linksTitle.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(linksTitle);
 
-        // Emotes row.
-        var emoteRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        emoteRow.AddThemeConstantOverride("separation", 10);
-        vbox.AddChild(emoteRow);
-        AddEmoteButton(emoteRow, "🧍 Sit", AvatarInstance.Emote.Sit);
-        AddEmoteButton(emoteRow, "💃 Dance", AvatarInstance.Emote.Dance);
-        AddEmoteButton(emoteRow, "👋 Wave", AvatarInstance.Emote.Wave);
+        var linksRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        linksRow.AddThemeConstantOverride("separation", 12);
+        vbox.AddChild(linksRow);
 
-        var avatarsButton = MakeButton("Change avatar…", false);
-        avatarsButton.Pressed += () => AvatarsPressed?.Invoke();
-        vbox.AddChild(avatarsButton);
+        var worldsBtn = Brand.Ghost_(new Button
+        {
+            Text = "🌐 Browse Worlds…",
+            CustomMinimumSize = new Vector2(240, 44),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        });
+        worldsBtn.Pressed += () => WorldsPressed?.Invoke();
+        linksRow.AddChild(worldsBtn);
 
-        // Copy invite link — only meaningful in a multiplayer world.
-        _copyInviteButton = MakeButton("Copy invite link", false);
-        _copyInviteButton.Pressed += () => CopyInvitePressed?.Invoke();
-        vbox.AddChild(_copyInviteButton);
+        var avatarBtn = Brand.Ghost_(new Button
+        {
+            Text = "👕 Change Avatar…",
+            CustomMinimumSize = new Vector2(240, 44),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        });
+        avatarBtn.Pressed += () => AvatarsPressed?.Invoke();
+        linksRow.AddChild(avatarBtn);
 
-        vbox.AddChild(new HSeparator());
+        return vbox;
+    }
 
-        var settingsLabel = new Label { Text = "Settings" };
-        settingsLabel.AddThemeFontSizeOverride("font_size", 13);
-        settingsLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(settingsLabel);
+    private static Button ActionCard(string title, string subtitle, Action onClick)
+    {
+        var btn = new Button
+        {
+            Text = $"{title}\n{subtitle}",
+            CustomMinimumSize = new Vector2(240, 64),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        Brand.Ghost_(btn);
+        btn.AddThemeFontSizeOverride("font_size", 14);
+        btn.Pressed += onClick;
+        return btn;
+    }
 
-        // Mouse sensitivity
+    // ── TAB 2: SETTINGS ───────────────────────────────────────────────────────────────
+    private VBoxContainer BuildSettingsTab()
+    {
+        var vbox = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        vbox.AddThemeConstantOverride("separation", 16);
+
+        var title = new Label { Text = "Controls & Audio Settings" };
+        title.AddThemeFontSizeOverride("font_size", 14);
+        title.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(title);
+
+        // Mouse Sensitivity
         var sensRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        sensRow.AddThemeConstantOverride("separation", 12);
+        sensRow.AddThemeConstantOverride("separation", 14);
         vbox.AddChild(sensRow);
-        var sensLabel = new Label { Text = "Mouse sensitivity", CustomMinimumSize = new Vector2(140, 0) };
-        sensLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        sensRow.AddChild(sensLabel);
+
+        var sensLbl = new Label { Text = "Mouse Sensitivity", CustomMinimumSize = new Vector2(160, 0) };
+        sensLbl.AddThemeColorOverride("font_color", Brand.TextHi);
+        sensRow.AddChild(sensLbl);
+
         _sensitivitySlider = new HSlider
         {
             MinValue = 0.5, MaxValue = 5.0, Step = 0.1, Value = 3.0,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            CustomMinimumSize = new Vector2(120, 0),
+            CustomMinimumSize = new Vector2(200, 0),
         };
         _sensitivitySlider.ValueChanged += v =>
         {
@@ -165,22 +306,24 @@ public partial class PauseMenu : CanvasLayer
             _sensitivityValue.Text = $"{v:F1}";
         };
         sensRow.AddChild(_sensitivitySlider);
-        _sensitivityValue = new Label { Text = "3.0", CustomMinimumSize = new Vector2(36, 0) };
-        _sensitivityValue.AddThemeColorOverride("font_color", new Color(0.6f, 0.64f, 0.72f));
+        _sensitivityValue = new Label { Text = "3.0", CustomMinimumSize = new Vector2(40, 0) };
+        _sensitivityValue.AddThemeColorOverride("font_color", Brand.Accent);
         sensRow.AddChild(_sensitivityValue);
 
-        // Volume
+        // Master Volume
         var volRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        volRow.AddThemeConstantOverride("separation", 12);
+        volRow.AddThemeConstantOverride("separation", 14);
         vbox.AddChild(volRow);
-        var volLabel = new Label { Text = "Master volume", CustomMinimumSize = new Vector2(140, 0) };
-        volLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        volRow.AddChild(volLabel);
+
+        var volLbl = new Label { Text = "Master Volume", CustomMinimumSize = new Vector2(160, 0) };
+        volLbl.AddThemeColorOverride("font_color", Brand.TextHi);
+        volRow.AddChild(volLbl);
+
         _volumeSlider = new HSlider
         {
             MinValue = 0, MaxValue = 100, Step = 1, Value = 100,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            CustomMinimumSize = new Vector2(120, 0),
+            CustomMinimumSize = new Vector2(200, 0),
         };
         _volumeSlider.ValueChanged += v =>
         {
@@ -189,57 +332,67 @@ public partial class PauseMenu : CanvasLayer
             ApplyVolume();
         };
         volRow.AddChild(_volumeSlider);
-        _volumeValue = new Label { Text = "100%", CustomMinimumSize = new Vector2(36, 0) };
-        _volumeValue.AddThemeColorOverride("font_color", new Color(0.6f, 0.64f, 0.72f));
+        _volumeValue = new Label { Text = "100%", CustomMinimumSize = new Vector2(40, 0) };
+        _volumeValue.AddThemeColorOverride("font_color", Brand.Accent);
         volRow.AddChild(_volumeValue);
 
         // Name tags toggle
         var tagRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        tagRow.AddThemeConstantOverride("separation", 12);
+        tagRow.AddThemeConstantOverride("separation", 14);
         vbox.AddChild(tagRow);
-        var tagLabel = new Label { Text = "Show name tags", CustomMinimumSize = new Vector2(140, 0) };
-        tagLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
-        tagRow.AddChild(tagLabel);
+
+        var tagLbl = new Label { Text = "Show Name Tags", CustomMinimumSize = new Vector2(160, 0) };
+        tagLbl.AddThemeColorOverride("font_color", Brand.TextHi);
+        tagRow.AddChild(tagLbl);
+
         _nameTagsToggle = new CheckButton { ButtonPressed = true };
         _nameTagsToggle.Toggled += on => NameTagsVisible = on;
         tagRow.AddChild(_nameTagsToggle);
 
+        // Controls Cheat Sheet
         vbox.AddChild(new HSeparator());
+        var hint = new Label
+        {
+            Text = "Desktop Controls: WASD to move · Shift to sprint · Space to jump · Ctrl to crouch\n" +
+                   "Press V to toggle 1st/3rd person · Mouse Wheel to zoom · T to Chat · Esc to Pause",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        hint.AddThemeFontSizeOverride("font_size", 12);
+        hint.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(hint);
 
-        // Buttons
-        _resumeButton = MakeButton("Resume (Esc)", true);
-        _resumeButton.Pressed += Hide;
-        vbox.AddChild(_resumeButton);
-
-        _homeButton = MakeButton("Return to Home", false);
-        _homeButton.Pressed += () => { Hide(); HomePressed?.Invoke(); };
-        vbox.AddChild(_homeButton);
-
-        var worldsButton = MakeButton("Worlds…", false);
-        worldsButton.Pressed += () => WorldsPressed?.Invoke();
-        vbox.AddChild(worldsButton);
-
-        _quitButton = MakeButton("Quit to desktop", false);
-        _quitButton.Pressed += () => QuitPressed?.Invoke();
-        vbox.AddChild(_quitButton);
+        return vbox;
     }
 
-    /// Open the menu. `worldName` shows under the title; when the player is already Home the
-    /// "Return to Home" button and the invite link (single-player Home has no invite) are hidden.
+    // ── TAB 3: SOCIAL ─────────────────────────────────────────────────────────────────
+    private VBoxContainer BuildSocialTab()
+    {
+        var vbox = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        vbox.AddThemeConstantOverride("separation", 12);
+
+        var title = new Label { Text = "Players & Moderation" };
+        title.AddThemeFontSizeOverride("font_size", 14);
+        title.AddThemeColorOverride("font_color", Brand.TextDim);
+        vbox.AddChild(title);
+
+        var info = new Label
+        {
+            Text = "Manage social connections and blocked users on social.serika.dev.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        info.AddThemeFontSizeOverride("font_size", 13);
+        info.AddThemeColorOverride("font_color", Brand.TextHi);
+        vbox.AddChild(info);
+
+        return vbox;
+    }
+
     public void ShowMenu(string worldName, bool alreadyHome)
     {
-        _worldLabel.Text = string.IsNullOrEmpty(worldName) ? "" : $"in {worldName}";
+        _locationLabel.Text = string.IsNullOrEmpty(worldName) ? "Home" : worldName;
         _homeButton.Visible = !alreadyHome;
         _copyInviteButton.Visible = !alreadyHome;
         Show();
-    }
-
-    private void AddEmoteButton(HBoxContainer row, string text, AvatarInstance.Emote emote)
-    {
-        var b = MakeButton(text, false);
-        b.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-        b.Pressed += () => { Hide(); EmotePressed?.Invoke(emote); };
-        row.AddChild(b);
     }
 
     public new void Show()
@@ -268,6 +421,18 @@ public partial class PauseMenu : CanvasLayer
         }
     }
 
+    public override void _Process(double delta)
+    {
+        if (!IsOpen) return;
+        _clockTimer += delta;
+        if (_clockTimer >= 1.0)
+        {
+            _clockTimer = 0;
+            _clockLabel.Text = DateTime.Now.ToString("HH:mm");
+            _fpsLabel.Text = $"FPS: {Engine.GetFramesPerSecond()}";
+        }
+    }
+
     private void ApplyVolume()
     {
         var bus = AudioServer.GetBusIndex("Master");
@@ -276,11 +441,5 @@ public partial class PauseMenu : CanvasLayer
             AudioServer.SetBusVolumeDb(bus, Mathf.LinearToDb(MasterVolume));
             AudioServer.SetBusMute(bus, MasterVolume < 0.001f);
         }
-    }
-
-    private static Button MakeButton(string text, bool primary)
-    {
-        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 44) };
-        return primary ? Brand.Primary_(b) : Brand.Ghost_(b);
     }
 }

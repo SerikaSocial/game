@@ -1,3 +1,4 @@
+using System;
 using Godot;
 
 namespace SerikaSocial.World;
@@ -428,5 +429,661 @@ public static class Worlds
             root.AddChild(CollidableBox(new Vector3(0.5f, 1.5f, 40), new Vector3(edge, 0.75f, 0), Mat(new Color(0.1f, 0.11f, 0.14f))));
             root.AddChild(CollidableBox(new Vector3(40, 1.5f, 0.5f), new Vector3(0, 0.75f, edge), Mat(new Color(0.1f, 0.11f, 0.14f))));
         }
+    }
+
+    // ── World ID routing ─────────────────────────────────────────────────────────────
+
+    /// Built-in world IDs — must match seed.ts.
+    public const string IdCommons    = "00000000-0000-0000-0000-0000000000e0";
+    public const string IdMirror     = "00000000-0000-0000-0000-0000000000e1";
+    public const string IdHome       = "00000000-0000-0000-0000-0000000000e2";
+    public const string IdVideo      = "00000000-0000-0000-0000-0000000000e3";
+    public const string IdTestEmpty  = "00000000-0000-0000-0000-0000000000e4";
+    public const string IdTestPillar = "00000000-0000-0000-0000-0000000000e5";
+    public const string IdTestRamp   = "00000000-0000-0000-0000-0000000000e6";
+    public const string IdTestColor  = "00000000-0000-0000-0000-0000000000e7";
+    public const string IdTestSphere = "00000000-0000-0000-0000-0000000000e8";
+    public const string IdBackrooms  = "00000000-0000-0000-0000-0000000000e9";
+    public const string IdGryffindor = "00000000-0000-0000-0000-0000000000ea";
+
+    /// Route a world ID to its builder. Falls back to Commons for unknown IDs.
+    public static void BuildWorldForId(string worldId, Node3D root)
+    {
+        switch (worldId)
+        {
+            case IdMirror:     BuildMirrorWorld(root); break;
+            case IdHome:       BuildHomeAsWorld(root); break;
+            case IdVideo:      BuildVideoWorld(root); break;
+            case IdTestEmpty:  BuildTestEmpty(root); break;
+            case IdTestPillar: BuildTestPillars(root); break;
+            case IdTestRamp:   BuildTestRamps(root); break;
+            case IdTestColor:  BuildTestColors(root); break;
+            case IdTestSphere: BuildTestSpheres(root); break;
+            case IdBackrooms:  BuildBackrooms(root); break;
+            case IdGryffindor: BuildGryffindor(root); break;
+            default:           BuildCommons(root); break;
+        }
+    }
+
+    // ── Mirror Gallery ──────────────────────────────────────────────────────────────
+
+    /// A room lined with mirrors on every wall — a gallery for checking your avatar from
+    /// every angle. Bright, even lighting so reflections are clear.
+    public static void BuildMirrorWorld(Node3D root)
+    {
+        const float w = 14f, d = 14f, h = 4f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.12f, 0.10f, 0.14f),
+                AmbientLightColor = new Color(0.8f, 0.78f, 0.85f),
+                AmbientLightEnergy = 0.6f,
+                FogEnabled = false,
+                TonemapMode = Godot.Environment.ToneMapper.Filmic,
+            },
+        });
+
+        // Floor — polished dark.
+        var floor = new StaticBody3D { Name = "Floor" };
+        floor.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, -0.05f, 0),
+            Mat(new Color(0.08f, 0.07f, 0.09f), 0.15f, 0.3f)));
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Ceiling.
+        root.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, h, 0), Mat(new Color(0.15f, 0.13f, 0.17f))));
+
+        // Walls — dark purple.
+        var wallMat = Mat(new Color(0.18f, 0.15f, 0.22f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Mirrors on all four walls — two per wall for full coverage.
+        // Back wall (-Z).
+        root.AddChild(Mirror.Create(new Vector3(-3f, 0.05f, -d / 2 + 0.22f), 0f, 2.0f, 3.0f));
+        root.AddChild(Mirror.Create(new Vector3(3f, 0.05f, -d / 2 + 0.22f), 0f, 2.0f, 3.0f));
+        // Front wall (+Z).
+        root.AddChild(Mirror.Create(new Vector3(-3f, 0.05f, d / 2 - 0.22f), 180f, 2.0f, 3.0f));
+        root.AddChild(Mirror.Create(new Vector3(3f, 0.05f, d / 2 - 0.22f), 180f, 2.0f, 3.0f));
+        // Left wall (-X).
+        root.AddChild(Mirror.Create(new Vector3(-w / 2 + 0.22f, 0.05f, -3f), 90f, 2.0f, 3.0f));
+        root.AddChild(Mirror.Create(new Vector3(-w / 2 + 0.22f, 0.05f, 3f), 90f, 2.0f, 3.0f));
+        // Right wall (+X).
+        root.AddChild(Mirror.Create(new Vector3(w / 2 - 0.22f, 0.05f, -3f), -90f, 2.0f, 3.0f));
+        root.AddChild(Mirror.Create(new Vector3(w / 2 - 0.22f, 0.05f, 3f), -90f, 2.0f, 3.0f));
+
+        // Bright even lighting from ceiling.
+        foreach (float x in new[] { -4f, 0f, 4f })
+            foreach (float z in new[] { -4f, 0f, 4f })
+                root.AddChild(new OmniLight3D
+                {
+                    Position = new Vector3(x, h - 0.3f, z),
+                    LightColor = new Color(0.95f, 0.93f, 1f),
+                    LightEnergy = 1.0f,
+                    OmniRange = 8f,
+                    ShadowEnabled = true,
+                });
+
+        // Central pedestal with a spotlight — gives you something to stand on and see yourself.
+        root.AddChild(CollidableCylinder(1.5f, 0.2f, new Vector3(0, 0.1f, 0), Mat(new Color(0.15f, 0.12f, 0.18f), 0.3f, 0.2f)));
+        root.AddChild(new SpotLight3D
+        {
+            Position = new Vector3(0, h - 0.3f, 0),
+            LightColor = new Color(1f, 0.95f, 0.9f),
+            LightEnergy = 2.0f,
+            SpotRange = 12f,
+            SpotAngle = 45f,
+            ShadowEnabled = true,
+        });
+    }
+
+    // ── Home as a multiplayer world ──────────────────────────────────────────────────
+
+    /// The cosy Home house as a joinable multiplayer world — same geometry as the
+    /// single-player Home but without the Commons portal (no travel from here).
+    public static void BuildHomeAsWorld(Node3D root)
+    {
+        const float w = 9f, d = 8f, h = 3.2f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.06f, 0.05f, 0.07f),
+                AmbientLightColor = new Color(0.5f, 0.42f, 0.36f),
+                AmbientLightEnergy = 0.35f,
+                FogEnabled = false,
+                TonemapMode = Godot.Environment.ToneMapper.Filmic,
+            },
+        });
+
+        var floor = new StaticBody3D { Name = "Floor" };
+        floor.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, -0.05f, 0), Mat(new Color(0.34f, 0.22f, 0.13f), 0.7f)));
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        root.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, h, 0), Mat(new Color(0.2f, 0.17f, 0.15f))));
+
+        var beamMat = Mat(new Color(0.22f, 0.14f, 0.08f), 0.8f);
+        for (int i = 0; i < 4; i++)
+            root.AddChild(Box(new Vector3(0.15f, 0.15f, d), new Vector3(-w / 2 + 1.5f + i * 2f, h - 0.1f, 0), beamMat));
+
+        var wallMat = Mat(new Color(0.62f, 0.55f, 0.48f), 0.95f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Rug.
+        root.AddChild(Box(new Vector3(3.2f, 0.02f, 2.2f), new Vector3(0, 0.02f, 0.5f), Mat(new Color(0.5f, 0.15f, 0.18f), 0.95f)));
+
+        // Couch.
+        var couchMat = Mat(new Color(0.3f, 0.36f, 0.42f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(2.6f, 0.5f, 0.9f), new Vector3(0, 0.25f, 2.3f), couchMat));
+        root.AddChild(CollidableBox(new Vector3(2.6f, 0.7f, 0.2f), new Vector3(0, 0.6f, 2.72f), couchMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, 0.6f, 0.9f), new Vector3(-1.2f, 0.55f, 2.3f), couchMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, 0.6f, 0.9f), new Vector3(1.2f, 0.55f, 2.3f), couchMat));
+
+        // Coffee table.
+        root.AddChild(CollidableBox(new Vector3(1.4f, 0.08f, 0.7f), new Vector3(0, 0.42f, 1.1f), Mat(new Color(0.28f, 0.18f, 0.11f), 0.5f, 0.1f)));
+
+        // Fireplace.
+        root.AddChild(CollidableBox(new Vector3(2.0f, 1.4f, 0.5f), new Vector3(0, 0.7f, -d / 2 + 0.3f), Mat(new Color(0.22f, 0.20f, 0.19f), 0.9f)));
+        var fire = Box(new Vector3(1.4f, 0.7f, 0.2f), new Vector3(0, 0.5f, -d / 2 + 0.45f),
+            new StandardMaterial3D { Emission = new Color(1f, 0.5f, 0.15f), EmissionEnergyMultiplier = 3f, AlbedoColor = new Color(1f, 0.5f, 0.15f) });
+        fire.Name = "Fire";
+        root.AddChild(fire);
+        root.AddChild(new OmniLight3D
+        {
+            Position = new Vector3(0, 0.8f, -d / 2 + 0.8f),
+            LightColor = new Color(1f, 0.6f, 0.3f),
+            LightEnergy = 1.6f, OmniRange = 6f, ShadowEnabled = true,
+        });
+
+        // Warm lamp lights.
+        foreach (var p in new[] { new Vector3(-2.5f, 2.6f, -1f), new Vector3(2.5f, 2.6f, 1.5f) })
+            root.AddChild(new OmniLight3D { Position = p, LightColor = new Color(1f, 0.9f, 0.75f), LightEnergy = 0.9f, OmniRange = 5.5f });
+
+        // Window.
+        root.AddChild(Box(new Vector3(0.05f, 1.4f, 1.8f), new Vector3(w / 2 - 0.1f, 1.7f, -0.5f),
+            new StandardMaterial3D { Emission = new Color(0.6f, 0.7f, 0.95f), EmissionEnergyMultiplier = 1.2f, AlbedoColor = new Color(0.6f, 0.7f, 0.95f) }));
+        root.AddChild(new OmniLight3D { Position = new Vector3(w / 2 - 0.8f, 1.7f, -0.5f), LightColor = new Color(0.7f, 0.8f, 1f), LightEnergy = 0.7f, OmniRange = 5f });
+
+        // Ceiling lamp.
+        root.AddChild(Box(new Vector3(0.03f, 0.8f, 0.03f), new Vector3(0, h - 0.4f, 1.1f), Mat(new Color(0.15f, 0.12f, 0.08f))));
+        root.AddChild(Sphere(0.18f, new Vector3(0, h - 1.2f, 1.1f),
+            new StandardMaterial3D { Emission = new Color(1f, 0.9f, 0.7f), EmissionEnergyMultiplier = 2f, AlbedoColor = new Color(1f, 0.9f, 0.7f) }));
+        root.AddChild(new OmniLight3D { Position = new Vector3(0, h - 1.4f, 1.1f), LightColor = new Color(1f, 0.9f, 0.75f), LightEnergy = 1.2f, OmniRange = 7f, ShadowEnabled = true });
+
+        // Mirror on the back wall.
+        root.AddChild(Mirror.Create(new Vector3(-2.8f, 0.05f, -d / 2 + 0.22f), 0f, 1.2f, 2.2f));
+    }
+
+    // ── Video Player World ───────────────────────────────────────────────────────────
+
+    /// A cinema-style world with a large screen at one end and tiered seating.
+    /// The screen uses an emissive material — a video stream can be wired in later.
+    public static void BuildVideoWorld(Node3D root)
+    {
+        const float w = 20f, d = 24f, h = 8f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.02f, 0.02f, 0.03f),
+                AmbientLightColor = new Color(0.15f, 0.12f, 0.18f),
+                AmbientLightEnergy = 0.3f,
+                FogEnabled = false,
+                TonemapMode = Godot.Environment.ToneMapper.Filmic,
+            },
+        });
+
+        // Floor — dark carpet.
+        var floor = new StaticBody3D { Name = "Floor" };
+        floor.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, -0.05f, 0), Mat(new Color(0.05f, 0.04f, 0.06f), 0.95f)));
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Ceiling.
+        root.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, h, 0), Mat(new Color(0.08f, 0.07f, 0.10f))));
+
+        // Walls.
+        var wallMat = Mat(new Color(0.10f, 0.08f, 0.12f), 0.95f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Large screen on the back wall — emissive white for now.
+        var screenMat = new StandardMaterial3D
+        {
+            Emission = new Color(0.9f, 0.9f, 0.95f),
+            EmissionEnergyMultiplier = 1.5f,
+            AlbedoColor = new Color(0.9f, 0.9f, 0.95f),
+            Roughness = 0.1f,
+        };
+        var screen = new MeshInstance3D
+        {
+            Mesh = new QuadMesh { Size = new Vector2(12f, 6f) },
+            Position = new Vector3(0, 4f, -d / 2 + 0.15f),
+        };
+        screen.MaterialOverride = screenMat;
+        screen.Name = "VideoScreen";
+        root.AddChild(screen);
+
+        // Screen frame.
+        var frameMat = Mat(new Color(0.04f, 0.03f, 0.05f), 0.5f);
+        root.AddChild(Box(new Vector3(12.4f, 0.2f, 0.1f), new Vector3(0, 7.1f, -d / 2 + 0.12f), frameMat));
+        root.AddChild(Box(new Vector3(12.4f, 0.2f, 0.1f), new Vector3(0, 0.9f, -d / 2 + 0.12f), frameMat));
+        root.AddChild(Box(new Vector3(0.2f, 6.4f, 0.1f), new Vector3(-6.1f, 4f, -d / 2 + 0.12f), frameMat));
+        root.AddChild(Box(new Vector3(0.2f, 6.4f, 0.1f), new Vector3(6.1f, 4f, -d / 2 + 0.12f), frameMat));
+
+        // Screen glow light.
+        root.AddChild(new SpotLight3D
+        {
+            Position = new Vector3(0, 4f, -d / 2 + 0.5f),
+            LightColor = new Color(0.8f, 0.8f, 0.9f),
+            LightEnergy = 1.5f,
+            SpotRange = 20f,
+            SpotAngle = 60f,
+        });
+
+        // Tiered seating — three rows of benches at increasing height.
+        var seatMat = Mat(new Color(0.15f, 0.10f, 0.18f), 0.9f);
+        for (int row = 0; row < 4; row++)
+        {
+            float z = -4f + row * 4f;
+            float y = 0.3f + row * 0.4f;
+            root.AddChild(CollidableBox(new Vector3(14f, 0.5f, 1.2f), new Vector3(0, y, z), seatMat));
+        }
+
+        // Ambient ceiling lights — dim, cinema vibe.
+        foreach (float x in new[] { -7f, 0f, 7f })
+            root.AddChild(new OmniLight3D
+            {
+                Position = new Vector3(x, h - 0.5f, 0),
+                LightColor = new Color(0.3f, 0.25f, 0.35f),
+                LightEnergy = 0.4f,
+                OmniRange = 10f,
+            });
+    }
+
+    // ── Test worlds ──────────────────────────────────────────────────────────────────
+
+    /// Test: Empty Room — just a floor and four walls. Minimal.
+    public static void BuildTestEmpty(Node3D root)
+    {
+        const float w = 20f, d = 20f, h = 6f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Sky,
+                Sky = new Sky { SkyMaterial = new ShaderMaterial { Shader = SkyShader } },
+                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.5f, 0.5f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        root.AddChild(new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f, RotationDegrees = new Vector3(-50, -30, 0) });
+
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.25f, 0.25f, 0.28f), 0.9f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        var wallMat = Mat(new Color(0.3f, 0.3f, 0.33f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Grid lines on the floor for spatial reference.
+        var gridMat = Mat(new Color(0.4f, 0.4f, 0.45f), 0.8f);
+        for (int i = -8; i <= 8; i++)
+        {
+            root.AddChild(Box(new Vector3(w, 0.011f, 0.05f), new Vector3(0, 0.005f, i * 2f), gridMat));
+            root.AddChild(Box(new Vector3(0.05f, 0.011f, d), new Vector3(i * 2f, 0.005f, 0), gridMat));
+        }
+    }
+
+    /// Test: Pillar Room — floor with a grid of collidable pillars.
+    public static void BuildTestPillars(Node3D root)
+    {
+        const float w = 24f, d = 24f, h = 8f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Sky,
+                Sky = new Sky { SkyMaterial = new ShaderMaterial { Shader = SkyShader } },
+                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.5f, 0.5f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        root.AddChild(new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f, RotationDegrees = new Vector3(-50, -30, 0) });
+
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.2f, 0.2f, 0.23f), 0.9f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        var wallMat = Mat(new Color(0.25f, 0.25f, 0.28f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Grid of pillars.
+        var pillarMat = Mat(new Color(0.35f, 0.32f, 0.38f), 0.7f);
+        for (int x = -3; x <= 3; x++)
+            for (int z = -3; z <= 3; z++)
+            {
+                if (x == 0 && z == 0) continue;
+                root.AddChild(CollidableBox(new Vector3(0.8f, h, 0.8f),
+                    new Vector3(x * 6f, h / 2, z * 6f), pillarMat));
+            }
+    }
+
+    /// Test: Ramps — platforms connected by ramps at various angles.
+    public static void BuildTestRamps(Node3D root)
+    {
+        const float w = 30f, d = 30f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Sky,
+                Sky = new Sky { SkyMaterial = new ShaderMaterial { Shader = SkyShader } },
+                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.5f, 0.5f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        root.AddChild(new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f, RotationDegrees = new Vector3(-50, -30, 0) });
+
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.2f, 0.2f, 0.23f), 0.9f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Platforms at different heights.
+        var platMat = Mat(new Color(0.3f, 0.28f, 0.33f), 0.8f);
+        root.AddChild(CollidableBox(new Vector3(4f, 0.3f, 4f), new Vector3(-8f, 0.15f, -8f), platMat));
+        root.AddChild(CollidableBox(new Vector3(4f, 0.3f, 4f), new Vector3(8f, 2.15f, -8f), platMat));
+        root.AddChild(CollidableBox(new Vector3(4f, 0.3f, 4f), new Vector3(0f, 4.15f, 8f), platMat));
+        root.AddChild(CollidableBox(new Vector3(4f, 0.3f, 4f), new Vector3(-8f, 6.15f, 8f), platMat));
+
+        // Ramps connecting them (rotated boxes approximating ramps).
+        var rampMat = Mat(new Color(0.25f, 0.22f, 0.28f), 0.8f);
+        // Ramp from floor to platform 1.
+        var ramp1 = new StaticBody3D { Position = new Vector3(-8f, 1f, -4f), RotationDegrees = new Vector3(30, 0, 0) };
+        var ramp1Mesh = new MeshInstance3D { Mesh = new BoxMesh { Size = new Vector3(3f, 0.2f, 6f) } };
+        ramp1Mesh.MaterialOverride = rampMat;
+        ramp1.AddChild(ramp1Mesh);
+        ramp1.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(3f, 0.2f, 6f) } });
+        root.AddChild(ramp1);
+    }
+
+    /// Test: Color Grid — a floor of differently colored tiles.
+    public static void BuildTestColors(Node3D root)
+    {
+        const float w = 24f, d = 24f, h = 6f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.05f, 0.05f, 0.08f),
+                AmbientLightColor = new Color(0.6f, 0.6f, 0.65f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        // Floor with colored tiles.
+        var floor = new StaticBody3D { Name = "Floor" };
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        const int grid = 10;
+        const float tileSize = 2f;
+        for (int x = 0; x < grid; x++)
+            for (int z = 0; z < grid; z++)
+            {
+                float px = -grid * tileSize / 2 + x * tileSize + tileSize / 2;
+                float pz = -grid * tileSize / 2 + z * tileSize + tileSize / 2;
+                var color = Color.FromHsv((float)(x + z) / (grid * 2), 0.5f, 0.6f);
+                var tile = Box(new Vector3(tileSize, 0.1f, tileSize), new Vector3(px, -0.05f, pz), Mat(color, 0.6f));
+                floor.AddChild(tile);
+            }
+
+        // Walls.
+        var wallMat = Mat(new Color(0.15f, 0.13f, 0.18f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Ceiling lights.
+        foreach (float x in new[] { -8f, 0f, 8f })
+            foreach (float z in new[] { -8f, 0f, 8f })
+                root.AddChild(new OmniLight3D
+                {
+                    Position = new Vector3(x, h - 0.5f, z),
+                    LightColor = new Color(1f, 1f, 1f),
+                    LightEnergy = 0.8f,
+                    OmniRange = 10f,
+                });
+    }
+
+    /// Test: Sphere Garden — lots of decorative spheres at various sizes/colors.
+    public static void BuildTestSpheres(Node3D root)
+    {
+        const float w = 30f, d = 30f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Sky,
+                Sky = new Sky { SkyMaterial = new ShaderMaterial { Shader = SkyShader } },
+                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.5f, 0.5f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        root.AddChild(new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f, RotationDegrees = new Vector3(-50, -30, 0) });
+
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.15f, 0.17f, 0.20f), 0.9f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Spheres in a scattered pattern.
+        var rng = new Random(42);
+        for (int i = 0; i < 30; i++)
+        {
+            float x = (float)(rng.NextDouble() - 0.5) * 24f;
+            float z = (float)(rng.NextDouble() - 0.5) * 24f;
+            float r = 0.3f + (float)rng.NextDouble() * 1.5f;
+            var color = Color.FromHsv((float)rng.NextDouble(), 0.4f, 0.6f);
+            root.AddChild(CollidableSphere(r, new Vector3(x, r, z), Mat(color, 0.5f, 0.1f)));
+        }
+
+        // A few large decorative spheres (no collision).
+        root.AddChild(Sphere(3f, new Vector3(0, 3f, 0), Mat(new Color(0.6f, 0.5f, 0.7f, 0.5f), 0.1f, 0.3f)));
+        root.AddChild(Sphere(2f, new Vector3(-10f, 2f, -10f), Mat(new Color(0.5f, 0.6f, 0.5f, 0.5f), 0.1f, 0.3f)));
+        root.AddChild(Sphere(2f, new Vector3(10f, 2f, 10f), Mat(new Color(0.7f, 0.5f, 0.5f, 0.5f), 0.1f, 0.3f)));
+    }
+
+    // ── Backrooms (placeholder) ──────────────────────────────────────────────────────
+
+    /// A placeholder for the Backrooms VR world — yellow wallpaper maze vibe.
+    /// Will be replaced with the actual 3D model when asset loading is implemented.
+    public static void BuildBackrooms(Node3D root)
+    {
+        const float w = 30f, d = 30f, h = 3f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.15f, 0.13f, 0.05f),
+                AmbientLightColor = new Color(0.6f, 0.55f, 0.2f),
+                AmbientLightEnergy = 0.4f,
+                FogEnabled = true,
+                FogLightColor = new Color(0.2f, 0.18f, 0.08f),
+                FogDensity = 0.01f,
+            },
+        });
+
+        // Floor — yellowish carpet.
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.35f, 0.32f, 0.12f), 0.95f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Ceiling — yellowish.
+        root.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, h, 0), Mat(new Color(0.30f, 0.28f, 0.10f), 0.95f)));
+
+        // Maze-like walls — yellow wallpaper.
+        var wallMat = Mat(new Color(0.40f, 0.36f, 0.14f), 0.9f);
+        // Outer boundary.
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Interior maze walls.
+        for (int i = -2; i <= 2; i++)
+        {
+            root.AddChild(CollidableBox(new Vector3(0.2f, h, 8f), new Vector3(i * 8f, h / 2, -8f), wallMat));
+            root.AddChild(CollidableBox(new Vector3(8f, h, 0.2f), new Vector3(-8f, h / 2, i * 8f), wallMat));
+        }
+
+        // Flickering fluorescent lights.
+        foreach (float x in new[] { -10f, 0f, 10f })
+            foreach (float z in new[] { -10f, 0f, 10f })
+                root.AddChild(new OmniLight3D
+                {
+                    Position = new Vector3(x, h - 0.2f, z),
+                    LightColor = new Color(1f, 0.95f, 0.6f),
+                    LightEnergy = 0.7f,
+                    OmniRange = 8f,
+                });
+    }
+
+    // ── Gryffindor Common Room (placeholder) ─────────────────────────────────────────
+
+    /// A placeholder for the Gryffindor Common Room — warm, cozy, fireplace vibe.
+    /// Will be replaced with the actual 3D model when asset loading is implemented.
+    public static void BuildGryffindor(Node3D root)
+    {
+        const float w = 16f, d = 14f, h = 5f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Color,
+                BackgroundColor = new Color(0.08f, 0.05f, 0.03f),
+                AmbientLightColor = new Color(0.5f, 0.35f, 0.2f),
+                AmbientLightEnergy = 0.3f,
+                FogEnabled = false,
+                TonemapMode = Godot.Environment.ToneMapper.Filmic,
+            },
+        });
+
+        // Floor — dark wood.
+        var floor = new StaticBody3D { Name = "Floor" };
+        floor.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, -0.05f, 0), Mat(new Color(0.20f, 0.12f, 0.06f), 0.6f)));
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Ceiling — dark with exposed beams.
+        root.AddChild(Box(new Vector3(w, 0.1f, d), new Vector3(0, h, 0), Mat(new Color(0.12f, 0.08f, 0.04f))));
+        var beamMat = Mat(new Color(0.10f, 0.06f, 0.03f), 0.8f);
+        for (int i = 0; i < 5; i++)
+            root.AddChild(Box(new Vector3(0.2f, 0.2f, d), new Vector3(-w / 2 + 2f + i * 3f, h - 0.1f, 0), beamMat));
+
+        // Walls — warm red/gold.
+        var wallMat = Mat(new Color(0.35f, 0.15f, 0.10f), 0.95f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Large fireplace.
+        root.AddChild(CollidableBox(new Vector3(4f, 3f, 1f), new Vector3(0, 1.5f, -d / 2 + 0.6f), Mat(new Color(0.15f, 0.10f, 0.06f), 0.9f)));
+        var fire = Box(new Vector3(2.5f, 1.5f, 0.2f), new Vector3(0, 1f, -d / 2 + 0.8f),
+            new StandardMaterial3D { Emission = new Color(1f, 0.4f, 0.1f), EmissionEnergyMultiplier = 4f, AlbedoColor = new Color(1f, 0.4f, 0.1f) });
+        fire.Name = "Fire";
+        root.AddChild(fire);
+        root.AddChild(new OmniLight3D
+        {
+            Position = new Vector3(0, 1.5f, -d / 2 + 1.5f),
+            LightColor = new Color(1f, 0.5f, 0.2f),
+            LightEnergy = 2.5f, OmniRange = 10f, ShadowEnabled = true,
+        });
+
+        // Seating — two long sofas facing the fire.
+        var sofaMat = Mat(new Color(0.25f, 0.08f, 0.05f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(4f, 0.6f, 1.2f), new Vector3(-4f, 0.3f, -3f), sofaMat));
+        root.AddChild(CollidableBox(new Vector3(4f, 0.6f, 1.2f), new Vector3(4f, 0.3f, -3f), sofaMat));
+        // Sofa backs.
+        root.AddChild(CollidableBox(new Vector3(4f, 0.9f, 0.2f), new Vector3(-4f, 0.7f, -3.6f), sofaMat));
+        root.AddChild(CollidableBox(new Vector3(4f, 0.9f, 0.2f), new Vector3(4f, 0.7f, -3.6f), sofaMat));
+
+        // Round table in the center.
+        root.AddChild(CollidableCylinder(1.5f, 0.1f, new Vector3(0, 0.5f, 2f), Mat(new Color(0.18f, 0.10f, 0.05f), 0.5f)));
+
+        // Warm wall sconces.
+        foreach (var p in new[] { new Vector3(-5f, 3f, -d / 2 + 0.5f), new Vector3(5f, 3f, -d / 2 + 0.5f) })
+        {
+            root.AddChild(Sphere(0.15f, p, new StandardMaterial3D
+            {
+                Emission = new Color(1f, 0.7f, 0.3f), EmissionEnergyMultiplier = 3f, AlbedoColor = new Color(1f, 0.7f, 0.3f),
+            }));
+            root.AddChild(new OmniLight3D { Position = p, LightColor = new Color(1f, 0.7f, 0.3f), LightEnergy = 1f, OmniRange = 6f });
+        }
+
+        // Bookshelves on side walls.
+        var shelfMat = Mat(new Color(0.15f, 0.08f, 0.04f), 0.7f);
+        root.AddChild(CollidableBox(new Vector3(0.5f, 3f, 4f), new Vector3(-w / 2 + 0.3f, 1.5f, 3f), shelfMat));
+        root.AddChild(CollidableBox(new Vector3(0.5f, 3f, 4f), new Vector3(w / 2 - 0.3f, 1.5f, 3f), shelfMat));
+
+        // Staircase hint on the right wall.
+        var stairMat = Mat(new Color(0.16f, 0.10f, 0.05f), 0.7f);
+        for (int i = 0; i < 6; i++)
+            root.AddChild(CollidableBox(new Vector3(2f, 0.2f, 0.8f),
+                new Vector3(w / 2 - 3f, 0.1f + i * 0.4f, d / 2 - 2f - i * 1f), stairMat));
     }
 }

@@ -106,6 +106,13 @@ public partial class Mirror : Node3D
         var viewer = GetViewport().GetCamera3D();
         if (viewer == null) return;
 
+        // Ensure the mirror's SubViewport shares the main scene's World3D
+        if (_viewport.World3D == null || _viewport.World3D != GetViewport().World3D)
+        {
+            var w3d = GetViewport().World3D;
+            if (w3d != null) _viewport.World3D = w3d;
+        }
+
         // Skip the extra render when far away.
         Vector3 planePos = _surface.GlobalPosition;
         if (viewer.GlobalPosition.DistanceTo(planePos) > _activeRange)
@@ -124,23 +131,10 @@ public partial class Mirror : Node3D
         // Apply: mirror_camera = mirror_transform * player_camera
         _mirrorCam.GlobalTransform = mirrorTransform * viewer.GlobalTransform;
 
-        // Look perpendicular into the mirror plane (toward the midpoint between
-        // the mirror camera and the player camera).
-        Vector3 lookTarget = (_mirrorCam.GlobalPosition / 2f) + (viewer.GlobalPosition / 2f);
-        _mirrorCam.LookAt(lookTarget, _surface.GlobalBasis.Y);
-
-        // Frustum offset: the camera needs to "see" through the mirror surface from
-        // its reflected position. This is the key trick from Mirror3D that makes the
-        // projection correct — without it, the reflection has the wrong perspective.
-        Vector3 cameraToMirror = _surface.GlobalPosition - _mirrorCam.GlobalPosition;
-        float near = Mathf.Abs(cameraToMirror.Dot(mirrorNormal)) + _cullNear;
-        float far = cameraToMirror.Length() + _cullFar;
-
-        // Transform offset to camera's local coordinate system for set_frustum.
-        Vector3 localOffset = _mirrorCam.GlobalBasis.Inverse() * cameraToMirror;
-        var frustumOffset = new Vector2(localOffset.X, localOffset.Y);
-
-        _mirrorCam.SetFrustum(_size.X, frustumOffset, near, far);
+        // Copy camera FOV and properties from viewer
+        _mirrorCam.Fov = viewer.Fov;
+        _mirrorCam.Near = viewer.Near;
+        _mirrorCam.Far = viewer.Far;
     }
 
     /// Calculates the transformation that mirrors through the plane with the given normal

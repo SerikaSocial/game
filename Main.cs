@@ -53,6 +53,11 @@ public partial class Main : Node3D
 
     private Hud _hud;
     private PauseMenu _pauseMenu;
+    private QuickMenu _quickMenu;
+    private MainMenu _mainMenu;
+    private ActionMenu _actionMenu;
+    private CameraMenu _cameraMenu;
+    private PhotoCamera _photoCam;
     private AvatarSelector _avatarSelector;
     private InWorldHud _inWorldHud;
     private ChatOverlay _chat;
@@ -83,6 +88,12 @@ public partial class Main : Node3D
         Worlds.BuildCommons(_worldRoot); // backdrop behind the login screen
 
         var args = ParseArgs();
+        if (args.ContainsKey("serika-animtest"))
+        {
+            AnimDiagnostic.Run(this, args.GetValueOrDefault("clip", "Walk"),
+                args.GetValueOrDefault("ska", null));
+            return;
+        }
         if (args.ContainsKey("serika-smoke"))
         {
             _smoke = true;
@@ -106,7 +117,8 @@ public partial class Main : Node3D
         _hud.RetryPressed += () => _ = LoginThenRoute();
         _hud.HomePressed += EnterHome;
         _hud.JoinCommonsPressed += () => _ = JoinDefaultWorld();
-        _hud.JoinWorldPressed += (worldId) => _ = JoinWorldById(worldId);
+        _hud.JoinWorldPressed += (worldId) => _ = ShowWorldDetailFor(worldId);
+        _hud.JoinWorldFromDetailPressed += (worldId) => _ = JoinWorldById(worldId);
         _hud.WorldListClosed += CloseWorldList;
         _hud.ShowLogin();
 
@@ -123,17 +135,52 @@ public partial class Main : Node3D
         _pauseMenu.WorldsPressed += () => { _pauseMenu.Hide(); OpenWorldList(); };
         _pauseMenu.QuitPressed += () => GetTree().Quit();
         _pauseMenu.RespawnPressed += RespawnLocal;
-        _pauseMenu.CameraTogglePressed += () =>
-        {
-            if (_localDesktop == null) return;
-            bool fp = _localDesktop.ToggleCameraMode();
-            _persistThirdPerson = !fp;
-            _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
-        };
+        _pauseMenu.CameraTogglePressed += ToggleCameraView;
         _pauseMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
         _pauseMenu.CopyInvitePressed += CopyInviteLink;
         _pauseMenu.AvatarsPressed += OpenAvatarSelector;
         _pauseMenu.Closed += OnPauseClosed;
+
+        // VRChat-style Quick Menu (Launch Pad)
+        _quickMenu = new QuickMenu { Name = "QuickMenu" };
+        AddChild(_quickMenu);
+        _quickMenu.HomePressed += EnterHome;
+        _quickMenu.RespawnPressed += RespawnLocal;
+        _quickMenu.OpenMainMenuWorlds += () => _mainMenu?.Open(_username, 1);
+        _quickMenu.OpenMainMenuAvatars += () => _mainMenu?.Open(_username, 2);
+        _quickMenu.OpenCameraMenu += OpenCameraMenu;
+        _quickMenu.OpenRadialMenu += () => _actionMenu?.Open();
+        _quickMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
+        _quickMenu.Closed += OnPauseClosed;
+
+        // VRChat-style Main Menu (Big Menu)
+        _mainMenu = new MainMenu { Name = "MainMenu" };
+        AddChild(_mainMenu);
+        _mainMenu.JoinWorldPressed += (id) => _ = ShowWorldDetailFor(id);
+        _mainMenu.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
+        _mainMenu.ImageLoader = url => _api.GetImageBytesAsync(url);
+        _mainMenu.Closed += OnPauseClosed;
+
+        // VRChat-style Action Menu (Radial Pie Menu)
+        _actionMenu = new ActionMenu { Name = "ActionMenu" };
+        AddChild(_actionMenu);
+        _actionMenu.HomePressed += EnterHome;
+        _actionMenu.RespawnPressed += RespawnLocal;
+        _actionMenu.CameraPressed += OpenCameraMenu;
+        _actionMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
+        _actionMenu.Closed += OnPauseClosed;
+
+        // VRChat-style Camera & Photo Viewfinder Menu
+        // The free-flying photo camera the viewfinder renders. Lives on the root so it keeps
+        // filming while the player stands still, and survives world switches.
+        _photoCam = new PhotoCamera { Name = "PhotoCamera" };
+        AddChild(_photoCam);
+
+        _cameraMenu = new CameraMenu { Name = "CameraMenu" };
+        AddChild(_cameraMenu);
+        _cameraMenu.Bind(_photoCam);
+        _cameraMenu.PhotoTaken += () => _inWorldHud?.Toast("📷 Photo saved to user disk!");
+        _cameraMenu.Closed += OnPauseClosed;
 
         _avatarSelector = new AvatarSelector { Name = "AvatarSelector" };
         AddChild(_avatarSelector);
@@ -314,10 +361,37 @@ public partial class Main : Node3D
             if (await _api.DownloadToAsync(url, abs))
             {
                 _localAvatarPath = "user://avatars/current.ska";
+                AvatarLibrary.CurrentDefaultPath = _localAvatarPath;
                 GD.Print($"equipped custom avatar from {url}");
             }
         }
         catch (Exception e) { GD.PrintErr($"avatar fetch failed: {e.Message}"); }
+    }
+
+    /// Cache the shared default outfit — what a peer wears until their own avatar resolves.
+    /// Kept separate from the local player's avatar so remotes never clone the viewer.
+    private async Task FetchDefaultOutfit()
+    {
+        try
+        {
+            var avatars = await _api.GetAvatarsAsync(mine: false);
+            string url = null;
+            foreach (var a in avatars.EnumerateArray())
+            {
+                bool isDefault = a.TryGetProperty("isDefaultOutfit", out var d) && d.ValueKind == JsonValueKind.True;
+                if (!isDefault) continue;
+                if (a.TryGetProperty("downloadUrl", out var u) && u.ValueKind == JsonValueKind.String)
+                { url = u.GetString(); break; }
+            }
+            if (string.IsNullOrEmpty(url)) return;
+
+            DirAccess.MakeDirRecursiveAbsolute("user://avatars");
+            string rel = "user://avatars/default-outfit.ska";
+            string abs = ProjectSettings.GlobalizePath(rel);
+            if (System.IO.File.Exists(abs) || await _api.DownloadToAsync(url, abs))
+                AvatarLibrary.DefaultOutfitPath = rel;
+        }
+        catch (Exception e) { GD.PrintErr($"default outfit fetch failed: {e.Message}"); }
     }
 
     /// Fetch the logged-in user's block list so blocked peers show as beans in-world.
@@ -357,6 +431,7 @@ public partial class Main : Node3D
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
+            await FetchDefaultOutfit();
             _ = FetchBlockList();
 
             if (_pendingIntent.Kind == DeepLink.Kind.World)
@@ -392,6 +467,7 @@ public partial class Main : Node3D
 
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
+            await FetchDefaultOutfit();
             _ = FetchBlockList();
 
             if (_pendingIntent.Kind == DeepLink.Kind.World)
@@ -505,6 +581,7 @@ public partial class Main : Node3D
         _hud?.ShowWorldList(_username);
         if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
         Input.MouseMode = Input.MouseModeEnum.Visible;
+        _ = PopulateWorldList();
     }
 
     private void CloseWorldList()
@@ -581,9 +658,9 @@ public partial class Main : Node3D
     /// previously worn one is instant and never collides with AvatarLibrary's path cache.
     private async Task EquipAvatar(string id, string downloadUrl, string name)
     {
+        ShowAvatarLoading($"Loading {name}…");
         try
         {
-            _inWorldHud?.Toast($"Equipping {name}…", 2);
             DirAccess.MakeDirRecursiveAbsolute("user://avatars");
             string rel = $"user://avatars/{SanitizeId(id)}.ska";
             string abs = ProjectSettings.GlobalizePath(rel);
@@ -603,6 +680,7 @@ public partial class Main : Node3D
 
             _localAvatarPath = rel;
             _currentAvatarId = id;
+            AvatarLibrary.CurrentDefaultPath = rel;
             _localDesktop?.SetAvatar(avatar);
 
             // Persist so it's worn on the next join and by remotes after they resync.
@@ -616,6 +694,30 @@ public partial class Main : Node3D
             GD.PrintErr($"equip failed: {e.Message}");
             _inWorldHud?.Toast("Couldn't equip that avatar", 3);
         }
+        finally
+        {
+            HideAvatarLoading();
+        }
+    }
+
+    // ── Avatar loading indicator ────────────────────────────────────────────────────
+    private AvatarLoadingIndicator _avatarLoading;
+
+    /// Spinner at the player's feet while an avatar downloads/imports. `.ska` files run to tens
+    /// of megabytes, so without it a swap just looks like the client hanging.
+    private void ShowAvatarLoading(string text)
+    {
+        HideAvatarLoading();
+        if (_localNode == null) return;
+        _avatarLoading = AvatarLoadingIndicator.Create(1.7f, text);
+        _localNode.AddChild(_avatarLoading);
+    }
+
+    private void HideAvatarLoading()
+    {
+        if (_avatarLoading == null) return;
+        _avatarLoading.QueueFree();
+        _avatarLoading = null;
     }
 
     /// Pull the user's chosen avatar id out of the login response, or null if none set.
@@ -706,6 +808,67 @@ public partial class Main : Node3D
     private void OnWorldsFetched()
     {
         _hud?.SetWorlds(_fetchedWorlds);
+        _mainMenu?.SetWorlds(_fetchedWorlds);
+        _ = PopulateMainMenuAvatars();
+    }
+
+    private List<(string id, string name, string author, string thumbUrl, string dlUrl)> _fetchedAvatars;
+
+    // Feed the VRChat-style Big Menu's Avatars tab from the same catalogue the in-world
+    // AvatarSelector uses. Without this the Avatars tab renders "No avatars available".
+    private async Task PopulateMainMenuAvatars()
+    {
+        if (_api == null || _mainMenu == null) return;
+        try
+        {
+            var avatars = await _api.GetAvatarsAsync(false);
+            var list = new List<(string id, string name, string author, string thumbUrl, string dlUrl)>();
+            foreach (var a in avatars.EnumerateArray())
+            {
+                string id = a.GetProperty("id").GetString() ?? "";
+                string name = a.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : "Untitled";
+                string author = a.TryGetProperty("author", out var au) && au.ValueKind == JsonValueKind.String ? au.GetString() : null;
+                string thumb = a.TryGetProperty("thumbnailUrl", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
+                string dl = a.TryGetProperty("downloadUrl", out var dl2) && dl2.ValueKind == JsonValueKind.String ? dl2.GetString() : null;
+                list.Add((id, name, author, thumb, dl));
+            }
+            _fetchedAvatars = list;
+            CallDeferred(nameof(OnAvatarsFetched));
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"main-menu avatar fetch failed: {e.Message}");
+        }
+    }
+
+    private void OnAvatarsFetched()
+    {
+        if (_fetchedAvatars != null) _mainMenu?.SetAvatars(_fetchedAvatars);
+    }
+
+    // ── World detail (in-game) ──────────────────────────────────────────────────────
+    private JsonElement _pendingWorldDetail;
+
+    private async Task ShowWorldDetailFor(string worldId)
+    {
+        if (_api == null) return;
+        try
+        {
+            var detail = await _api.GetWorldDetailAsync(worldId);
+            _pendingWorldDetail = detail;
+            CallDeferred(nameof(OnWorldDetailFetched));
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"world detail fetch failed: {e.Message}");
+            // Fall back to direct join if detail fetch fails
+            _ = JoinWorldById(worldId);
+        }
+    }
+
+    private void OnWorldDetailFetched()
+    {
+        _hud?.ShowWorldDetail(_pendingWorldDetail);
     }
 
     private void TeardownRemotes()
@@ -740,7 +903,7 @@ public partial class Main : Node3D
         _inHome = false;
         _worldName = worldName;
         ShowLoading($"Connecting to {worldName}…");
-        BuildCommonsWorld();
+        SwapWorld(root => Worlds.BuildWorldForId(_currentWorldId, root));
         SpawnLocalPlayer();
         MoveLocalTo(new Vector3(0, 1, 8));
         ConnectTo(endpoint, ticket);
@@ -867,7 +1030,52 @@ public partial class Main : Node3D
         _remotes[p.PeerId] = a;
         AddChild(a);
         if (!string.IsNullOrEmpty(p.UserId) && _blockedUserIds.Contains(p.UserId))
-            a.ShowBean();
+        {
+            a.ShowBean();   // blocked: never load their real model
+            return;
+        }
+        _ = EquipRemoteAvatar(p.PeerId, p.UserId);
+    }
+
+    /// Resolve and equip a peer's own avatar. Until this lands they wear the default outfit;
+    /// previously every remote wore the *local* player's model because the client had no way
+    /// to look up who was wearing what.
+    private async Task EquipRemoteAvatar(uint peerId, string userId)
+    {
+        if (_api == null || string.IsNullOrEmpty(userId)) return;
+        if (_remotes.TryGetValue(peerId, out var pending)) pending.SetLoading(true);
+        try
+        {
+            string url = await _api.GetAvatarUrlForUserAsync(userId);
+            if (string.IsNullOrEmpty(url)) return;
+
+            // Cached per user under user://avatars/, same convention as EquipAvatar.
+            DirAccess.MakeDirRecursiveAbsolute("user://avatars");
+            string rel = $"user://avatars/peer-{SanitizeId(userId)}.ska";
+            string abs = ProjectSettings.GlobalizePath(rel);
+            if (!System.IO.File.Exists(abs) && !await _api.DownloadToAsync(url, abs)) return;
+
+            CallDeferred(nameof(ApplyRemoteAvatar), peerId, rel);
+            return;
+        }
+        catch (Exception e) { GD.PrintErr($"remote avatar equip failed: {e.Message}"); }
+        finally
+        {
+            // Clear the spinner on the paths that don't reach ApplyRemoteAvatar.
+            CallDeferred(nameof(ClearRemoteLoading), peerId);
+        }
+    }
+
+    private void ApplyRemoteAvatar(uint peerId, string path)
+    {
+        if (!_remotes.TryGetValue(peerId, out var a)) return;
+        a.EquipAvatar(path);
+        a.SetLoading(false);
+    }
+
+    private void ClearRemoteLoading(uint peerId)
+    {
+        if (_remotes.TryGetValue(peerId, out var a)) a.SetLoading(false);
     }
 
     // ── Per-frame ────────────────────────────────────────────────────────────────────
@@ -876,72 +1084,132 @@ public partial class Main : Node3D
 
     /// Esc opens the pause menu whenever we're somewhere playable — Home included. The menu
     /// itself handles Esc-closes; while it's up the player's movement/look are suspended.
+    private void ToggleCameraView()
+    {
+        if (_localDesktop == null) return;
+        var mode = _localDesktop.CycleCameraMode();
+        string toastMsg = mode switch
+        {
+            LocalPlayer.CameraModeEnum.ThirdPersonBack => "Third-person view (Back)",
+            LocalPlayer.CameraModeEnum.ThirdPersonFront => "Third-person view (Front / Selfie)",
+            _ => "First-person view",
+        };
+        _inWorldHud?.Toast(toastMsg);
+    }
+
     private void OpenPauseMenu()
     {
-        _pauseMenu.ShowMenu(_worldName, _inHome);
+        _quickMenu?.Open(_username);
+        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+    }
+
+    /// Open the photo viewfinder, dropping the phantom camera at the player's eye so the first
+    /// frame shows what they were already looking at.
+    private void OpenCameraMenu()
+    {
+        _cameraMenu?.Open(_local?.PoseTransform());
         if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
     }
 
     private void OnPauseClosed()
     {
-        // Re-enable controls unless another overlay that owns input is up right after us.
-        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false })
+        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false }
+            && !(_quickMenu?.IsOpen ?? false) && !(_mainMenu?.IsOpen ?? false)
+            && !(_actionMenu?.IsOpen ?? false) && !(_cameraMenu?.IsOpen ?? false)
+            && !(_pauseMenu?.IsOpen ?? false) && !(_avatarSelector?.IsOpen ?? false))
+        {
             _localDesktop.ControlsEnabled = true;
+        }
+    }
+
+    private bool AnyMenuOpen =>
+        (_quickMenu?.IsOpen ?? false) || (_mainMenu?.IsOpen ?? false) ||
+        (_actionMenu?.IsOpen ?? false) || (_cameraMenu?.IsOpen ?? false) ||
+        (_pauseMenu?.IsOpen ?? false) || (_avatarSelector?.IsOpen ?? false);
+
+    /// Close whichever overlay menu is currently open (top-most wins). Returns true if one closed.
+    private bool CloseOpenMenu()
+    {
+        // The radial menu steps back out of a submenu before closing entirely.
+        if (_actionMenu?.IsOpen ?? false)
+        {
+            if (_actionMenu.BackOut()) return true;
+            _actionMenu.Hide();
+            return true;
+        }
+        if (_quickMenu?.IsOpen ?? false) { _quickMenu.Hide(); return true; }
+        if (_mainMenu?.IsOpen ?? false) { _mainMenu.Hide(); return true; }
+        if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); return true; }
+        if (_pauseMenu?.IsOpen ?? false) { _pauseMenu.Hide(); return true; }
+        if (_avatarSelector?.IsOpen ?? false) { _avatarSelector.Hide(); return true; }
+        return false;
+    }
+
+    // Menu-toggle keys are handled in _Input (not _UnhandledInput): Escape is the engine's
+    // `ui_cancel` action, which any focused Control (a menu button, a LineEdit) swallows before
+    // it ever reaches unhandled input — that's why Esc "did nothing, not even reveal the mouse".
+    // _Input runs ahead of GUI focus, so the menu keys fire reliably.
+    public override void _Input(InputEvent @event)
+    {
+        if (@event is not InputEventKey { Pressed: true, Echo: false } k) return;
+        if (!(_inWorld || _inHome)) return;
+        if (_chat is { IsTyping: true }) return; // let the chat box keep its own keys
+
+        // Escape always resolves (close top-most, else open the quick menu). Every other
+        // shortcut is ignored while a menu is up, so e.g. R can't close the radial ring in the
+        // menu's own handler and then be re-opened by the toggle below in the same event.
+        if (k.Keycode == Key.Escape)
+        {
+            if (!CloseOpenMenu()) OpenPauseMenu();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (AnyMenuOpen && k.Keycode is not (Key.M or Key.R or Key.C)) return;
+
+        switch (k.Keycode)
+        {
+            case Key.M:
+                if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide();
+                else { _mainMenu?.Open(_username, 1); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
+                GetViewport().SetInputAsHandled();
+                return;
+
+            case Key.R:
+                if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
+                else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
+                GetViewport().SetInputAsHandled();
+                return;
+
+            case Key.C:
+                if (_cameraMenu?.IsOpen ?? false) _cameraMenu.Hide();
+                else OpenCameraMenu();
+                GetViewport().SetInputAsHandled();
+                return;
+
+            case Key.V:
+                ToggleMic();
+                GetViewport().SetInputAsHandled();
+                return;
+
+            case Key.F5:
+                if (_localDesktop != null) { ToggleCameraView(); GetViewport().SetInputAsHandled(); }
+                return;
+        }
     }
 
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && (_inWorld || _inHome) && !_pauseMenu.IsOpen)
-        {
-            OpenPauseMenu();
-            GetViewport().SetInputAsHandled();
-        }
-
-        // V toggles first/third person (desktop only).
-        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.V }
-            && _localDesktop != null && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
-        {
-            bool fp = _localDesktop.ToggleCameraMode();
-            _persistThirdPerson = !fp;
-            _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
-            GetViewport().SetInputAsHandled();
-        }
-
         // T opens the text chat (in Home or a world), when not already typing.
         if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.T }
-            && (_inWorld || _inHome) && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
+            && (_inWorld || _inHome) && _chat is { IsTyping: false })
         {
             OpenChat();
             GetViewport().SetInputAsHandled();
         }
 
-        // M toggles the microphone (push-to-talk toggle).
-        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.M }
-            && (_inWorld || _inHome) && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
-        {
-            ToggleMic();
-            GetViewport().SetInputAsHandled();
-        }
 
-        // Emote keys: B=sit, N=dance, H=wave. Press again to cancel.
-        if (@event is InputEventKey { Pressed: true, Echo: false } k
-            && (_inWorld || _inHome) && _localDesktop != null
-            && _chat is { IsTyping: false } && _pauseMenu is { IsOpen: false })
-        {
-            AvatarInstance.Emote? emote = k.Keycode switch
-            {
-                Key.B => AvatarInstance.Emote.Sit,
-                Key.N => AvatarInstance.Emote.Dance,
-                Key.H => AvatarInstance.Emote.Wave,
-                _ => null,
-            };
-            if (emote.HasValue)
-            {
-                _localDesktop.PlayEmote(emote.Value);
-                _inWorldHud?.Toast(emote.Value == AvatarInstance.Emote.None ? "Emote cancelled" : $"Emote: {emote.Value}");
-                GetViewport().SetInputAsHandled();
-            }
-        }
+
+        // Emotes have no key binds — they're all chosen from the Action menu (R).
     }
 
     public override void _PhysicsProcess(double delta)
@@ -958,7 +1226,8 @@ public partial class Main : Node3D
             if (_poseTimer >= 0.05)
             {
                 _poseTimer = 0;
-                _transport.SendPose(AvatarPose.FromTransform(_local.PoseTransform(), _poseSeq++));
+                _transport.SendPose(AvatarPose.FromTransform(
+                    _local.PoseTransform(), _poseSeq++, _localDesktop?.Avatar));
             }
         }
 

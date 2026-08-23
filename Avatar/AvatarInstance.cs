@@ -22,6 +22,9 @@ public sealed partial class AvatarInstance : Node3D
     private readonly Dictionary<string, int> _roleToBone = new();
     private Node3D _model;
 
+    /// Humanoid role → bone index, exposed for the headless animation diagnostic.
+    public Dictionary<string, int> RoleToBoneForDiagnostics() => _roleToBone;
+
     /// Build an avatar from raw `.ska` bytes. Returns null (and logs) if the payload can't be
     /// imported — callers fall back to the capsule so a bad avatar never leaves you invisible.
     public static AvatarInstance FromBytes(byte[] skaBytes)
@@ -40,10 +43,9 @@ public sealed partial class AvatarInstance : Node3D
 
         var inst = new AvatarInstance { Meta = ska.Meta, Name = "Avatar" };
         inst._model = model;
-        // Face direction comes straight from the .ska metadata (faceYawDegrees), authored by
-        // the converter per source format. No client-side override — see the orientation notes
-        // in the header comment.
-        model.RotationDegrees = new Vector3(0, ska.Meta.FaceYawDegrees, 0);
+        // Face direction: VRM models face +Z by default, but Godot's forward is -Z. Add 180°
+        // to the metadata's faceYawDegrees so the avatar faces the correct way in-world.
+        model.RotationDegrees = new Vector3(0, ska.Meta.FaceYawDegrees + 180f, 0);
         inst.AddChild(model);
 
         inst.Skeleton = FindSkeleton(model);
@@ -168,6 +170,39 @@ public sealed partial class AvatarInstance : Node3D
 
     public int BoneOf(string role) => _roleToBone.GetValueOrDefault(role, -1);
 
+    /// Read this rig's current local bone rotations into wire order, for streaming to peers.
+    /// Roles this avatar doesn't have are written as identity. `dst` must hold at least
+    /// `HumanoidBones.Lod1.Length` entries; nothing is allocated here (hot path, 20 Hz).
+    public void CaptureBonePose(Serika.Net.Codec.Quat[] dst)
+    {
+        if (Skeleton == null) return;
+        for (int i = 0; i < HumanoidBones.Lod1.Length && i < dst.Length; i++)
+        {
+            int b = BoneOf(HumanoidBones.Lod1[i]);
+            if (b < 0) { dst[i] = Serika.Net.Codec.Quat.Identity; continue; }
+            var q = Skeleton.GetBonePoseRotation(b);
+            dst[i] = new Serika.Net.Codec.Quat(q.X, q.Y, q.Z, q.W);
+        }
+    }
+
+    /// Drive this rig from bone rotations received off the wire. This is what makes a remote
+    /// player's crouch, emote and locomotion match what the sender actually sees, rather than
+    /// being re-guessed locally from their observed velocity.
+    public void ApplyBonePose(System.Collections.Generic.IReadOnlyList<Serika.Net.Codec.Quat> src)
+    {
+        if (Skeleton == null || src == null) return;
+        int n = System.Math.Min(src.Count, HumanoidBones.Lod1.Length);
+        for (int i = 0; i < n; i++)
+        {
+            int b = BoneOf(HumanoidBones.Lod1[i]);
+            if (b < 0) continue;
+            var q = src[i];
+            var rot = new Quaternion(q.X, q.Y, q.Z, q.W);
+            if (!rot.IsNormalized()) rot = rot.Normalized();
+            Skeleton.SetBonePoseRotation(b, rot);
+        }
+    }
+
     /// Global transform of the head bone in world space (for camera / first-person hiding).
     public bool TryGetHeadGlobal(out Transform3D xf)
     {
@@ -226,12 +261,21 @@ public sealed partial class AvatarInstance : Node3D
           "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg",
           "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm" };
 
-    public enum Emote { None, Sit, Dance, Wave }
+    /// Emotes are chosen from the Action menu (R) — there are deliberately no key binds.
+    public enum Emote
+    {
+        None, Sit, Dance, DanceCharleston, Bow, Greeting, Victory, VictoryFist,
+        Meditate, Sleeping, Confused, Dizzy, Yes, Reject, Backflip, Shivering,
+    }
     private Emote _emote = Emote.None;
     private float _emoteTime;
     private float _emoteBlend;
 
-    /// Play an emote animation (sit, dance, wave). Pass Emote.None to return to normal.
+    /// Direction of travel relative to facing, so locomotion picks the matching clip.
+    public enum MoveDirection { Forward, Back, Left, Right }
+    public MoveDirection MoveDir { get; set; } = MoveDirection.Forward;
+
+    /// Play an emote animation. Pass Emote.None to return to normal.
     public void PlayEmote(Emote e)
     {
         _emote = e;
@@ -416,9 +460,21 @@ public sealed partial class AvatarInstance : Node3D
         {
             return _emote switch
             {
-                Emote.Sit => AnimRetargeter.State.Sit,
-                Emote.Dance => AnimRetargeter.State.Dance,
-                Emote.Wave => AnimRetargeter.State.Wave,
+                Emote.Sit             => AnimRetargeter.State.Sit,
+                Emote.Dance           => AnimRetargeter.State.Dance,
+                Emote.DanceCharleston => AnimRetargeter.State.DanceCharleston,
+                Emote.Bow             => AnimRetargeter.State.Bow,
+                Emote.Greeting        => AnimRetargeter.State.Greeting,
+                Emote.Victory         => AnimRetargeter.State.Victory,
+                Emote.VictoryFist     => AnimRetargeter.State.VictoryFist,
+                Emote.Meditate        => AnimRetargeter.State.Meditate,
+                Emote.Sleeping        => AnimRetargeter.State.Sleeping,
+                Emote.Confused        => AnimRetargeter.State.Confused,
+                Emote.Dizzy           => AnimRetargeter.State.Dizzy,
+                Emote.Yes             => AnimRetargeter.State.Yes,
+                Emote.Reject          => AnimRetargeter.State.Reject,
+                Emote.Backflip        => AnimRetargeter.State.Backflip,
+                Emote.Shivering       => AnimRetargeter.State.Shivering,
                 _ => AnimRetargeter.State.Idle,
             };
         }
@@ -433,7 +489,18 @@ public sealed partial class AvatarInstance : Node3D
             return speed > 0.5f ? AnimRetargeter.State.CrouchWalk : AnimRetargeter.State.CrouchIdle;
 
         if (speed > 0.5f)
-            return sprinting ? AnimRetargeter.State.Run : AnimRetargeter.State.Walk;
+        {
+            if (sprinting) return speed > 5.5f ? AnimRetargeter.State.Sprint : AnimRetargeter.State.Run;
+            // Pick the clip that matches the direction of travel relative to facing, so
+            // backing up and strafing don't play a forward walk.
+            return MoveDir switch
+            {
+                MoveDirection.Back => AnimRetargeter.State.WalkBack,
+                MoveDirection.Left => AnimRetargeter.State.StrafeLeft,
+                MoveDirection.Right => AnimRetargeter.State.StrafeRight,
+                _ => AnimRetargeter.State.Walk,
+            };
+        }
 
         return AnimRetargeter.State.Idle;
     }
@@ -473,20 +540,7 @@ public sealed partial class AvatarInstance : Node3D
                 break;
             }
 
-            case Emote.Wave:
-            {
-                // Wave: right arm raised, hand waving. Left arm idle.
-                float wave = Mathf.Sin(t * 6f);
-                armSwing = Mathf.Lerp(armSwing, -1.2f, eb);  // right arm up
-                lowerArmBend = Mathf.Lerp(lowerArmBend, 0.3f, eb);
-                // Override right arm specifically for the wave.
-                SwingQuat("rightUpperArm", new Quaternion(Vector3.Right, -1.2f * eb) *
-                    new Quaternion(Vector3.Forward, wave * 0.2f * eb));
-                SwingQuat("rightLowerArm", new Quaternion(Vector3.Right, (0.3f + wave * 0.3f) * eb));
-                armIdle = Mathf.Lerp(armIdle, 0f, eb);
-                breathe = Mathf.Lerp(breathe, Mathf.Sin(t * 1.5f) * 0.03f, eb);
-                break;
-            }
+
         }
     }
 

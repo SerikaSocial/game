@@ -49,6 +49,9 @@ public sealed class ApiClient
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
 
+    /// Fetch full world detail including instances and review stats.
+    public async Task<JsonElement> GetWorldDetailAsync(string worldId) =>
+        await GetAsync($"/v1/worlds/{worldId}");
     /// Download a world file (.skw) to a local path under user://, returning the absolute path.
     /// Returns null on failure.
     public async Task<string> DownloadWorldAsync(string url, string worldId)
@@ -81,6 +84,23 @@ public sealed class ApiClient
                 return d.GetString();
         }
         catch { /* fall back to bundled default */ }
+        return null;
+    }
+
+    /// The `.ska` URL for the avatar a given user is wearing, so remote players render as
+    /// themselves. The relay only carries a peer's user id, so this is how the client resolves
+    /// it. Returns null on error — the caller then falls back to the default outfit.
+    public async Task<string> GetAvatarUrlForUserAsync(string userId)
+    {
+        if (string.IsNullOrEmpty(userId)) return null;
+        try
+        {
+            var res = await GetAsync($"/v1/avatars/by-user/{userId}");
+            if (res.TryGetProperty("avatar", out var a) && a.ValueKind == JsonValueKind.Object
+                && a.TryGetProperty("downloadUrl", out var d) && d.ValueKind == JsonValueKind.String)
+                return d.GetString();
+        }
+        catch (Exception e) { GD.PrintErr($"peer avatar lookup failed: {e.Message}"); }
         return null;
     }
 

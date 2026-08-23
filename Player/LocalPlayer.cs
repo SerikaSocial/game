@@ -45,7 +45,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
     private Node3D _avatarMount;      // sits at feet, rotates to match body yaw
     private AvatarInstance _avatar;   // null until an avatar is equipped (capsule shown meanwhile)
-    private bool _firstPerson = true; // camera mode; the FP/TP toggle lives in Main
+
+    /// The equipped rig, so the network layer can sample its bone pose for streaming.
+    public AvatarInstance Avatar => _avatar;
+    // Derived from _cameraMode, never stored: this used to be a bool that the 3-way camera
+    // cycle stopped updating, which left the third-person camera height being lerped back to
+    // zero every frame and head-bob running in third person.
+    private bool _firstPerson => _cameraMode == CameraModeEnum.FirstPerson;
 
     private bool _isCrouching;
     private float _currentHeight = StandHeight;
@@ -120,29 +126,63 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     // Standing eye height: the constant until an avatar reports its measured eye level.
     private float _standEyeY = StandCameraY;
 
-    /// Toggle first/third person. In first person we hide the avatar's head so it doesn't clip
-    /// the camera; in third person we pull the camera back along the look direction.
-    public void SetFirstPerson(bool firstPerson)
+    public enum CameraModeEnum { FirstPerson, ThirdPersonBack, ThirdPersonFront }
+    private CameraModeEnum _cameraMode = CameraModeEnum.FirstPerson;
+    public CameraModeEnum CurrentCameraMode => _cameraMode;
+
+    public CameraModeEnum CycleCameraMode()
     {
-        _firstPerson = firstPerson;
+        _cameraMode = _cameraMode switch
+        {
+            CameraModeEnum.FirstPerson => CameraModeEnum.ThirdPersonBack,
+            CameraModeEnum.ThirdPersonBack => CameraModeEnum.ThirdPersonFront,
+            _ => CameraModeEnum.FirstPerson,
+        };
+        ApplyCameraMode();
+        return _cameraMode;
+    }
+
+    public void SetCameraMode(CameraModeEnum mode)
+    {
+        _cameraMode = mode;
         ApplyCameraMode();
     }
 
-    public bool ToggleCameraMode()
+    public void SetFirstPerson(bool firstPerson)
     {
-        SetFirstPerson(!_firstPerson);
-        return _firstPerson;
+        _cameraMode = firstPerson ? CameraModeEnum.FirstPerson : CameraModeEnum.ThirdPersonBack;
+        ApplyCameraMode();
     }
 
-    /// Zero all momentum. Called on respawn so a teleport doesn't carry fall speed or a
-    /// sprint into the new position (which would fling you right back off the map).
+    public bool ToggleCameraMode() => CycleCameraMode() == CameraModeEnum.FirstPerson;
+
+    private void ApplyCameraMode()
+    {
+        bool isFP = _cameraMode == CameraModeEnum.FirstPerson;
+        _avatar?.SetHeadVisible(!isFP);
+
+        _camera.Position = _cameraMode switch
+        {
+            CameraModeEnum.ThirdPersonBack => new Vector3(0, ThirdPersonCameraY, _thirdPersonDistance),
+            CameraModeEnum.ThirdPersonFront => new Vector3(0, ThirdPersonCameraY, -_thirdPersonDistance),
+            _ => Vector3.Zero,
+        };
+
+        _camera.Rotation = _cameraMode == CameraModeEnum.ThirdPersonFront
+            ? new Vector3(_camera.Rotation.X, Mathf.Pi, 0)
+            : new Vector3(_camera.Rotation.X, 0, 0);
+
+        _nameTag.Visible = !isFP;
+    }
+
+    /// Zero all momentum on respawn.
     public void ResetMotion()
     {
         Velocity = Vector3.Zero;
         PlayEmote(AvatarInstance.Emote.None);
     }
 
-    /// Trigger an emote animation on the equipped avatar (sit, dance, wave).
+    /// Trigger an emote animation on the equipped avatar.
     public void PlayEmote(AvatarInstance.Emote emote)
     {
         if (_avatar == null) return;
@@ -150,15 +190,6 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             _avatar.PlayEmote(AvatarInstance.Emote.None);
         else
             _avatar.PlayEmote(emote);
-    }
-
-    private void ApplyCameraMode()
-    {
-        _avatar?.SetHeadVisible(!_firstPerson);
-        // Third-person: dolly the camera back and up a touch; first-person: at the eye.
-        _camera.Position = _firstPerson ? Vector3.Zero : new Vector3(0, ThirdPersonCameraY, _thirdPersonDistance);
-        // The name tag only makes sense floating above you in third person.
-        _nameTag.Visible = !_firstPerson;
     }
 
     private const float ThirdPersonCameraY = 0.35f;
@@ -220,7 +251,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         {
             _isCrouching = wantCrouch;
             _currentHeight = _isCrouching ? CrouchHeight : StandHeight;
-            _currentCameraY = _isCrouching ? CrouchCameraY : _standEyeY;
+            // Crouched eye height scales with the avatar rather than using a fixed 0.8 m, which
+            // sat above a short avatar's head and below a tall one's shoulders.
+            _currentCameraY = _isCrouching ? _standEyeY * (CrouchHeight / StandHeight) : _standEyeY;
             _capsuleShape.Height = _currentHeight;
             _collision.Position = new Vector3(0, _currentHeight * 0.5f, 0);
             if (_bodyMesh.Mesh is CapsuleMesh cm) cm.Height = _currentHeight;
@@ -235,9 +268,18 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             _avatarMount.Rotation = rot;
         }
 
-        // Smooth camera height transition
+        // Eye height. In first person, follow the rig's actual head bone rather than a computed
+        // constant: the crouch clip drops the pelvis by an amount only the animation knows, so a
+        // fixed crouch height left the camera buried inside the avatar's own shoulders.
+        float targetCamY = _currentCameraY;
+        if (_firstPerson && _avatar != null && _avatar.TryGetHeadGlobal(out var headXf))
+        {
+            float localHeadY = ToLocal(headXf.Origin).Y;
+            if (localHeadY > 0.2f) targetCamY = localHeadY;
+        }
+
         var yawPos = _yaw.Position;
-        yawPos.Y = Mathf.Lerp(yawPos.Y, _currentCameraY, (float)delta * 10f);
+        yawPos.Y = Mathf.Lerp(yawPos.Y, targetCamY, (float)delta * 10f);
         _yaw.Position = yawPos;
 
         // Movement is relative to where we're looking (yaw only). Zeroed while controls are off
@@ -264,7 +306,19 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         // Animate the equipped avatar from actual movement state (embedded clips override this).
         var planar = new Vector2(Velocity.X, Velocity.Z);
-        _avatar?.Animate(delta, planar.Length(), IsOnFloor(), _isCrouching, sprinting);
+        if (_avatar != null)
+        {
+            // Which way we're travelling relative to facing, so the avatar plays walk-back and
+            // strafe clips instead of a forward walk in every direction. Forward/back wins over
+            // strafe when both are held, matching how the movement itself reads.
+            _avatar.MoveDir =
+                input.Y < -0.3f ? AvatarInstance.MoveDirection.Forward :
+                input.Y > 0.3f ? AvatarInstance.MoveDirection.Back :
+                input.X > 0.3f ? AvatarInstance.MoveDirection.Right :
+                input.X < -0.3f ? AvatarInstance.MoveDirection.Left :
+                AvatarInstance.MoveDirection.Forward;
+            _avatar.Animate(delta, planar.Length(), IsOnFloor(), _isCrouching, sprinting);
+        }
 
         // Head bob — only when moving on the ground, and only meaningful in first person.
         float baseCamY = _firstPerson ? 0f : ThirdPersonCameraY;

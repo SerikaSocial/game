@@ -16,9 +16,14 @@ public static class AvatarLibrary
 {
     private static readonly Dictionary<string, byte[]> Cache = new();
 
-    /// The path the client uses when no per-user avatar has been chosen. Set by the account/world
-    /// layer after fetching the cloud default. Null until the cloud default is downloaded.
+    /// The LOCAL player's equipped avatar. Only the local rig may use this — a remote player
+    /// wearing it is the bug where everyone in the instance looked like you.
     public static string CurrentDefaultPath { get; set; } = null;
+
+    /// The shared default outfit, used for any peer whose own avatar can't be resolved.
+    /// Deliberately separate from `CurrentDefaultPath`: falling back to the local player's
+    /// avatar makes every remote a clone of the viewer.
+    public static string DefaultOutfitPath { get; set; } = null;
 
     public static byte[] LoadBytes(string path)
     {
