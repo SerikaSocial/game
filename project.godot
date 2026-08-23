@@ -36,7 +36,7 @@ project/assembly_name="SerikaSocial"
 
 [editor_plugins]
 
-enabled=PackedStringArray("dialogue_manager", "phantom_camera", "Color grading")
+enabled=PackedStringArray("dialogue_manager")
 
 [input]
 
