@@ -161,12 +161,30 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         return new Transform3D(rot, pos);
     }
 
-    /// Check if an OpenXR HMD is available.
+    /// Check if OpenXR is already initialised (a headset is live).
     public static bool IsVrAvailable()
     {
         var xr = Engine.GetMainLoop() as SceneTree;
         if (xr?.Root == null) return false;
         var interface_ = XRServer.FindInterface("OpenXR");
         return interface_ != null && interface_.IsInitialized();
+    }
+
+    /// Attempt to bring up OpenXR at runtime and route rendering to the headset. Returns true
+    /// only if a runtime/headset actually initialises. Auto-init is disabled in project
+    /// settings (so a headless desktop never touches OpenXR); this is called deliberately —
+    /// only on Android/Quest or when launched with `--vr` — so no HMD means no OpenXR errors.
+    public static bool TryInitVr()
+    {
+        var tree = Engine.GetMainLoop() as SceneTree;
+        if (tree?.Root == null) return false;
+
+        var iface = XRServer.FindInterface("OpenXR");
+        if (iface == null) return false;
+        if (!iface.IsInitialized() && !iface.Initialize()) return false;
+
+        // Drive the main viewport through the headset.
+        tree.Root.UseXR = true;
+        return iface.IsInitialized();
     }
 }

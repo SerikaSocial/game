@@ -240,8 +240,13 @@ public partial class Main : Node3D
             _localDesktop = null;
         }
 
-        // Detect VR at spawn time — if OpenXR is initialized, use VrPlayer.
-        _vrMode = VrPlayer.IsVrAvailable();
+        // Bring up VR only when it makes sense: on a Quest/Android build, or when a desktop
+        // user explicitly asks with `--vr`. Otherwise OpenXR is never touched, so a normal
+        // desktop launch produces no "failed to load runtime / no HMD" errors.
+        bool wantVr = OS.HasFeature("android")
+            || System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
+            || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
+        _vrMode = wantVr && VrPlayer.TryInitVr();
         if (_vrMode)
         {
             var vr = new VrPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
