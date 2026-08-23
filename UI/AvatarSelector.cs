@@ -245,13 +245,10 @@ public partial class AvatarSelector : CanvasLayer
         byte[] bytes = await _api.GetImageBytesAsync(url);
         if (bytes == null || !IsInstanceValid(target)) return;
 
+        // The image proxy serves WebP by default (URL ends "&output=webp", not ".webp"), so
+        // we can't pick a decoder by extension — try them in likelihood order until one works.
         var img = new Image();
-        Error err = url.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
-            ? img.LoadPngFromBuffer(bytes)
-            : url.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)
-                ? img.LoadWebpFromBuffer(bytes)
-                : img.LoadJpgFromBuffer(bytes);
-        // Fall back across decoders — thumbnails come in mixed formats.
+        Error err = img.LoadWebpFromBuffer(bytes);
         if (err != Error.Ok) err = img.LoadPngFromBuffer(bytes);
         if (err != Error.Ok) err = img.LoadJpgFromBuffer(bytes);
         if (err != Error.Ok || !IsInstanceValid(target)) return;
