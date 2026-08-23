@@ -338,7 +338,9 @@ public sealed partial class AvatarInstance : Node3D
     private void ApplyArm(string role, float sideSign, float swing)
     {
         if (!_animBones.TryGetValue(role, out var ab)) return;
-        var down = new Quaternion(Vector3.Forward, sideSign * ArmRestAngle);
+        // Rotate about Back (not Forward): with Forward the arms swung *up* into a Y-pose;
+        // Back droops them down to the sides from the T-pose bind.
+        var down = new Quaternion(Vector3.Back, sideSign * ArmRestAngle);
         var fwd = new Quaternion(Vector3.Right, swing);
         Skeleton.SetBonePoseRotation(ab.Index, down * fwd * ab.Rest);
     }

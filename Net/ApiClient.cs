@@ -124,11 +124,20 @@ public sealed class ApiClient
         catch { return false; }
     }
 
-    /// Create an instance of a world and get a join ticket + relay endpoint back.
+    /// Create a brand-new instance of a world (used when you explicitly want a private/fresh one).
     public async Task<JsonElement> CreateInstanceAsync(string worldId)
     {
         var body = JsonSerializer.Serialize(new { worldId });
         return await PostAuthedAsync("/v1/instances", body);
+    }
+
+    /// Join a world the VRChat way: land in an existing open public instance if one has room,
+    /// otherwise a fresh one is created. This is what makes two players in the same world
+    /// actually meet — `CreateInstanceAsync` always made a separate empty instance.
+    public async Task<JsonElement> JoinWorldInstanceAsync(string worldId)
+    {
+        var body = JsonSerializer.Serialize(new { worldId });
+        return await PostAuthedAsync("/v1/instances/join-world", body);
     }
 
     /// Join an existing instance, getting a fresh single-use ticket.

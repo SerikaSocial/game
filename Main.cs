@@ -435,7 +435,9 @@ public partial class Main : Node3D
             }
 
             ShowLoading("Joining world…");
-            var joined = await _api.CreateInstanceAsync(worldId);
+            // Match into an existing open instance if one has room (so players actually meet),
+            // else this creates a fresh one.
+            var joined = await _api.JoinWorldInstanceAsync(worldId);
             string endpoint = joined.GetProperty("endpoint").GetString();
             string ticket = joined.GetProperty("ticket").GetString();
             string worldName = joined.TryGetProperty("worldName", out var wn) ? wn.GetString() : "the world";
