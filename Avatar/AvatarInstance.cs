@@ -62,6 +62,101 @@ public sealed partial class AvatarInstance : Node3D
         return FromBytes(f.GetBuffer((long)f.GetLength()));
     }
 
+    /// Build a simple "bean" avatar from primitives — a rounded body, a head, and two hands.
+    /// This is the offline fallback when no cloud default is available or a remote user's model
+    /// is blocked/missing. It has a minimal humanoid skeleton so the procedural animation and
+    /// retargeter still drive it, but no mesh file is needed.
+    public static AvatarInstance CreateBean()
+    {
+        var inst = new AvatarInstance
+        {
+            Meta = new SkaMeta { Name = "Bean", HeightMeters = 1.6f, EyeHeightMeters = 1.5f },
+            Name = "BeanAvatar",
+        };
+
+        var skel = new Skeleton3D { Name = "BeanSkeleton" };
+        inst.AddChild(skel);
+        inst.Skeleton = skel;
+        inst._model = skel;
+
+        // Build a minimal humanoid skeleton. Rest transforms are relative to the parent bone.
+        // The layout matches a simple capsule person: hips at center, spine/chest/head up,
+        // arms at the sides, legs below.
+        int AddBone(string name, int parent, Vector3 offset)
+        {
+            skel.AddBone(name);
+            int idx = skel.GetBoneCount() - 1;
+            if (parent >= 0) skel.SetBoneParent(idx, parent);
+            var rest = new Transform3D(Basis.Identity, offset);
+            skel.SetBoneRest(idx, rest);
+            skel.SetBonePose(idx, rest);
+            return idx;
+        }
+
+        int hips = AddBone("BeanHips", -1, new Vector3(0, 0.9f, 0));
+        int spine = AddBone("BeanSpine", hips, new Vector3(0, 0.15f, 0));
+        int chest = AddBone("BeanChest", spine, new Vector3(0, 0.15f, 0));
+        int head = AddBone("BeanHead", chest, new Vector3(0, 0.22f, 0));
+        int lArm = AddBone("BeanLeftArm", chest, new Vector3(0.22f, 0.12f, 0));
+        int lForearm = AddBone("BeanLeftForeArm", lArm, new Vector3(0, -0.28f, 0));
+        int lHand = AddBone("BeanLeftHand", lForearm, new Vector3(0, -0.22f, 0));
+        int rArm = AddBone("BeanRightArm", chest, new Vector3(-0.22f, 0.12f, 0));
+        int rForearm = AddBone("BeanRightForeArm", rArm, new Vector3(0, -0.28f, 0));
+        int rHand = AddBone("BeanRightHand", rForearm, new Vector3(0, -0.22f, 0));
+        int lUpLeg = AddBone("BeanLeftUpLeg", hips, new Vector3(0.1f, -0.05f, 0));
+        int lLeg = AddBone("BeanLeftLeg", lUpLeg, new Vector3(0, -0.38f, 0));
+        int rUpLeg = AddBone("BeanRightUpLeg", hips, new Vector3(-0.1f, -0.05f, 0));
+        int rLeg = AddBone("BeanRightLeg", rUpLeg, new Vector3(0, -0.38f, 0));
+
+        // Map Serika humanoid roles → bean bone indices so animation works.
+        inst._roleToBone["hips"] = hips;
+        inst._roleToBone["spine"] = spine;
+        inst._roleToBone["chest"] = chest;
+        inst._roleToBone["head"] = head;
+        inst._roleToBone["leftUpperArm"] = lArm;
+        inst._roleToBone["leftLowerArm"] = lForearm;
+        inst._roleToBone["leftHand"] = lHand;
+        inst._roleToBone["rightUpperArm"] = rArm;
+        inst._roleToBone["rightLowerArm"] = rForearm;
+        inst._roleToBone["rightHand"] = rHand;
+        inst._roleToBone["leftUpperLeg"] = lUpLeg;
+        inst._roleToBone["leftLowerLeg"] = lLeg;
+        inst._roleToBone["rightUpperLeg"] = rUpLeg;
+        inst._roleToBone["rightLowerLeg"] = rLeg;
+
+        // Attach primitive meshes to bones via BoneAttachment3D so they follow bone rotations.
+        var mat = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.55f, 0.45f, 0.75f), // purple brand
+            Roughness = 0.8f,
+        };
+        var handMat = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.65f, 0.55f, 0.85f),
+            Roughness = 0.8f,
+        };
+
+        void Attach(string boneName, Mesh mesh, Material material, Vector3 offset)
+        {
+            var att = new BoneAttachment3D { BoneName = boneName };
+            skel.AddChild(att);
+            var mi = new MeshInstance3D { Mesh = mesh, Position = offset };
+            mi.MaterialOverride = material;
+            att.AddChild(mi);
+        }
+
+        // Body: a capsule centered on the upper torso.
+        Attach("BeanSpine", new CapsuleMesh { Height = 0.7f, Radius = 0.22f }, mat, new Vector3(0, 0.25f, 0));
+        // Head: a sphere on the head bone.
+        Attach("BeanHead", new SphereMesh { Radius = 0.16f, Height = 0.32f }, mat, Vector3.Zero);
+        // Hands: small spheres on the hand bones.
+        Attach("BeanLeftHand", new SphereMesh { Radius = 0.07f, Height = 0.14f }, handMat, Vector3.Zero);
+        Attach("BeanRightHand", new SphereMesh { Radius = 0.07f, Height = 0.14f }, handMat, Vector3.Zero);
+
+        inst.SetupAnimation();
+        return inst;
+    }
+
     private void ResolveHumanoid()
     {
         foreach (var (role, boneName) in Meta.Humanoid)
@@ -115,6 +210,8 @@ public sealed partial class AvatarInstance : Node3D
     // the owning player/remote-avatar script.
 
     private AnimationPlayer _animPlayer;
+    private AnimRetargeter _retargeter;
+    private bool _retargeterReady;
 
     private readonly struct AnimBone
     {
@@ -149,30 +246,55 @@ public sealed partial class AvatarInstance : Node3D
 
     private void SetupAnimation()
     {
-        // Only hand the rig to an embedded AnimationPlayer if it actually ships a locomotion
-        // or idle clip. Most VRM exports embed nothing useful (or a single bind/T-pose), and
-        // handing control to that leaves the avatar frozen in a T-pose — which is exactly what
-        // it did. When there's no real clip we drive the rig procedurally instead.
-        _animPlayer = FindAnimPlayer(_model);
-        if (_animPlayer != null)
+        // Try to load the Mixamo locomotion retargeter — this provides real Walk, Run, Jump,
+        // Crouch, Sit, and Dance clips retargeted onto the VRM skeleton by humanoid role.
+        // If it loads, it becomes the primary animation driver; procedural fills in idle/wave.
+        if (Skeleton != null)
         {
-            string pick = null;
-            foreach (string name in _animPlayer.GetAnimationList())
+            _retargeter = AnimRetargeter.Create("res://Assets/Animations/locomotion.glb",
+                Skeleton, _roleToBone);
+            if (_retargeter != null)
             {
-                string n = name.ToLowerInvariant();
-                if (n.Contains("idle") || n.Contains("walk") || n.Contains("loco") ||
-                    n.Contains("run") || n.Contains("stand"))
-                { pick = name; break; }
-            }
-            if (pick != null)
-            {
-                _animPlayer.GetAnimation(pick).LoopMode = Animation.LoopModeEnum.Linear;
-                _animPlayer.Play(pick);
-                return;
+                AddChild(_retargeter);
+                _retargeterReady = true;
             }
         }
 
+        // If the retargeter loaded, skip embedded clips — the retargeter is better than
+        // whatever the VRM might embed, and we always need the procedural bones for idle/wave.
+        if (!_retargeterReady)
+        {
+            // Only hand the rig to an embedded AnimationPlayer if it actually ships a locomotion
+            // or idle clip. Most VRM exports embed nothing useful (or a single bind/T-pose), and
+            // handing control to that leaves the avatar frozen in a T-pose — which is exactly what
+            // it did. When there's no real clip we drive the rig procedurally instead.
+            _animPlayer = FindAnimPlayer(_model);
+            if (_animPlayer != null)
+            {
+                string pick = null;
+                foreach (string name in _animPlayer.GetAnimationList())
+                {
+                    string n = name.ToLowerInvariant();
+                    if (n.Contains("idle") || n.Contains("walk") || n.Contains("loco") ||
+                        n.Contains("run") || n.Contains("stand"))
+                    { pick = name; break; }
+                }
+                if (pick != null)
+                {
+                    _animPlayer.GetAnimation(pick).LoopMode = Animation.LoopModeEnum.Linear;
+                    _animPlayer.Play(pick);
+                    return;
+                }
+            }
+        }
+        else
+        {
+            _animPlayer = null;
+        }
+
         // Procedural path — capture rest rotations as the baseline for our hand-authored motion.
+        // This is always needed: it's the fallback for idle/wave and when the retargeter has no
+        // clip for the current state.
         _animPlayer = null;
         if (Skeleton == null) return;
         foreach (string role in ProceduralRoles)
@@ -184,8 +306,9 @@ public sealed partial class AvatarInstance : Node3D
     }
 
     /// Advance the avatar's animation. `speed` is planar m/s; pass 0 when standing still.
+    /// `crouching` and `sprinting` refine the state for clip selection.
     /// Call every frame from the owning node (`_PhysicsProcess`/`_Process`).
-    public void Animate(double delta, float speed, bool onFloor)
+    public void Animate(double delta, float speed, bool onFloor, bool crouching = false, bool sprinting = false)
     {
         if (Skeleton == null || _animBones.Count == 0) return;
         if (_animPlayer != null) return; // embedded clips drive the rig
@@ -201,6 +324,10 @@ public sealed partial class AvatarInstance : Node3D
         _emoteBlend = Mathf.Lerp(_emoteBlend, emoteTarget, dt * 6f);
         if (_emoteBlend < 0.01f && _emote != Emote.None && (speed > 0.5f || !onFloor))
             _emote = Emote.None;
+
+        // Determine the retargeter state from movement + emote.
+        AnimRetargeter.State rState = DetermineState(speed, onFloor, crouching, sprinting);
+        bool hasClip = _retargeterReady && _retargeter.HasClip(rState);
 
         float b = _moveBlend;
         float t = _idleTime;
@@ -267,6 +394,48 @@ public sealed partial class AvatarInstance : Node3D
         SwingQuat("hips",
             new Quaternion(Vector3.Right, Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b * (1f - eb)) *
             new Quaternion(Vector3.Forward, weightShift * 0.04f * (1f - eb)));
+
+        // ── Retargeter override ─────────────────────────────────────────────────────
+        // If the retargeter has a clip for the current state, it overrides the procedural
+        // rotations we just set. For states without a clip (idle, wave), the procedural
+        // animation stays and the retargeter fades out gracefully.
+        if (_retargeterReady)
+        {
+            _retargeter.SetState(rState);
+            // fallbackWeight: 0 = retargeter fully overrides, 1 = procedural stays
+            float fw = hasClip ? 0f : 1f;
+            _retargeter.Update(delta, fw);
+        }
+    }
+
+    /// Map movement + emote state to a retargeter animation state.
+    private AnimRetargeter.State DetermineState(float speed, bool onFloor, bool crouching, bool sprinting)
+    {
+        // Emotes take priority when standing still.
+        if (_emote != Emote.None && _emoteBlend > 0.3f && speed < 0.5f && onFloor)
+        {
+            return _emote switch
+            {
+                Emote.Sit => AnimRetargeter.State.Sit,
+                Emote.Dance => AnimRetargeter.State.Dance,
+                Emote.Wave => AnimRetargeter.State.Wave,
+                _ => AnimRetargeter.State.Idle,
+            };
+        }
+
+        if (!onFloor)
+        {
+            // Could refine with velocity.y for start vs air vs land; use Fall for now.
+            return AnimRetargeter.State.Fall;
+        }
+
+        if (crouching)
+            return speed > 0.5f ? AnimRetargeter.State.CrouchWalk : AnimRetargeter.State.CrouchIdle;
+
+        if (speed > 0.5f)
+            return sprinting ? AnimRetargeter.State.Run : AnimRetargeter.State.Walk;
+
+        return AnimRetargeter.State.Idle;
     }
 
     /// Override animation values for the active emote, blended by `eb` (0..1).

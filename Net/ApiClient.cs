@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -143,6 +144,27 @@ public sealed class ApiClient
     /// Join an existing instance, getting a fresh single-use ticket.
     public async Task<JsonElement> JoinInstanceAsync(string instanceId) =>
         await PostAuthedAsync($"/v1/instances/{instanceId}/join", "{}");
+
+    /// Fetch the user's block list (account IDs of blocked users). Used to show beans for
+    /// blocked users in-world. Returns an empty set on error.
+    public async Task<HashSet<string>> GetBlockedUsersAsync()
+    {
+        var result = new HashSet<string>();
+        try
+        {
+            var res = await GetAuthedAsync("/v1/social/blocks");
+            if (res.TryGetProperty("blocks", out var arr) && arr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var b in arr.EnumerateArray())
+                {
+                    if (b.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+                        result.Add(id.GetString());
+                }
+            }
+        }
+        catch { /* best-effort */ }
+        return result;
+    }
 
     private async Task<JsonElement> GetAsync(string path)
     {

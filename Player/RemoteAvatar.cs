@@ -28,7 +28,7 @@ public partial class RemoteAvatar : Node3D
 
     private void BuildBody(string displayName)
     {
-        // Capsule stand-in, shown until (and if) an avatar is equipped.
+        // Capsule stand-in, shown only until the avatar or bean is equipped.
         _capsule = new MeshInstance3D
         {
             Mesh = new CapsuleMesh { Height = 1.8f, Radius = 0.3f },
@@ -47,15 +47,27 @@ public partial class RemoteAvatar : Node3D
         };
         AddChild(_nameTag);
 
-        // Equip the current default avatar. Failure leaves the capsule in place.
+        // Equip the current default avatar. Failure falls back to the bean so nobody is a capsule.
         EquipAvatar(AvatarLibrary.CurrentDefaultPath);
     }
 
     /// Equip an avatar from a `.ska` path; hides the capsule and floats the name tag at head height.
+    /// If the path is null or fails to load, the bean fallback is used instead.
     public void EquipAvatar(string skaPath)
     {
-        var avatar = AvatarLibrary.Instantiate(skaPath);
-        if (avatar == null) return;
+        var avatar = AvatarLibrary.InstantiateOrDefault(skaPath);
+        _avatar?.QueueFree();
+        _avatar = avatar;
+        AddChild(avatar);
+        _capsule.Visible = false;
+        _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
+    }
+
+    /// Replace this remote's avatar with the bean — used when the user has blocked them,
+    /// so their real model is never loaded/rendered.
+    public void ShowBean()
+    {
+        var avatar = AvatarLibrary.InstantiateBean();
         _avatar?.QueueFree();
         _avatar = avatar;
         AddChild(avatar);

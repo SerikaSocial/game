@@ -126,9 +126,11 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
                 for (int i = 0; i < count; i++)
                 {
                     uint id = RelayProtocol.ReadU32(buf, o); o += 4;
+                    int uidLen = buf[o++];
+                    string userId = System.Text.Encoding.UTF8.GetString(buf, o, uidLen); o += uidLen;
                     int nameLen = buf[o++];
                     string name = System.Text.Encoding.UTF8.GetString(buf, o, nameLen); o += nameLen;
-                    peers[i] = new PeerInfo(id, name);
+                    peers[i] = new PeerInfo(id, name, userId);
                 }
                 if (!_welcomed) { _welcomed = true; Connected?.Invoke(SelfId, peers); }
                 break;
@@ -136,9 +138,12 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             case MsgType.PeerJoin:
             {
                 uint id = RelayProtocol.ReadU32(buf, 1);
-                int nameLen = buf[5];
-                string name = System.Text.Encoding.UTF8.GetString(buf, 6, nameLen);
-                PeerJoined?.Invoke(new PeerInfo(id, name));
+                int uidLen = buf[5];
+                string userId = System.Text.Encoding.UTF8.GetString(buf, 6, uidLen);
+                int nameOff = 6 + uidLen;
+                int nameLen = buf[nameOff];
+                string name = System.Text.Encoding.UTF8.GetString(buf, nameOff + 1, nameLen);
+                PeerJoined?.Invoke(new PeerInfo(id, name, userId));
                 break;
             }
             case MsgType.PeerLeave:

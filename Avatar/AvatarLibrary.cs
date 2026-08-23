@@ -8,17 +8,17 @@ namespace SerikaSocial.Avatar;
 /// `Instantiate` still builds a fresh `AvatarInstance` because every avatar needs its own
 /// Skeleton3D to be posed independently.
 ///
-/// The bundled default (`res://Assets/Avatars/suisei.ska`) is the fallback outfit until the
-/// account/world tells us otherwise. Downloaded avatars live under `user://avatars/<id>.ska`.
+/// There is no bundled default avatar — the default outfit is set by the web admin and served
+/// from the API. When no cloud default is available (offline, API down, or a blocked user),
+/// callers fall back to the procedural bean via `InstantiateBean()` / `InstantiateOrDefault()`.
+/// Downloaded avatars live under `user://avatars/<id>.ska`.
 public static class AvatarLibrary
 {
-    public const string DefaultAvatarPath = "res://Assets/Avatars/suisei.ska";
-
     private static readonly Dictionary<string, byte[]> Cache = new();
 
-    /// The path the client uses when no per-user avatar has been chosen. Overridable so the
-    /// world/account layer can point everyone at a different default without touching call sites.
-    public static string CurrentDefaultPath { get; set; } = DefaultAvatarPath;
+    /// The path the client uses when no per-user avatar has been chosen. Set by the account/world
+    /// layer after fetching the cloud default. Null until the cloud default is downloaded.
+    public static string CurrentDefaultPath { get; set; } = null;
 
     public static byte[] LoadBytes(string path)
     {
@@ -34,13 +34,24 @@ public static class AvatarLibrary
         return bytes;
     }
 
-    /// Build an avatar from a path, or null on failure (caller falls back to the capsule).
+    /// Build an avatar from a path, or null on failure (caller falls back to the bean).
     public static AvatarInstance Instantiate(string path)
     {
+        if (string.IsNullOrEmpty(path)) return null;
         var bytes = LoadBytes(path);
         return bytes == null ? null : AvatarInstance.FromBytes(bytes);
     }
 
-    /// Build the current default avatar.
-    public static AvatarInstance InstantiateDefault() => Instantiate(CurrentDefaultPath);
+    /// Build the procedural bean avatar — the offline / blocked-user fallback.
+    public static AvatarInstance InstantiateBean() => AvatarInstance.CreateBean();
+
+    /// Try `path`, falling back to the bean on failure or null path. Never returns null.
+    public static AvatarInstance InstantiateOrDefault(string path)
+    {
+        var av = Instantiate(path);
+        return av ?? InstantiateBean();
+    }
+
+    /// Build the current cloud default avatar, or the bean if no default is set / load fails.
+    public static AvatarInstance InstantiateDefault() => InstantiateOrDefault(CurrentDefaultPath);
 }

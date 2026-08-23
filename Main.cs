@@ -36,6 +36,8 @@ public partial class Main : Node3D
     private Node3D _localNode;
     private bool _vrMode;
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
+    private readonly HashSet<string> _blockedUserIds = new();
+    private readonly Dictionary<uint, string> _peerUserIds = new();
 
     private double _poseTimer;
     private double _pingTimer;
@@ -262,8 +264,9 @@ public partial class Main : Node3D
             _local = desktop;
             _localNode = desktop;
             _localDesktop = desktop;
-            // Equip the default humanoid avatar (Suisei). Falls back to the capsule on failure.
-            desktop.SetAvatar(AvatarLibrary.Instantiate(_localAvatarPath ?? AvatarLibrary.CurrentDefaultPath));
+            // Equip the cloud default avatar (or custom downloaded one). Falls back to the
+            // procedural bean when no cloud default is available, so nobody is ever a capsule.
+            desktop.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
             // Restore persisted camera mode across world switches.
             if (_persistThirdPerson) desktop.SetFirstPerson(false);
             SetupTouchControls(desktop);
@@ -317,6 +320,19 @@ public partial class Main : Node3D
         catch (Exception e) { GD.PrintErr($"avatar fetch failed: {e.Message}"); }
     }
 
+    /// Fetch the logged-in user's block list so blocked peers show as beans in-world.
+    private async Task FetchBlockList()
+    {
+        try
+        {
+            _blockedUserIds.Clear();
+            var blocked = await _api.GetBlockedUsersAsync();
+            foreach (var id in blocked) _blockedUserIds.Add(id);
+            GD.Print($"block list: {_blockedUserIds.Count} blocked users");
+        }
+        catch (Exception e) { GD.PrintErr($"block list fetch failed: {e.Message}"); }
+    }
+
     /// Sign in, then go where the launch intent says: a deep-linked world, or Home.
     private async Task LoginThenRoute()
     {
@@ -341,6 +357,7 @@ public partial class Main : Node3D
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
+            _ = FetchBlockList();
 
             if (_pendingIntent.Kind == DeepLink.Kind.World)
             {
@@ -375,6 +392,7 @@ public partial class Main : Node3D
 
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
+            _ = FetchBlockList();
 
             if (_pendingIntent.Kind == DeepLink.Kind.World)
             {
@@ -752,7 +770,13 @@ public partial class Main : Node3D
     {
         GD.Print($"SMOKE connected self={selfId} peers={peers.Length}");
         _peerNames.Clear();
-        foreach (var p in peers) { SpawnRemote(p); _peerNames[p.PeerId] = p.Name; }
+        _peerUserIds.Clear();
+        foreach (var p in peers)
+        {
+            SpawnRemote(p);
+            _peerNames[p.PeerId] = p.Name;
+            if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
+        }
         int others = peers.Length;
         string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
         HideLoading();
@@ -767,6 +791,7 @@ public partial class Main : Node3D
     {
         GD.Print($"SMOKE peer_join {p.PeerId} {p.Name}");
         SpawnRemote(p);
+        if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
         _peerNames[p.PeerId] = p.Name;
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
         _chat.AddSystem($"{p.Name} joined the world");
@@ -775,6 +800,7 @@ public partial class Main : Node3D
     private void OnPeerLeft(uint peerId)
     {
         if (_remotes.Remove(peerId, out var a)) a.QueueFree();
+        _peerUserIds.Remove(peerId);
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
         _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
@@ -840,6 +866,8 @@ public partial class Main : Node3D
         var a = RemoteAvatar.Create(p.PeerId, p.Name);
         _remotes[p.PeerId] = a;
         AddChild(a);
+        if (!string.IsNullOrEmpty(p.UserId) && _blockedUserIds.Contains(p.UserId))
+            a.ShowBean();
     }
 
     // ── Per-frame ────────────────────────────────────────────────────────────────────

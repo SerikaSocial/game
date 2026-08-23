@@ -264,7 +264,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         // Animate the equipped avatar from actual movement state (embedded clips override this).
         var planar = new Vector2(Velocity.X, Velocity.Z);
-        _avatar?.Animate(delta, planar.Length(), IsOnFloor());
+        _avatar?.Animate(delta, planar.Length(), IsOnFloor(), _isCrouching, sprinting);
 
         // Head bob — only when moving on the ground, and only meaningful in first person.
         float baseCamY = _firstPerson ? 0f : ThirdPersonCameraY;

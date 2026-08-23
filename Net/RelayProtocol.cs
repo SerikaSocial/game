@@ -55,5 +55,6 @@ public readonly struct PeerInfo
 {
     public readonly uint PeerId;
     public readonly string Name;
-    public PeerInfo(uint peerId, string name) { PeerId = peerId; Name = name; }
+    public readonly string UserId;
+    public PeerInfo(uint peerId, string name, string userId = "") { PeerId = peerId; Name = name; UserId = userId; }
 }
