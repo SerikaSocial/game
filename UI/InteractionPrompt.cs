@@ -20,14 +20,13 @@ public partial class InteractionPrompt : CanvasLayer
 
         _panel = new PanelContainer
         {
-            AnchorLeft = 0.5f, AnchorRight = 0.5f, AnchorTop = 0.5f, AnchorBottom = 0.5f,
-            // Centred horizontally, a little below the middle of the screen so it sits under
-            // the crosshair rather than over the thing being looked at.
-            OffsetLeft = -140, OffsetRight = 140, OffsetTop = 64, OffsetBottom = 108,
+            AnchorLeft = 1.0f, AnchorRight = 1.0f, AnchorTop = 1.0f, AnchorBottom = 1.0f,
+            // Positioned cleanly in the bottom right corner
+            OffsetLeft = -240, OffsetRight = -28, OffsetTop = -72, OffsetBottom = -28,
             MouseFilter = Control.MouseFilterEnum.Ignore,
             Visible = false,
         };
-        _panel.AddThemeStyleboxOverride("panel", Brand.Panel(new Color(Brand.Bg1, 0.82f), 10));
+        _panel.AddThemeStyleboxOverride("panel", Brand.Panel(new Color(Brand.Bg1, 0.88f), 10));
         AddChild(_panel);
 
         _label = new Label

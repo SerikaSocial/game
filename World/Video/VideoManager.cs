@@ -262,11 +262,11 @@ public partial class VideoManager : Node
                 if (System.IO.File.Exists(absTemp)) System.IO.File.Delete(absTemp);
                 if (System.IO.File.Exists(absOgv)) System.IO.File.Delete(absOgv);
 
-                // Step 1: yt-dlp download up to 720p
+                // Step 1: yt-dlp download up to 720p with forced mp4 merge
                 var ytPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = ytdlpPath,
-                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" -o \"{absTemp}\" \"{url}\"",
+                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" --merge-output-format mp4 -o \"{absTemp}\" \"{url}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
@@ -276,14 +276,23 @@ public partial class VideoManager : Node
                 {
                     if (pYt == null) return null;
                     if (!pYt.WaitForExit(90_000)) { pYt.Kill(); return null; }
-                    if (pYt.ExitCode != 0 || !System.IO.File.Exists(absTemp)) return null;
+                }
+
+                // Check for output file (handling possible container extensions)
+                string inputToFf = absTemp;
+                if (!System.IO.File.Exists(inputToFf))
+                {
+                    if (System.IO.File.Exists(absTemp + ".webm")) inputToFf = absTemp + ".webm";
+                    else if (System.IO.File.Exists(absTemp + ".mkv")) inputToFf = absTemp + ".mkv";
+                    else if (System.IO.File.Exists(absTemp + ".mp4")) inputToFf = absTemp + ".mp4";
+                    else return null;
                 }
 
                 // Step 2: ffmpeg transcode to Theora/Vorbis OGV
                 var ffPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = ffmpegPath,
-                    Arguments = $"-y -i \"{absTemp}\" -c:v libtheora -q:v 5 -c:a libvorbis -q:a 3 -shortest \"{absOgv}\"",
+                    Arguments = $"-y -i \"{inputToFf}\" -c:v libtheora -q:v 5 -c:a libvorbis -q:a 3 -shortest \"{absOgv}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
@@ -296,7 +305,7 @@ public partial class VideoManager : Node
                     if (pFf.ExitCode != 0 || !System.IO.File.Exists(absOgv)) return null;
                 }
 
-                try { if (System.IO.File.Exists(absTemp)) System.IO.File.Delete(absTemp); } catch { }
+                try { if (System.IO.File.Exists(inputToFf)) System.IO.File.Delete(inputToFf); } catch { }
 
                 return gen == _generation && System.IO.File.Exists(absOgv) && new System.IO.FileInfo(absOgv).Length > 1024
                     ? "user://video-cache/current.ogv"

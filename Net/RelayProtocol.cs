@@ -17,6 +17,16 @@ public enum MsgType : byte
     Ping = 0x07,
     Reject = 0x08,
     Chat = 0x09,
+    /// client→server: [obj_id:u16][x:f32][y:f32][z:f32][qx:f32][qy:f32][qz:f32][qw:f32][lvx:f32][lvy:f32][lvz:f32]
+    /// server→client: [peer_id:u32][obj_id:u16][x:f32][y:f32][z:f32][qx:f32][qy:f32][qz:f32][qw:f32][lvx:f32][lvy:f32][lvz:f32]
+    /// Syncs a physics prop's transform + linear velocity. Ownership is implicit: whoever last
+    /// sent an ObjectSync for a given obj_id owns it. Server fans out to all peers in AOI range.
+    ObjectSync = 0x0A,
+    /// client→server: [grab_type:u8][target_peer:u32][bone_or_obj_id:u16][x:f32][y:f32][z:f32]
+    /// server→client: [peer_id:u32][grab_type:u8][bone_or_obj_id:u16][x:f32][y:f32][z:f32]
+    /// grab_type: 0=start grab, 1=update grab position, 2=release grab
+    /// Used for hair/PhysBone grabbing and physics prop grabbing on other players.
+    PhysGrab = 0x0B,
 }
 
 public static class RelayProtocol

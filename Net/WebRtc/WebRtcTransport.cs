@@ -36,6 +36,8 @@ public sealed class WebRtcTransport : ISerikaTransport
     public event Action<uint, PoseFrame> PoseReceived;
     public event Action<uint, VoiceFrame> VoiceReceived;
     public event Action<uint, string> ChatReceived;
+    public event Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
+    public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     public event Action<string> Rejected;
 
     public bool Connected_ => _ready;
@@ -144,6 +146,34 @@ public sealed class WebRtcTransport : ISerikaTransport
         if (bytes.Length > 400) Array.Resize(ref bytes, 400);
         Broadcast(RelayProtocol.WriteOutbound(MsgType.Chat, bytes));
     }
+
+    public void SendObjectSync(ushort objId, float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz)
+    {
+        if (!_ready) return;
+        var buf = new byte[44];
+        int o = 0;
+        buf[o++] = (byte)(objId & 0xFF); buf[o++] = (byte)(objId >> 8);
+        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
+        WriteF32(buf, ref o, qx); WriteF32(buf, ref o, qy); WriteF32(buf, ref o, qz); WriteF32(buf, ref o, qw);
+        WriteF32(buf, ref o, lvx); WriteF32(buf, ref o, lvy); WriteF32(buf, ref o, lvz);
+        Broadcast(RelayProtocol.WriteOutbound(MsgType.ObjectSync, buf));
+    }
+
+    public void SendPhysGrab(byte grabType, uint targetPeer, ushort boneOrObjId, float x, float y, float z)
+    {
+        if (!_ready) return;
+        var buf = new byte[19];
+        int o = 0;
+        buf[o++] = grabType;
+        buf[o++] = (byte)(targetPeer & 0xFF); buf[o++] = (byte)((targetPeer >> 8) & 0xFF);
+        buf[o++] = (byte)((targetPeer >> 16) & 0xFF); buf[o++] = (byte)((targetPeer >> 24) & 0xFF);
+        buf[o++] = (byte)(boneOrObjId & 0xFF); buf[o++] = (byte)(boneOrObjId >> 8);
+        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
+        Broadcast(RelayProtocol.WriteOutbound(MsgType.PhysGrab, buf));
+    }
+
+    private static void WriteF32(byte[] b, ref int o, float v)
+    { var bytes = BitConverter.GetBytes(v); b[o++] = bytes[0]; b[o++] = bytes[1]; b[o++] = bytes[2]; b[o++] = bytes[3]; }
 
     private void Broadcast(byte[] frame)
     {

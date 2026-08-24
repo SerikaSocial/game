@@ -125,8 +125,8 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public void SetTagPrefs(bool tags, bool pfp)
     {
         _nameTag.SetPrefs(tags, pfp);
-        // In first person the tag is always hidden regardless of the preference.
-        if (_firstPerson) _nameTag.SetShown(false);
+        // The local player's own card is always hidden — only other players' cards are shown.
+        _nameTag.SetShown(false);
     }
 
     /// Equip a humanoid avatar built from a `.ska`. Hides the capsule stand-in and moves the
@@ -215,7 +215,8 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // Snap rather than glide when the player deliberately switches view.
         _camDistance = isFP ? 0f : _thirdPersonDistance;
 
-        _nameTag.SetShown(!isFP);
+        // The local player's own card is always hidden — only other players' cards are shown.
+        _nameTag.SetShown(false);
     }
 
     // First-person eye placement. The camera is pushed forward from the head bone toward where
@@ -317,6 +318,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // Set the emote directly rather than through PlayEmote, which toggles: sitting down on
         // a seat while already mid-Sit emote would have cancelled the pose instead of holding it.
         _avatar?.PlayEmote(spot.Pose);
+
+        // Lower camera height so first- and third-person perspectives sit at seated eye level
+        _currentCameraY = _standEyeY * 0.72f;
+        _smoothedHeadY = _currentCameraY;
     }
 
     /// Release the current seat/bed. Safe to call when already standing.
@@ -327,6 +332,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _occupying = null;
         spot.Vacate();
         _avatar?.PlayEmote(AvatarInstance.Emote.None);
+
+        _currentCameraY = _standEyeY;
+        _smoothedHeadY = _currentCameraY;
 
         // Step clear of the anchor, otherwise we're still inside the seat's trigger volume and
         // the prompt immediately offers to sit back down.
@@ -402,15 +410,30 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         // Seated/lying: the anchor owns our position, so movement, gravity and locomotion all
         // stop. Look is still live — you can glance around from a chair. The pose is held by
-        // the emote the seat asked for, so nothing here has to drive the rig.
+        // the emote the seat asked for. Pressing WASD, Space/Jump or moving steps out of the seat.
         if (_occupying != null)
         {
-            Velocity = Vector3.Zero;
-            GlobalPosition = _occupying.AnchorPosition;
-            _avatar?.Animate(delta, 0f, true, false, false);
-            SolveCamera(delta);
-            UpdateCameraOffset(delta, moving: false, sprinting: false);
-            return;
+            if (ControlsEnabled)
+            {
+                var moveInput = Input.GetVector("move_left", "move_right", "move_forward", "move_backward");
+                if (ExternalMove.LengthSquared() > 0.01f) moveInput = ExternalMove;
+                bool jumpInput = Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump;
+                if (moveInput.LengthSquared() > 0.05f || jumpInput)
+                {
+                    StandUp();
+                    ExternalJump = false;
+                }
+            }
+
+            if (_occupying != null)
+            {
+                Velocity = Vector3.Zero;
+                GlobalPosition = _occupying.AnchorPosition;
+                _avatar?.Animate(delta, 0f, true, false, false);
+                SolveCamera(delta);
+                UpdateCameraOffset(delta, moving: false, sprinting: false);
+                return;
+            }
         }
 
         if (!onFloor) v.Y -= _gravity * (float)delta;

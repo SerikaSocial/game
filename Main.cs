@@ -284,9 +284,65 @@ public partial class Main : Node3D
         _chat.AddChat(name, text);
     }
 
+    // ── Physics object sync ────────────────────────────────────────────────────────────
+
+    private readonly Dictionary<ushort, PhysicsProp> _props = new();
+
+    /// Register a PhysicsProp so it can receive network sync updates.
+    public void RegisterPhysicsProp(PhysicsProp prop)
+    {
+        _props[prop.NetId] = prop;
+    }
+
+    private void OnObjectSyncReceived(uint senderPeer, ushort objId,
+        float x, float y, float z, float qx, float qy, float qz, float qw,
+        float lvx, float lvy, float lvz)
+    {
+        if (_props.TryGetValue(objId, out var prop))
+            prop.ApplyNetworkSync(x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
+    }
+
+    private void OnPhysGrabReceived(uint senderPeer, byte grabType, ushort boneOrObjId, float x, float y, float z)
+    {
+        // grabType: 0=start, 1=update, 2=release
+        // boneOrObjId: if it maps to a PhysicsProp, it's a prop grab; otherwise it's a hair/bone grab
+        // on a remote avatar.
+        if (_props.TryGetValue(boneOrObjId, out var prop))
+        {
+            if (grabType == 2) prop.ApplyNetworkRelease(x, y, z);
+            return;
+        }
+
+        // Hair/PhysBone grab on a remote avatar: find the avatar's SpringBoneSystem.
+        if (_remotes.TryGetValue(senderPeer, out var avatar))
+        {
+            var spring = FindSpringBones(avatar);
+            if (spring == null) return;
+            int chainIdx = boneOrObjId;
+            if (grabType == 0) spring.ApplyRemoteGrab(chainIdx, new Vector3(x, y, z));
+            else if (grabType == 1) spring.ApplyRemoteGrab(chainIdx, new Vector3(x, y, z));
+            else if (grabType == 2) spring.ReleaseRemoteGrab(chainIdx);
+        }
+    }
+
     public override void _ExitTree()
     {
         ClearInstanceLock();
+    }
+
+    private static Avatar.SpringBoneSystem FindSpringBones(Node root)
+    {
+        for (int i = 0; i < root.GetChildCount(); i++)
+        {
+            var child = root.GetChild(i);
+            if (child is Avatar.SpringBoneSystem sb) return sb;
+            for (int j = 0; j < child.GetChildCount(); j++)
+            {
+                var grand = child.GetChild(j);
+                if (grand is Avatar.SpringBoneSystem sb2) return sb2;
+            }
+        }
+        return null;
     }
 
     // ── World ───────────────────────────────────────────────────────────────────────
@@ -1212,9 +1268,15 @@ public partial class Main : Node3D
         udp.PoseReceived += OnPoseReceived;
         udp.ChatReceived += OnChatReceived;
         udp.VoiceReceived += OnVoiceReceived;
+        udp.ObjectSyncReceived += OnObjectSyncReceived;
+        udp.PhysGrabReceived += OnPhysGrabReceived;
         udp.Rejected += OnTransportRejected;
         _transport = udp;
         udp.Connect(endpoint, ticket);
+
+        // Wire the static bridge so PhysicsProp can send sync updates
+        WorldNetwork.Send = (objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz) =>
+            _transport?.SendObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
     }
 
     /// The relay rejected us, or a live session went silent. Two very different UX paths: a

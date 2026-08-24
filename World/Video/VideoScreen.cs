@@ -89,6 +89,7 @@ public partial class VideoScreen : Node, IInteractable
             Emission = new Color(1, 1, 1),
             EmissionEnergyMultiplier = 1.8f,
             Roughness = 0.08f,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
 
         PaintIdle();
@@ -106,16 +107,40 @@ public partial class VideoScreen : Node, IInteractable
     /// a still is a better idle state than a void.
     public void ShowThumbnail(byte[] jpg)
     {
-        if (jpg == null || jpg.Length == 0 || (_player != null && _player.IsPlaying())) return;
-        var img = new Image();
-        if (img.LoadJpgFromBuffer(jpg) != Error.Ok && img.LoadWebpFromBuffer(jpg) != Error.Ok
-            && img.LoadPngFromBuffer(jpg) != Error.Ok)
-            return;
+        if (jpg == null || jpg.Length < 4 || (_player != null && _player.IsPlaying())) return;
+        var img = LoadImageSafely(jpg);
+        if (img == null) return;
         _thumbTex = ImageTexture.CreateFromImage(img);
         if (_player == null || !_player.IsPlaying())
         {
             PaintIdle();
         }
+    }
+
+    private static Image LoadImageSafely(byte[] bytes)
+    {
+        if (bytes == null || bytes.Length < 4) return null;
+        var img = new Image();
+        if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF)
+        {
+            if (img.LoadJpgFromBuffer(bytes) == Error.Ok) return img;
+        }
+        else if (bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47)
+        {
+            if (img.LoadPngFromBuffer(bytes) == Error.Ok) return img;
+        }
+        else if (bytes.Length >= 12 && bytes[0] == (byte)'R' && bytes[1] == (byte)'I' && bytes[2] == (byte)'F' && bytes[3] == (byte)'F'
+                 && bytes[8] == (byte)'W' && bytes[9] == (byte)'E' && bytes[10] == (byte)'B' && bytes[11] == (byte)'P')
+        {
+            if (img.LoadWebpFromBuffer(bytes) == Error.Ok) return img;
+        }
+        else
+        {
+            if (img.LoadPngFromBuffer(bytes) == Error.Ok) return img;
+            if (img.LoadWebpFromBuffer(bytes) == Error.Ok) return img;
+            if (img.LoadJpgFromBuffer(bytes) == Error.Ok) return img;
+        }
+        return null;
     }
 
     /// Play a resolved track. `localPath` is a downloaded file under user://; `container`/`vcodec`
@@ -184,6 +209,7 @@ public partial class VideoScreen : Node, IInteractable
                 Emission = new Color(1, 1, 1),
                 EmissionEnergyMultiplier = 1.2f,
                 Roughness = 0.08f,
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
             };
             return;
         }
@@ -193,6 +219,7 @@ public partial class VideoScreen : Node, IInteractable
             EmissionEnabled = true,
             Emission = new Color(0.05f, 0.05f, 0.08f),
             Roughness = 0.2f,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
     }
 }

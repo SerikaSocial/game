@@ -18,6 +18,10 @@ public interface ISerikaTransport
     event System.Action<uint, VoiceFrame> VoiceReceived;
     /// A world text-chat line from another peer: (senderPeerId, text).
     event System.Action<uint, string> ChatReceived;
+    /// A physics object sync from another peer: (senderPeerId, objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz).
+    event System.Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
+    /// A physics grab event from another peer: (senderPeerId, grabType, boneOrObjId, x, y, z).
+    event System.Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     /// Fired if the relay rejects us (bad/used ticket, full) with the reason string.
     event System.Action<string> Rejected;
 
@@ -29,6 +33,10 @@ public interface ISerikaTransport
     void SendVoice(VoiceFrame frame);
     /// Send a world text-chat line to everyone in the instance.
     void SendChat(string text);
+    /// Send a physics object sync update. Ownership is implicit: whoever last sent wins.
+    void SendObjectSync(ushort objId, float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz);
+    /// Send a physics grab event (grab_type: 0=start, 1=update, 2=release).
+    void SendPhysGrab(byte grabType, uint targetPeer, ushort boneOrObjId, float x, float y, float z);
     /// Drain inbound datagrams and fire callbacks; also sends keepalives. Call every frame,
     /// passing seconds elapsed since the last call (drives retransmit + keepalive timers).
     void Poll(double dt);

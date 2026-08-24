@@ -180,6 +180,7 @@ public static partial class Worlds
 
         // Tiered seating with SeatNodes.
         var seatMat = Mat(new Color(0.12f, 0.08f, 0.15f), 0.9f);
+        var handleMat = Mat(new Color(0.18f, 0.14f, 0.22f), 0.5f);
         for (int row = 0; row < 5; row++)
         {
             float z = -2f + row * 4.5f;
@@ -189,15 +190,26 @@ public static partial class Worlds
             root.AddChild(CollidableBox(new Vector3(8f, 0.8f, 0.2f), new Vector3(-5f, y + 0.35f, z + 0.6f), seatMat));
             root.AddChild(CollidableBox(new Vector3(8f, 0.8f, 0.2f), new Vector3(5f, y + 0.35f, z + 0.6f), seatMat));
 
-            // Place seat interaction nodes on each row.
+            // Stool handles / armrests on the left, right, and between chairs for each bench
+            foreach (float benchCenterX in new[] { -5f, 5f })
+            {
+                foreach (float offset in new[] { -4.0f, -1.33f, 1.33f, 4.0f })
+                {
+                    root.AddChild(Box(new Vector3(0.16f, 0.35f, 1.3f), new Vector3(benchCenterX + offset, y + 0.35f, z), handleMat));
+                }
+            }
+
+            // Place seat interaction nodes on each row facing the cinema screen.
             for (int sx = -1; sx <= 1; sx += 2)
             {
                 for (int sc = 0; sc < 3; sc++)
                 {
                     var seat = new SeatNode
                     {
-                        Position = new Vector3(sx * (2f + sc * 2.5f), y + 0.25f, z),
+                        Position = new Vector3(sx * (2.35f + sc * 2.65f), y + 0.25f, z),
                         SeatLabel = $"Row {row + 1} Seat {sc + 1}",
+                        SitYaw = Mathf.Pi, // Face directly towards the video screen (-Z)
+                        SitOffset = new Vector3(0, 0.05f, 0),
                     };
                     root.AddChild(seat);
                 }
