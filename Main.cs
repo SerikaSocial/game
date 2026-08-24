@@ -34,6 +34,10 @@ public partial class Main : Node3D
     private IPlayer _local;
     private LocalPlayer _localDesktop; // non-null in desktop mode; drives FP/TP toggle
     private Node3D _localNode;
+    private UI.InteractionPrompt _interactPrompt;
+    private UI.VideoQueuePanel _videoQueuePanel;
+    private UI.SettingsMenu _settingsMenu;
+    private SerikaSocial.World.Interactor _interactor;
     private bool _vrMode;
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
     private readonly HashSet<string> _blockedUserIds = new();
@@ -52,7 +56,6 @@ public partial class Main : Node3D
     private string ClientId => OrDefault("SERIKA_CLIENT_ID", "serika-social-game");
 
     private Hud _hud;
-    private PauseMenu _pauseMenu;
     private QuickMenu _quickMenu;
     private MainMenu _mainMenu;
     private ActionMenu _actionMenu;
@@ -77,6 +80,12 @@ public partial class Main : Node3D
     {
         // Apply the purple brand theme to every Control in the client at once.
         GetTree().Root.Theme = Brand.Theme;
+
+        // Detect the device tier and apply saved graphics settings before the first frame, so a
+        // Quest never renders one frame at full desktop quality. Also seeds persisted control/
+        // audio prefs used below.
+        UI.DeviceProfile.Detect();
+        _persistThirdPerson = UI.DeviceProfile.Settings.StartThirdPerson;
 
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
@@ -140,28 +149,21 @@ public partial class Main : Node3D
         _updater.CurrentVersion = Hud.ClientVersion;
         _updater.CheckForUpdates();
 
-        _pauseMenu = new PauseMenu { Name = "PauseMenu" };
-        AddChild(_pauseMenu);
-        _pauseMenu.HomePressed += EnterHome;
-        _pauseMenu.WorldsPressed += () => { _pauseMenu.Hide(); OpenWorldList(); };
-        _pauseMenu.QuitPressed += () => GetTree().Quit();
-        _pauseMenu.RespawnPressed += RespawnLocal;
-        _pauseMenu.CameraTogglePressed += ToggleCameraView;
-        _pauseMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
-        _pauseMenu.CopyInvitePressed += CopyInviteLink;
-        _pauseMenu.AvatarsPressed += OpenAvatarSelector;
-        _pauseMenu.Closed += OnPauseClosed;
-
-        // VRChat-style Quick Menu (Launch Pad)
+        // The single pause hub. (The old always-hidden PauseMenu that duplicated all of this
+        // has been removed — this is the only pause surface now.)
         _quickMenu = new QuickMenu { Name = "QuickMenu" };
         AddChild(_quickMenu);
         _quickMenu.HomePressed += EnterHome;
         _quickMenu.RespawnPressed += RespawnLocal;
-        _quickMenu.OpenMainMenuWorlds += () => _mainMenu?.Open(_username, 1);
-        _quickMenu.OpenMainMenuAvatars += () => _mainMenu?.Open(_username, 2);
+        _quickMenu.QuitPressed += () => GetTree().Quit();
+        _quickMenu.OpenMainMenuWorlds += () => { _mainMenu?.Open(_username, 1); SyncMenuHold(); };
+        _quickMenu.OpenMainMenuAvatars += () => { OpenAvatarSelector(); SyncMenuHold(); };
         _quickMenu.OpenCameraMenu += OpenCameraMenu;
-        _quickMenu.OpenRadialMenu += () => _actionMenu?.Open();
-        _quickMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
+        _quickMenu.OpenRadialMenu += () => { _actionMenu?.Open(); SyncMenuHold(); };
+        _quickMenu.OpenVideoQueue += () => { if (_videoQueuePanel?.HasVideo ?? false) _videoQueuePanel.Open(); else _inWorldHud?.Toast("No video screen in this world", 2); };
+        _quickMenu.OpenSettings += () => { _settingsMenu?.Open(); SyncMenuHold(); };
+        _quickMenu.CopyInvitePressed += CopyInviteLink;
+        _quickMenu.MicTogglePressed += () => { ToggleMic(); _quickMenu.SetMic(_micActive); };
         _quickMenu.Closed += OnPauseClosed;
 
         // VRChat-style Main Menu (Big Menu)
@@ -179,6 +181,7 @@ public partial class Main : Node3D
         _actionMenu.RespawnPressed += RespawnLocal;
         _actionMenu.CameraPressed += OpenCameraMenu;
         _actionMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
+        _actionMenu.CustomEmotePressed += clip => _localDesktop?.PlayCustomEmote(clip);
         _actionMenu.Closed += OnPauseClosed;
 
         // VRChat-style Camera & Photo Viewfinder Menu
@@ -198,6 +201,26 @@ public partial class Main : Node3D
         _avatarSelector.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
         _avatarSelector.Closed += OnAvatarSelectorClosed;
 
+        // One owner for the cursor and for whether movement is live. Every screen takes a
+        // named hold instead of poking Input.MouseMode itself; the sink pushes the resulting
+        // controls-live flag onto whichever rig is currently spawned.
+        UI.InputMode.ControlsSink = live =>
+        {
+            if (_localDesktop != null) _localDesktop.ControlsEnabled = live;
+        };
+
+        _interactPrompt = new UI.InteractionPrompt { Name = "InteractionPrompt" };
+        AddChild(_interactPrompt);
+
+        _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
+        AddChild(_videoQueuePanel);
+        _videoQueuePanel.Closed += SyncMenuHold;
+
+        _settingsMenu = new UI.SettingsMenu { Name = "SettingsMenu" };
+        AddChild(_settingsMenu);
+        _settingsMenu.Closed += SyncMenuHold;
+        _settingsMenu.SettingChanged += OnSettingChanged;
+
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddChild(_inWorldHud);
 
@@ -211,6 +234,9 @@ public partial class Main : Node3D
     /// Show the 3D loading screen with a status line during sign-in / connecting.
     private void ShowLoading(string status)
     {
+        // Nothing to control behind a loading screen — free the cursor and stop feeding input
+        // to whatever rig is mid-teardown. EnterHome / OnConnected set this back.
+        UI.InputMode.SetPlayable(false);
         _loading?.Present();
         _loading?.SetStatus(status);
         _hud?.SetStatus(status);
@@ -231,12 +257,8 @@ public partial class Main : Node3D
     {
         if (_chat.IsTyping) return;
         _chat.OpenInput();
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
-        _wasMouseCaptured = Input.MouseMode == Input.MouseModeEnum.Captured;
-        if (_wasMouseCaptured) Input.MouseMode = Input.MouseModeEnum.Visible;
+        UI.InputMode.Hold(UI.InputMode.Chat);
     }
-
-    private bool _wasMouseCaptured;
 
     private void OnChatSubmitted(string text)
     {
@@ -246,11 +268,7 @@ public partial class Main : Node3D
     }
 
     /// Restore control/mouse after the chat box closes (whether via Enter or Escape).
-    private void OnChatClosed()
-    {
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
-        if (_wasMouseCaptured) Input.MouseMode = Input.MouseModeEnum.Captured;
-    }
+    private void OnChatClosed() => UI.InputMode.Release(UI.InputMode.Chat);
 
     private void OnChatReceived(uint senderId, string text)
     {
@@ -276,6 +294,29 @@ public partial class Main : Node3D
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
         build(_worldRoot);
+        SetupVideoForWorld();
+    }
+
+    private SerikaSocial.World.Video.VideoManager _videoManager;
+
+    /// After a world builds, wire any VideoScreens it exposed to a fresh per-world manager and
+    /// point the queue panel at it. Worlds with no screen get no manager, and the pause menu's
+    /// "Video Queue" button stays hidden.
+    private void SetupVideoForWorld()
+    {
+        if (_videoManager != null) { _videoManager.QueueFree(); _videoManager = null; }
+        _videoQueuePanel?.Hide();
+
+        var screens = GetTree().GetNodesInGroup(SerikaSocial.World.Video.VideoScreen.Group);
+        if (screens.Count == 0) { _videoQueuePanel?.Bind(null); return; }
+
+        _videoManager = new SerikaSocial.World.Video.VideoManager { Name = "VideoManager" };
+        AddChild(_videoManager);
+        _videoManager.Configure(_api, _worldName);
+        _videoManager.Toast += (msg, secs) => _inWorldHud?.Toast(msg, secs);
+        foreach (var s in screens)
+            if (s is SerikaSocial.World.Video.VideoScreen vs) _videoManager.RegisterScreen(vs);
+        _videoQueuePanel?.Bind(_videoManager);
     }
 
     /// Build the cosy Home and wire its portal to open the world browser.
@@ -296,6 +337,11 @@ public partial class Main : Node3D
             _local = null;
             _localDesktop = null;
         }
+
+        // The interactor holds a reference to the rig it drives, so it goes with it.
+        _interactor?.QueueFree();
+        _interactor = null;
+        _interactPrompt?.Clear();
 
         // Bring up VR only when it makes sense: on a Quest/Android build, or when a desktop
         // user explicitly asks with `--vr`. Otherwise OpenXR is never touched, so a normal
@@ -322,9 +368,17 @@ public partial class Main : Node3D
             // Equip the cloud default avatar (or custom downloaded one). Falls back to the
             // procedural bean when no cloud default is available, so nobody is ever a capsule.
             desktop.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
+            _actionMenu?.SetCustomEmotes(desktop.Avatar?.CustomEmotes);
             // Restore persisted camera mode across world switches.
             if (_persistThirdPerson) desktop.SetFirstPerson(false);
             SetupTouchControls(desktop);
+
+            // E-to-interact. VR has its own reach/grab affordances, so this is desktop-only.
+            _interactor = SerikaSocial.World.Interactor.Create(desktop, _interactPrompt);
+            AddChild(_interactor);
+
+            // Name card: apply tag/pfp prefs and download the local player's profile picture.
+            _ = ApplyLocalIdentity();
             GD.Print("Desktop mode");
         }
         _local.SetUsername(_username);
@@ -442,6 +496,8 @@ public partial class Main : Node3D
             var user = await _api.ExchangeAsync(code, pkce.Verifier);
             _username = user.GetProperty("username").GetString();
             _currentAvatarId = ReadCurrentAvatarId(user);
+            _localPfpUrl = ReadAvatarUrl(user);
+            _localTrust = ReadTrust(user);
             GD.Print($"logged in as {_username}");
 
             SaveSession(_api.SessionToken);
@@ -472,6 +528,8 @@ public partial class Main : Node3D
             var user = await _api.LoginWithEmailAsync(email, password);
             _username = user.GetProperty("username").GetString();
             _currentAvatarId = ReadCurrentAvatarId(user);
+            _localPfpUrl = ReadAvatarUrl(user);
+            _localTrust = ReadTrust(user);
             GD.Print($"logged in as {_username} (email)");
 
             SaveSession(_api.SessionToken);
@@ -581,6 +639,8 @@ public partial class Main : Node3D
             {
                 _username = user.GetProperty("username").GetString();
                 _currentAvatarId = ReadCurrentAvatarId(user);
+                _localPfpUrl = ReadAvatarUrl(user);
+                _localTrust = ReadTrust(user);
                 GD.Print($"session restored as {_username}");
 
                 SetLoadingStatus("Loading your avatar…");
@@ -714,9 +774,8 @@ public partial class Main : Node3D
         _hud?.HideAll();
         _inWorldHud?.SetWorld("Home");
         _inWorldHud?.SetPlayerCount(1);
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
-        if (!DisplayServer.GetName().Equals("headless"))
-            Input.MouseMode = Input.MouseModeEnum.Captured;
+        UI.InputMode.ReleaseAll();
+        UI.InputMode.SetPlayable(true);
         _inWorldHud?.Toast("Welcome home · walk into the portal to travel · T to chat · Esc for menu", 6);
 
         _ = PopulateWorldList();
@@ -728,17 +787,14 @@ public partial class Main : Node3D
     private void OpenWorldList()
     {
         _hud?.ShowWorldList(_username);
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
-        Input.MouseMode = Input.MouseModeEnum.Visible;
+        UI.InputMode.Hold(UI.InputMode.WorldList);
         _ = PopulateWorldList();
     }
 
     private void CloseWorldList()
     {
         _hud?.HideAll();
-        if (_inHome && _localDesktop != null) _localDesktop.ControlsEnabled = true;
-        if (_inHome && !DisplayServer.GetName().Equals("headless"))
-            Input.MouseMode = Input.MouseModeEnum.Captured;
+        UI.InputMode.Release(UI.InputMode.WorldList);
     }
 
     /// Where the local player last spawned in the current world — the target for respawn.
@@ -788,19 +844,12 @@ public partial class Main : Node3D
     private void OpenAvatarSelector()
     {
         if (_api == null || _avatarSelector == null) return;
-        _pauseMenu?.Hide();
         _avatarSelector.Configure(_api, _currentAvatarId);
         _avatarSelector.Open();
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        SyncMenuHold();
     }
 
-    private void OnAvatarSelectorClosed()
-    {
-        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false })
-            _localDesktop.ControlsEnabled = true;
-        if (!DisplayServer.GetName().Equals("headless"))
-            Input.MouseMode = Input.MouseModeEnum.Captured;
-    }
+    private void OnAvatarSelectorClosed() => SyncMenuHold();
 
     /// Download the chosen avatar, swap the live rig, and persist the choice server-side.
     /// Each avatar is cached under its own `user://avatars/<id>.ska` so re-equipping a
@@ -831,6 +880,7 @@ public partial class Main : Node3D
             _currentAvatarId = id;
             AvatarLibrary.CurrentDefaultPath = rel;
             _localDesktop?.SetAvatar(avatar);
+            _actionMenu?.SetCustomEmotes(avatar?.CustomEmotes);
 
             // Persist so it's worn on the next join and by remotes after they resync.
             bool persisted = true;
@@ -877,6 +927,54 @@ public partial class Main : Node3D
     }
 
     /// Pull the user's chosen avatar id out of the login response, or null if none set.
+    /// The logged-in user's profile-picture URL, shown on the local name card.
+    private string _localPfpUrl;
+
+    /// The logged-in user's trust level (0..4), mirrored from the account. Gates creator actions
+    /// server-side; shown as a chip in the hub so the player knows their standing.
+    private int _localTrust;
+
+    // Trust ladder 0..8 — mirrors TrustRank in server/api/src/trust.ts.
+    private static readonly string[] TrustLabels =
+        { "Visitor", "Newcomer", "Member", "Regular", "Known", "Creator", "Trusted", "Partner", "Verified Creator" };
+    public static string TrustLabel(int level) => TrustLabels[System.Math.Clamp(level, 0, TrustLabels.Length - 1)];
+
+    private static int ReadTrust(System.Text.Json.JsonElement user) =>
+        user.TryGetProperty("trustLevel", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
+            ? v.GetInt32() : 0;
+
+    /// Pull the profile-picture URL out of a login/session user object, or null if unset.
+    private static string ReadAvatarUrl(System.Text.Json.JsonElement user) =>
+        user.TryGetProperty("avatarUrl", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+            ? v.GetString()
+            : null;
+
+    /// Download and apply the local player's profile picture to their name card, and push the
+    /// current tag/pfp visibility preferences. Best-effort — a missing picture just leaves the
+    /// chip hidden.
+    private async Task ApplyLocalIdentity()
+    {
+        _localDesktop?.SetTagPrefs(UI.DeviceProfile.Settings.NameTags, UI.DeviceProfile.Settings.ProfilePictures);
+        if (_api == null || string.IsNullOrEmpty(_localPfpUrl) || _localDesktop == null) return;
+        var bytes = await _api.GetImageBytesAsync(_localPfpUrl);
+        if (bytes != null) _localDesktop.SetProfilePicture(bytes);
+    }
+
+    /// Resolve and apply a peer's profile picture from their account id.
+    private async Task FetchRemotePfp(uint peerId, string userId)
+    {
+        if (_api == null || string.IsNullOrEmpty(userId)) return;
+        try
+        {
+            string url = await _api.GetUserAvatarUrlAsync(userId);
+            if (string.IsNullOrEmpty(url)) return;
+            var bytes = await _api.GetImageBytesAsync(url);
+            if (bytes != null && _remotes.TryGetValue(peerId, out var a))
+                a.SetProfilePicture(bytes);
+        }
+        catch (Exception e) { GD.PrintErr($"remote pfp fetch failed: {e.Message}"); }
+    }
+
     private static string ReadCurrentAvatarId(System.Text.Json.JsonElement user) =>
         user.TryGetProperty("currentAvatarId", out var v)
         && v.ValueKind == System.Text.Json.JsonValueKind.String
@@ -901,8 +999,7 @@ public partial class Main : Node3D
         if (_tutorialShown || _smoke || Tutorial.AlreadySeen()) return;
         _tutorialShown = true;
 
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
-        Input.MouseMode = Input.MouseModeEnum.Visible;
+        UI.InputMode.Hold(UI.InputMode.Tutorial);
 
         string dialoguePath;
         if (_vrMode)
@@ -916,8 +1013,7 @@ public partial class Main : Node3D
         if (dialogueRes == null)
         {
             GD.PrintErr($"tutorial dialogue not found at {dialoguePath} — skipping tutorial");
-            if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
-            Input.MouseMode = Input.MouseModeEnum.Captured;
+            UI.InputMode.Release(UI.InputMode.Tutorial);
             return;
         }
 
@@ -929,8 +1025,7 @@ public partial class Main : Node3D
     {
         DialogueManagerRuntime.DialogueManager.DialogueEnded -= OnTutorialEnded;
         Tutorial.MarkSeen();
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = true;
-        Input.MouseMode = Input.MouseModeEnum.Captured;
+        UI.InputMode.Release(UI.InputMode.Tutorial);
     }
 
     private List<(string id, string name, string description, int capacity, string author, string downloadUrl)> _fetchedWorlds;
@@ -1036,6 +1131,9 @@ public partial class Main : Node3D
     private void ShowLoginError(string message)
     {
         HideLoading();
+        // There's no rig to control behind an error, so hand the cursor to the dialog rather
+        // than leaving it captured under a message the player has to click.
+        UI.InputMode.SetPlayable(false);
         _hud?.ShowError(message);
     }
 
@@ -1077,13 +1175,36 @@ public partial class Main : Node3D
         udp.PoseReceived += OnPoseReceived;
         udp.ChatReceived += OnChatReceived;
         udp.VoiceReceived += OnVoiceReceived;
-        udp.Rejected += reason =>
-        {
-            GD.PrintErr($"relay rejected us: {reason}");
-            _hud?.ShowError($"The world server rejected the connection: {reason}");
-        };
+        udp.Rejected += OnTransportRejected;
         _transport = udp;
         udp.Connect(endpoint, ticket);
+    }
+
+    /// The relay rejected us, or a live session went silent. Two very different UX paths: a
+    /// pre-connect rejection is an error the player retries; a mid-session drop should not dump
+    /// them into a frozen world behind an error box — tear the world down and fall back to Home
+    /// with a toast, exactly as if they'd left. Fires on the game thread (from Poll).
+    private void OnTransportRejected(string reason)
+    {
+        GD.PrintErr($"transport rejected/lost: {reason}");
+        bool wasInWorld = _inWorld;
+        _inWorld = false;
+        TeardownRemotes();
+        _transport?.Disconnect();
+        _transport = null;
+
+        if (wasInWorld)
+        {
+            // We had made it into the world, then lost it — recover to Home rather than erroring.
+            EnterHome();
+            _inWorldHud?.Toast($"Disconnected: {reason}", 5);
+        }
+        else
+        {
+            // Never got in — the connect attempt itself failed; let the player retry.
+            UI.InputMode.SetPlayable(false);
+            _hud?.ShowError($"Couldn't join the world: {reason}");
+        }
     }
 
     // ── Transport events (fire on the game thread from Poll) ─────────────────────────
@@ -1104,6 +1225,8 @@ public partial class Main : Node3D
         HideLoading();
         _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
         _inWorld = true;
+        UI.InputMode.ReleaseAll();
+        UI.InputMode.SetPlayable(true);
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
         _chat.AddSystem($"Welcome to {_worldName}.");
@@ -1188,12 +1311,14 @@ public partial class Main : Node3D
         var a = RemoteAvatar.Create(p.PeerId, p.Name);
         _remotes[p.PeerId] = a;
         AddChild(a);
+        a.SetTagPrefs(UI.DeviceProfile.Settings.NameTags, UI.DeviceProfile.Settings.ProfilePictures);
         if (!string.IsNullOrEmpty(p.UserId) && _blockedUserIds.Contains(p.UserId))
         {
-            a.ShowBean();   // blocked: never load their real model
+            a.ShowBean();   // blocked: never load their real model — and no pfp
             return;
         }
         _ = EquipRemoteAvatar(p.PeerId, p.UserId);
+        _ = FetchRemotePfp(p.PeerId, p.UserId);
     }
 
     /// Resolve and equip a peer's own avatar. Until this lands they wear the default outfit;
@@ -1258,8 +1383,16 @@ public partial class Main : Node3D
 
     private void OpenPauseMenu()
     {
-        _quickMenu?.Open(_username);
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        if (_quickMenu == null) return;
+        // Feed the hub live state: the instance roster, where we are, and the real mic status.
+        var others = new List<string>();
+        foreach (var kv in _peerNames) others.Add(kv.Value);
+        _quickMenu.SetLocation(_inHome ? "Home" : _worldName, invitable: _inWorld && !string.IsNullOrEmpty(_currentWorldId));
+        _quickMenu.SetTrust(TrustLabel(_localTrust));
+        _quickMenu.SetPlayers(_username, others);
+        _quickMenu.SetMic(_micActive);
+        _quickMenu.Open(_username);
+        SyncMenuHold();
     }
 
     /// Open the photo viewfinder, dropping the phantom camera at the player's eye so the first
@@ -1267,24 +1400,53 @@ public partial class Main : Node3D
     private void OpenCameraMenu()
     {
         _cameraMenu?.Open(_local?.PoseTransform());
-        if (_localDesktop != null) _localDesktop.ControlsEnabled = false;
+        SyncMenuHold();
     }
 
-    private void OnPauseClosed()
+    private void OnPauseClosed() => SyncMenuHold();
+
+    /// Reconcile the menu hold with what's actually on screen. Called after every open and
+    /// close: the six overlay screens can open each other, so "did I open or close" isn't
+    /// enough to know whether the cursor should still be free — only the aggregate is.
+    private void SyncMenuHold()
     {
-        if ((_inWorld || _inHome) && _localDesktop != null && _chat is { IsTyping: false }
-            && !(_quickMenu?.IsOpen ?? false) && !(_mainMenu?.IsOpen ?? false)
-            && !(_actionMenu?.IsOpen ?? false) && !(_cameraMenu?.IsOpen ?? false)
-            && !(_pauseMenu?.IsOpen ?? false) && !(_avatarSelector?.IsOpen ?? false))
-        {
-            _localDesktop.ControlsEnabled = true;
-        }
+        if (!AnyMenuOpen) { UI.InputMode.Release(UI.InputMode.Menu); return; }
+
+        // The photo viewfinder is the one screen that wants movement suspended but the mouse
+        // still captured — there the mouse aims the phantom camera, and freeing it would leave
+        // the viewfinder unable to look anywhere.
+        UI.InputMode.Hold(UI.InputMode.Menu, freeCursor: !(_cameraMenu?.IsOpen ?? false));
     }
 
     private bool AnyMenuOpen =>
         (_quickMenu?.IsOpen ?? false) || (_mainMenu?.IsOpen ?? false) ||
         (_actionMenu?.IsOpen ?? false) || (_cameraMenu?.IsOpen ?? false) ||
-        (_pauseMenu?.IsOpen ?? false) || (_avatarSelector?.IsOpen ?? false);
+        (_avatarSelector?.IsOpen ?? false) ||
+        (_settingsMenu?.IsOpen ?? false);
+
+    /// Push a live setting change onto whatever it affects.
+    private void OnSettingChanged(string what)
+    {
+        switch (what)
+        {
+            case "sensitivity":
+                if (_local != null) _local.MouseSensitivity = UI.DeviceProfile.Settings.MouseSensitivity;
+                break;
+            case "name_tags":
+            case "pfp":
+                ApplyTagPrefsToAvatars();
+                break;
+        }
+    }
+
+    /// Re-apply name-tag / profile-picture visibility to the local rig and every remote.
+    private void ApplyTagPrefsToAvatars()
+    {
+        bool tags = UI.DeviceProfile.Settings.NameTags;
+        bool pfp = UI.DeviceProfile.Settings.ProfilePictures;
+        _localDesktop?.SetTagPrefs(tags, pfp);
+        foreach (var r in _remotes.Values) r.SetTagPrefs(tags, pfp);
+    }
 
     /// Close whichever overlay menu is currently open (top-most wins). Returns true if one closed.
     private bool CloseOpenMenu()
@@ -1296,10 +1458,10 @@ public partial class Main : Node3D
             _actionMenu.Hide();
             return true;
         }
+        if (_settingsMenu?.IsOpen ?? false) { _settingsMenu.Hide(); return true; }
         if (_quickMenu?.IsOpen ?? false) { _quickMenu.Hide(); return true; }
         if (_mainMenu?.IsOpen ?? false) { _mainMenu.Hide(); return true; }
         if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); return true; }
-        if (_pauseMenu?.IsOpen ?? false) { _pauseMenu.Hide(); return true; }
         if (_avatarSelector?.IsOpen ?? false) { _avatarSelector.Hide(); return true; }
         return false;
     }
@@ -1320,6 +1482,7 @@ public partial class Main : Node3D
         if (k.Keycode == Key.Escape)
         {
             if (!CloseOpenMenu()) OpenPauseMenu();
+            SyncMenuHold();
             GetViewport().SetInputAsHandled();
             return;
         }
@@ -1328,21 +1491,47 @@ public partial class Main : Node3D
         switch (k.Keycode)
         {
             case Key.M:
-                if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide();
-                else { _mainMenu?.Open(_username, 1); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
+                if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide(); else _mainMenu?.Open(_username, 1);
+                SyncMenuHold();
                 GetViewport().SetInputAsHandled();
                 return;
 
             case Key.R:
-                if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
-                else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
+                if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide(); else _actionMenu?.Open();
+                SyncMenuHold();
                 GetViewport().SetInputAsHandled();
                 return;
 
             case Key.C:
-                if (_cameraMenu?.IsOpen ?? false) _cameraMenu.Hide();
+                if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); SyncMenuHold(); }
                 else OpenCameraMenu();
                 GetViewport().SetInputAsHandled();
+                return;
+
+            // Tab frees the cursor without giving up movement, so you can click on world UI
+            // (or just alt-tab-lite) mid-walk. Ignored while a menu is up — the cursor is
+            // already free there and toggling would only desync the flag.
+            case Key.Tab:
+                if (UI.InputMode.ToggleManualCursor())
+                {
+                    _inWorldHud?.Toast(
+                        UI.InputMode.CursorFree ? "Mouse free · Tab to look again" : "Mouse captured", 2);
+                    GetViewport().SetInputAsHandled();
+                }
+                return;
+
+            case Key.E:
+                if (_interactor?.TryInteract() ?? false) GetViewport().SetInputAsHandled();
+                return;
+
+            // P toggles the video queue panel, but only in a world that actually has a screen.
+            case Key.P:
+                if (_videoQueuePanel?.HasVideo ?? false)
+                {
+                    if (_videoQueuePanel.IsOpen) _videoQueuePanel.Hide();
+                    else _videoQueuePanel.Open();
+                    GetViewport().SetInputAsHandled();
+                }
                 return;
 
             case Key.V:
@@ -1375,8 +1564,8 @@ public partial class Main : Node3D
     {
         _transport?.Poll(delta);
 
-        if (_local != null && _pauseMenu != null)
-            _local.MouseSensitivity = _pauseMenu.MouseSensitivity;
+        if (_local != null)
+            _local.MouseSensitivity = UI.DeviceProfile.Settings.MouseSensitivity;
 
         if (_transport is { Connected_: true } && _local != null)
         {

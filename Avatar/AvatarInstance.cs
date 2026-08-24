@@ -248,6 +248,18 @@ public sealed partial class AvatarInstance : Node3D
     private AnimRetargeter _retargeter;
     private bool _retargeterReady;
 
+    // Custom, avatar-authored emote/dance clips. Kept separate from `_animPlayer` (which stays
+    // null while the retargeter drives locomotion) so a creator's own clips can be played on
+    // demand from the action menu without disturbing walk/run. Empty when the avatar ships none,
+    // in which case the action menu falls back to the built-in emote set.
+    private AnimationPlayer _customAnimPlayer;
+    private readonly System.Collections.Generic.List<string> _customEmotes = new();
+    private bool _customClipActive;
+
+    /// Clip names the avatar itself provides (dances/emotes), for the action menu to list.
+    public System.Collections.Generic.IReadOnlyList<string> CustomEmotes => _customEmotes;
+    public bool HasCustomEmotes => _customEmotes.Count > 0;
+
     private readonly struct AnimBone
     {
         public readonly int Index;
@@ -278,6 +290,9 @@ public sealed partial class AvatarInstance : Node3D
     /// Play an emote animation. Pass Emote.None to return to normal.
     public void PlayEmote(Emote e)
     {
+        // A built-in emote overrides any custom clip — otherwise the two would drive the skeleton
+        // at once and the avatar would twitch between them.
+        if (_customClipActive) StopCustomEmote();
         _emote = e;
         _emoteTime = 0f;
     }
@@ -347,7 +362,58 @@ public sealed partial class AvatarInstance : Node3D
             if (idx < 0) continue;
             _animBones[role] = new AnimBone(idx, Skeleton.GetBoneRest(idx).Basis.GetRotationQuaternion());
         }
+
+        CollectCustomEmotes();
     }
+
+    // Clip-name fragments that mean "locomotion", not "emote" — excluded from the custom list so
+    // the action menu doesn't offer "Walk" as a dance.
+    private static readonly string[] LocomotionWords =
+        { "idle", "walk", "run", "loco", "stand", "jump", "fall", "crouch", "strafe", "sprint",
+          "tpose", "t-pose", "bind", "rest", "apose", "a-pose" };
+
+    /// Find the avatar's own AnimationPlayer and register every non-locomotion clip as a custom
+    /// emote. This is how a creator's authored dances reach the action menu — they just ship the
+    /// clips in the model. No clips → `_customEmotes` stays empty and the menu uses the defaults.
+    private void CollectCustomEmotes()
+    {
+        _customAnimPlayer = FindAnimPlayer(_model);
+        if (_customAnimPlayer == null) return;
+
+        foreach (string name in _customAnimPlayer.GetAnimationList())
+        {
+            string n = name.ToLowerInvariant();
+            bool locomotion = false;
+            foreach (var w in LocomotionWords)
+                if (n.Contains(w)) { locomotion = true; break; }
+            if (!locomotion) _customEmotes.Add(name);
+        }
+    }
+
+    /// Play one of the avatar's own clips by name (from `CustomEmotes`). While it runs, the
+    /// procedural/retargeter animation yields so the two don't fight over the skeleton; it ends
+    /// on its own, or when `StopCustomEmote` / any built-in `PlayEmote` is called.
+    public void PlayCustomEmote(string clipName)
+    {
+        if (_customAnimPlayer == null || string.IsNullOrEmpty(clipName)) return;
+        if (!_customAnimPlayer.HasAnimation(clipName)) return;
+
+        _emote = Emote.None;           // cancel any built-in emote
+        _customClipActive = true;
+        if (!_customAnimPlayer.IsConnected(AnimationPlayer.SignalName.AnimationFinished,
+                Callable.From<StringName>(OnCustomClipFinished)))
+            _customAnimPlayer.AnimationFinished += OnCustomClipFinished;
+        _customAnimPlayer.Play(clipName);
+    }
+
+    public void StopCustomEmote()
+    {
+        if (!_customClipActive) return;
+        _customClipActive = false;
+        _customAnimPlayer?.Stop();
+    }
+
+    private void OnCustomClipFinished(StringName _) => _customClipActive = false;
 
     /// Advance the avatar's animation. `speed` is planar m/s; pass 0 when standing still.
     /// `crouching` and `sprinting` refine the state for clip selection.
@@ -355,6 +421,7 @@ public sealed partial class AvatarInstance : Node3D
     public void Animate(double delta, float speed, bool onFloor, bool crouching = false, bool sprinting = false)
     {
         if (Skeleton == null || _animBones.Count == 0) return;
+        if (_customClipActive) return;   // a custom clip owns the skeleton this frame
         if (_animPlayer != null) return; // embedded clips drive the rig
 
         float dt = (float)delta;

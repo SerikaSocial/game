@@ -19,7 +19,9 @@ public partial class RemoteAvatar : Node3D
 
     private MeshInstance3D _capsule;
     private AvatarInstance _avatar;
-    private Label3D _nameTag;
+    private NameTag3D _nameTag;
+    private StaticBody3D _body;
+    private CapsuleShape3D _bodyShape;
 
     public static RemoteAvatar Create(uint peerId, string name)
     {
@@ -39,19 +41,23 @@ public partial class RemoteAvatar : Node3D
         _capsule.MaterialOverride = new StandardMaterial3D { AlbedoColor = ColorFromId(PeerId) };
         AddChild(_capsule);
 
-        _nameTag = new Label3D
+        // Remote avatars had no physics body at all, so players walked straight through each
+        // other. A static body is enough: it blocks, and because remotes are moved by
+        // interpolation in _Process rather than by the physics step, anything that tried to
+        // *push* would fight the lerp and jitter.
+        _body = new StaticBody3D
         {
-            Text = displayName,
-            Position = new Vector3(0, 2.1f, 0),
-            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-            // Rendered at a high font size for crispness, then scaled down small in world
-            // space via PixelSize so the tag reads as a compact label, not a giant banner.
-            FontSize = 64,
-            PixelSize = 0.0016f,
-            OutlineSize = 12,
-            OutlineModulate = new Color(0, 0, 0, 0.7f),
+            Name = "Body",
+            CollisionLayer = PhysicsLayers.RemotePlayer,
+            CollisionMask = 0,
         };
+        _bodyShape = new CapsuleShape3D { Height = 1.8f, Radius = 0.3f };
+        _body.AddChild(new CollisionShape3D { Shape = _bodyShape, Position = new Vector3(0, 0.9f, 0) });
+        AddChild(_body);
+
+        _nameTag = new NameTag3D { Position = new Vector3(0, 2.1f, 0) };
         AddChild(_nameTag);
+        _nameTag.SetLabel(displayName);
 
         // Start on the shared default outfit (NOT the local player's avatar — that's what made
         // every remote look like the viewer). Main swaps in this peer's real avatar once it
@@ -92,6 +98,7 @@ public partial class RemoteAvatar : Node3D
         AddChild(avatar);
         _capsule.Visible = false;
         _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
+        FitBody(avatar.Height);
         _hasRealAvatar = isReal;
         _streamingBones = false; // re-decide against the new skeleton
     }
@@ -106,7 +113,24 @@ public partial class RemoteAvatar : Node3D
         AddChild(avatar);
         _capsule.Visible = false;
         _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
+        FitBody(avatar.Height);
     }
+
+    /// Match the blocking capsule to the equipped avatar, so a short avatar isn't surrounded by
+    /// a 1.8 m invisible wall and a tall one isn't walkable-through above the shoulders.
+    private void FitBody(float height)
+    {
+        if (_bodyShape == null) return;
+        float h = Mathf.Max(0.6f, height);
+        _bodyShape.Height = h;
+        if (_body.GetChild(0) is CollisionShape3D cs) cs.Position = new Vector3(0, h * 0.5f, 0);
+    }
+
+    /// Apply a downloaded profile picture to this peer's name card.
+    public void SetProfilePicture(byte[] bytes) => _nameTag?.SetProfilePicture(bytes);
+
+    /// Toggle name-tag / profile-picture visibility from settings.
+    public void SetTagPrefs(bool tags, bool pfp) => _nameTag?.SetPrefs(tags, pfp);
 
     public void ApplyPose(PoseFrame f)
     {

@@ -434,7 +434,6 @@ public partial class MainMenu : CanvasLayer
         _scrim.Visible = true;
         _card.Visible = true;
         Visible = true;
-        Input.MouseMode = Input.MouseModeEnum.Visible;
         SwitchBottomTab(tab);
     }
 
@@ -443,7 +442,6 @@ public partial class MainMenu : CanvasLayer
         _scrim.Visible = false;
         _card.Visible = false;
         Visible = false;
-        Input.MouseMode = Input.MouseModeEnum.Captured;
         Closed?.Invoke();
     }
 

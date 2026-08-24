@@ -178,8 +178,9 @@ public partial class CameraMenu : CanvasLayer
             _photoCam.Deploy(origin);
         }
 
-        // Mouse stays captured: it aims the camera rather than driving a cursor.
-        Input.MouseMode = Input.MouseModeEnum.Captured;
+        // Mouse stays captured while the viewfinder is up: here it aims the phantom camera
+        // rather than driving a cursor. That exception is encoded in Main.SyncMenuHold, which
+        // takes a non-cursor-freeing hold for this screen — nothing to set directly.
     }
 
     public new void Hide()
@@ -188,7 +189,6 @@ public partial class CameraMenu : CanvasLayer
         _card.Visible = false;
         Visible = false;
         _photoCam?.Stow();
-        Input.MouseMode = Input.MouseModeEnum.Captured;
         Closed?.Invoke();
     }
 

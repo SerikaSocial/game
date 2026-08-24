@@ -156,29 +156,60 @@ public partial class MicIndicator : Control
     public override void _Draw()
     {
         Vector2 c = Size * 0.5f;
-        bool speaking = _enabled && _level > 0.08f;
+        bool speaking = _enabled && _level > 0.06f;
 
-        Color tint = !_enabled ? new Color(0.55f, 0.58f, 0.66f)
-                   : speaking ? Brand.Success
-                              : Brand.Accent;
+        // Two tints: a dim base the whole mic is drawn in, and a bright fill that rises from the
+        // bottom of the capsule with the speech level — the mic literally fills up as you talk.
+        Color baseTint = !_enabled ? new Color(0.55f, 0.58f, 0.66f) : new Color(Brand.Accent.R, Brand.Accent.G, Brand.Accent.B, 0.45f);
+        Color fillTint = Brand.Success;
 
-        // Speaking halo that swells with level.
+        // Speaking halo that swells with level (kept — reads at a glance from across the HUD).
         if (speaking)
-            DrawCircle(c, 15f + _level * 9f, new Color(Brand.Success.R, Brand.Success.G, Brand.Success.B, 0.18f + _level * 0.22f));
+            DrawCircle(c, 15f + _level * 9f, new Color(Brand.Success.R, Brand.Success.G, Brand.Success.B, 0.16f + _level * 0.22f));
 
         // Backing disc so it reads on any world.
         DrawCircle(c, 15f, new Color(0.05f, 0.04f, 0.10f, 0.72f));
 
-        // Mic capsule (body).
+        // Capsule geometry (body + rounded caps).
         var capsule = new Rect2(c.X - 4.5f, c.Y - 10f, 9f, 13f);
-        DrawRect(new Rect2(capsule.Position, capsule.Size), tint, true);
-        DrawCircle(new Vector2(c.X, capsule.Position.Y), 4.5f, tint);
-        DrawCircle(new Vector2(c.X, capsule.Position.Y + capsule.Size.Y), 4.5f, tint);
+        float capTop = capsule.Position.Y;
+        float capBottom = capsule.Position.Y + capsule.Size.Y;
+
+        // 1) Draw the whole mic in the dim base tint.
+        DrawRect(capsule, baseTint, true);
+        DrawCircle(new Vector2(c.X, capTop), 4.5f, baseTint);
+        DrawCircle(new Vector2(c.X, capBottom), 4.5f, baseTint);
+
+        // 2) Overlay the bright fill from the bottom up to the current level, clipped to the
+        //    capsule. Only when live — a muted mic never fills.
+        if (_enabled && _level > 0.01f)
+        {
+            float total = capBottom - capTop + 9f;             // include both rounded caps
+            float fillH = Mathf.Clamp(_level, 0f, 1f) * total;
+            float fillTopY = capBottom + 4.5f - fillH;          // bottom of lower cap upward
+
+            // Lower cap fills first.
+            DrawCircle(new Vector2(c.X, capBottom), 4.5f, fillTint);
+            // Then the body up to fillTopY.
+            float bodyTop = Mathf.Max(capTop, fillTopY);
+            if (bodyTop < capBottom)
+                DrawRect(new Rect2(capsule.Position.X, bodyTop, capsule.Size.X, capBottom - bodyTop), fillTint, true);
+            // Top cap only once the fill reaches it.
+            if (fillTopY <= capTop)
+                DrawCircle(new Vector2(c.X, capTop), 4.5f, fillTint);
+        }
+
+        // Outline the capsule so it stays crisp over the fill.
+        Color outline = !_enabled ? new Color(0.6f, 0.62f, 0.7f) : (speaking ? Brand.Success : Brand.Accent);
+        DrawArc(new Vector2(c.X, capTop), 4.5f, Mathf.Pi, Mathf.Tau, 10, outline, 1.4f);
+        DrawArc(new Vector2(c.X, capBottom), 4.5f, 0, Mathf.Pi, 10, outline, 1.4f);
+        DrawLine(new Vector2(capsule.Position.X, capTop), new Vector2(capsule.Position.X, capBottom), outline, 1.4f);
+        DrawLine(new Vector2(capsule.Position.X + capsule.Size.X, capTop), new Vector2(capsule.Position.X + capsule.Size.X, capBottom), outline, 1.4f);
 
         // Stand: arc + stem + base.
-        DrawArc(c + new Vector2(0, -1), 8.5f, Mathf.Pi * 0.15f, Mathf.Pi * 0.85f, 16, tint, 2f);
-        DrawLine(new Vector2(c.X, c.Y + 7.5f), new Vector2(c.X, c.Y + 11f), tint, 2f);
-        DrawLine(new Vector2(c.X - 5f, c.Y + 11f), new Vector2(c.X + 5f, c.Y + 11f), tint, 2f);
+        DrawArc(c + new Vector2(0, -1), 8.5f, Mathf.Pi * 0.15f, Mathf.Pi * 0.85f, 16, outline, 2f);
+        DrawLine(new Vector2(c.X, c.Y + 7.5f), new Vector2(c.X, c.Y + 11f), outline, 2f);
+        DrawLine(new Vector2(c.X - 5f, c.Y + 11f), new Vector2(c.X + 5f, c.Y + 11f), outline, 2f);
 
         // Muted slash.
         if (!_enabled)

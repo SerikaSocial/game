@@ -136,8 +136,25 @@ public static partial class Worlds
         screen.Name = "VideoScreen";
         root.AddChild(screen);
 
-        // YouTube thumbnail loader.
-        root.AddChild(new YouTubeScreen(screen, DefaultYoutubeVideoId));
+        // Live video surface. Picked up by the per-world VideoManager via VideoScreen.Group.
+        root.AddChild(new SerikaSocial.World.Video.VideoScreen(screen));
+
+        // Surround sound: visible speaker cabinets in the four corners, plus a CinemaSpeakers
+        // node that captures the video audio and re-plays it through positional 3D sources so the
+        // mix wraps around the room. (Audible only when a clip actually has decodable audio.)
+        var speakerMat = Mat(new Color(0.05f, 0.04f, 0.06f), 0.6f);
+        var coneMat = Mat(new Color(0.12f, 0.10f, 0.14f), 0.4f);
+        foreach (var (sx, sz) in new[] { (-1, -1), (1, -1), (-1, 1), (1, 1) })
+        {
+            var px = sx * (w / 2 - 0.9f);
+            var pz = sz * (d / 2 - 0.9f);
+            root.AddChild(Box(new Vector3(0.7f, 2.2f, 0.5f), new Vector3(px, 1.1f, pz), speakerMat));
+            root.AddChild(Box(new Vector3(0.5f, 0.5f, 0.1f), new Vector3(px, 1.5f, pz - sz * 0.28f), coneMat));
+            root.AddChild(Box(new Vector3(0.5f, 0.5f, 0.1f), new Vector3(px, 0.7f, pz - sz * 0.28f), coneMat));
+        }
+        var cinemaSpeakers = new SerikaSocial.World.CinemaSpeakers { Name = "CinemaSpeakers" };
+        root.AddChild(cinemaSpeakers);
+        cinemaSpeakers.Setup(screenZ: -d / 2 + 0.5f, backZ: d / 2 - 0.5f, halfWidth: w / 2 - 0.9f, height: 1.4f);
 
         // Screen frame.
         var frameMat = Mat(new Color(0.03f, 0.02f, 0.04f), 0.4f);
@@ -358,7 +375,8 @@ public static partial class Worlds
                 {
                     Position = new Vector3(sx * (4f + sc * 1.3f), 0.3f, -3f),
                     SeatLabel = "Sofa",
-                    SitYaw = sx > 0 ? 180f : 180f,
+                    // Radians, not degrees — SitYaw is applied straight to a node rotation.
+                    SitYaw = Mathf.Pi,
                 };
                 root.AddChild(seat);
             }
@@ -448,7 +466,7 @@ public static partial class Worlds
             {
                 Position = new Vector3(sc * 0.8f, 0.25f, 2.3f),
                 SeatLabel = "Couch",
-                SitYaw = 180f,
+                SitYaw = Mathf.Pi,
             };
             root.AddChild(seat);
         }
@@ -724,53 +742,6 @@ public static partial class Worlds
     }
 }
 
-/// Fetches a YouTube video thumbnail via HTTPRequest and applies it to a MeshInstance3D
-/// as an emissive texture.
-internal sealed partial class YouTubeScreen : Node
-{
-    private readonly MeshInstance3D _screen;
-    private readonly string _videoId;
-
-    public YouTubeScreen(MeshInstance3D screen, string videoId)
-    {
-        _screen = screen;
-        _videoId = videoId;
-    }
-
-    public override void _Ready()
-    {
-        var http = new HttpRequest();
-        AddChild(http);
-        http.RequestCompleted += OnThumbnailLoaded;
-        http.Request($"https://img.youtube.com/vi/{_videoId}/maxresdefault.jpg");
-        GD.Print($"YouTubeScreen: fetching thumbnail for video {_videoId}");
-    }
-
-    private void OnThumbnailLoaded(long result, long responseCode, string[] headers, byte[] body)
-    {
-        if (result != (long)HttpRequest.Result.Success || body.Length == 0)
-        {
-            GD.PrintErr($"YouTubeScreen: thumbnail fetch failed (result={result} code={responseCode})");
-            return;
-        }
-
-        var image = new Image();
-        var err = image.LoadJpgFromBuffer(body);
-        if (err != Error.Ok)
-        {
-            GD.PrintErr($"YouTubeScreen: image decode failed ({err})");
-            return;
-        }
-
-        var texture = ImageTexture.CreateFromImage(image);
-        _screen.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoTexture = texture,
-            Emission = new Color(1f, 1f, 1f),
-            EmissionEnergyMultiplier = 2.5f,
-            EmissionTexture = texture,
-            Roughness = 0.08f,
-        };
-        GD.Print("YouTubeScreen: thumbnail applied to screen");
-    }
-}
+// The old YouTubeScreen (a still-thumbnail painter) has been replaced by the live playback
+// pipeline in World/Video/ — VideoScreen + VideoManager. Worlds now add a VideoScreen and Main
+// creates one VideoManager per world to drive them and own the queue.

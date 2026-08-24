@@ -346,7 +346,14 @@ public static class WorldLoader
             }
             else if (name.StartsWith(MarkerSeat, StringComparison.Ordinal))
             {
-                var seat = new SeatNode { Name = name.Replace(MarkerSeat, "Seat"), SitYaw = yawDeg };
+                // SitYaw is radians (it's applied straight to a node rotation), while yawDeg is
+                // degrees like the mirror/video markers use. Feeding degrees in pointed seats
+                // at an essentially arbitrary angle — latent until seats became sittable.
+                var seat = new SeatNode
+                {
+                    Name = name.Replace(MarkerSeat, "Seat"),
+                    SitYaw = Mathf.DegToRad(yawDeg),
+                };
                 parent.AddChild(seat);
                 seat.GlobalPosition = pos;
                 seats++;
@@ -369,7 +376,7 @@ public static class WorldLoader
                 parent.AddChild(screen);
                 screen.GlobalPosition = pos;
                 screen.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
-                parent.AddChild(new YouTubeScreen(screen, Worlds.DefaultYoutubeVideoId));
+                parent.AddChild(new SerikaSocial.World.Video.VideoScreen(screen));
                 videos++;
             }
             else // SPAWN

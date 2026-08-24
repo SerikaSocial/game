@@ -1,17 +1,23 @@
+using System.Collections.Generic;
 using Godot;
 
 namespace SerikaSocial.Player;
 
-/// Voice chat scaffolding for M3. Captures microphone input via AudioEffectCapture,
-/// encodes to a raw PCM VoiceFrame, and sends over the transport. Incoming voice frames
-/// are decoded and played back through AudioStreamPlayer3D nodes parented to remote avatars
-/// for spatial audio.
+/// Spatial voice chat. Captures the mic via AudioEffectCapture, ships raw PCM16 frames over
+/// the transport, and plays received frames back through an AudioStreamGenerator on each
+/// remote avatar so voice comes from where the speaker is standing.
 ///
-/// NOTE: Opus encoding requires a native GDExtension (no C# Opus path in Godot). This
-/// currently sends raw PCM16 at 16kHz mono — functional for local testing but too
-/// bandwidth-heavy for production. Replace with Opus when the GDExtension lands.
+/// **Playback used to be a no-op.** `PlayFrame` created an empty `AudioStreamPolyphonic` and
+/// called Play() without ever pushing samples — so remote voice was received but silent. It now
+/// feeds an `AudioStreamGenerator` per speaker via `PushBuffer`, which is the real-time path.
+///
+/// NOTE: still raw PCM16 @ 16 kHz mono — audible and correct, just bandwidth-heavy. Opus is a
+/// wire-size optimization that needs a native GDExtension (no C# Opus path in Godot); the
+/// playback path here does not change when it lands, only the encode/decode around it.
 public partial class VoiceManager : Node
 {
+    /// One generator playback per speaker node, created lazily the first time we hear them.
+    private readonly Dictionary<ulong, AudioStreamGeneratorPlayback> _playbacks = new();
     /// Called when we have a voice frame ready to send over the wire.
     public event System.Action<byte[]> VoiceFrameReady;
 
@@ -72,24 +78,56 @@ public partial class VoiceManager : Node
         VoiceFrameReady?.Invoke(pcm);
     }
 
-    /// Play back a received voice frame through a spatial audio node.
-    /// Caller is responsible for parenting the AudioStreamPlayer3D to the remote avatar.
+    /// Play back a received voice frame through a spatial audio node. The caller parents the
+    /// `AudioStreamPlayer3D` to the remote avatar; this owns its stream and playback handle.
     public void PlayFrame(AudioStreamPlayer3D player, byte[] pcmData)
     {
-        // Convert PCM16 back to stereo float32 for Godot playback
+        if (player == null || pcmData == null || pcmData.Length < 2) return;
+
+        var playback = GetOrCreatePlayback(player);
+        if (playback == null) return;
+
         int sampleCount = pcmData.Length / 2;
-        var frames = new Vector2[sampleCount];
-        for (int i = 0; i < sampleCount; i++)
+        // Only push what the generator can take; dropping a little tail is better than blocking
+        // or overflowing the ring buffer, which would crackle.
+        int room = playback.GetFramesAvailable();
+        int toPush = Mathf.Min(sampleCount, room);
+        if (toPush <= 0) return;
+
+        var frames = new Vector2[toPush];
+        for (int i = 0; i < toPush; i++)
         {
             short s = (short)(pcmData[i * 2] | (pcmData[i * 2 + 1] << 8));
             float f = s / 32767f;
-            frames[i] = new Vector2(f, f);
+            frames[i] = new Vector2(f, f); // mono → both channels; 3D node handles spatial pan
         }
+        playback.PushBuffer(frames);
+    }
 
-        var stream = new AudioStreamPolyphonic();
-        // For real-time voice, we'd use AudioStreamGenerator + push frames.
-        // This is the scaffold — wire it to the transport's VoiceReceived event.
-        player.Stream = stream;
+    /// Ensure the speaker node has a 16 kHz generator stream that's playing, and return its
+    /// live playback handle. Keyed by instance id so each remote gets its own stream.
+    private AudioStreamGeneratorPlayback GetOrCreatePlayback(AudioStreamPlayer3D player)
+    {
+        ulong id = player.GetInstanceId();
+        if (_playbacks.TryGetValue(id, out var existing) && player.Playing)
+            return existing;
+
+        var gen = new AudioStreamGenerator
+        {
+            MixRate = SampleRate,
+            BufferLength = 0.25f, // 250 ms — covers jitter without adding much mouth-to-ear lag
+        };
+        player.Stream = gen;
         player.Play();
+
+        var pb = player.GetStreamPlayback() as AudioStreamGeneratorPlayback;
+        if (pb != null) _playbacks[id] = pb;
+        return pb;
+    }
+
+    /// Drop a speaker's playback handle when its avatar leaves, so the map doesn't leak.
+    public void ForgetSpeaker(AudioStreamPlayer3D player)
+    {
+        if (player != null) _playbacks.Remove(player.GetInstanceId());
     }
 }

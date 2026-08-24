@@ -16,6 +16,34 @@ public partial class ActionMenu : CanvasLayer
     public event Action HomePressed;
     public event Action RespawnPressed;
     public event Action<AvatarInstance.Emote> EmotePressed;
+    /// A custom, avatar-authored clip was picked (empty string = stop / return to normal).
+    public event Action<string> CustomEmotePressed;
+
+    // The avatar's own dance/emote clips, shown in place of the default "Emotes" ring when the
+    // equipped avatar ships any. Null/empty → the built-in ring is used (the fallback).
+    private (string title, string icon, string clip)[] _customRing;
+    private bool _inCustomSub;
+
+    /// Feed the equipped avatar's custom clip names. Trimmed to fit the ring; a "Stop" wedge is
+    /// always appended so a custom dance can be cancelled from the same menu.
+    public void SetCustomEmotes(System.Collections.Generic.IReadOnlyList<string> names)
+    {
+        if (names == null || names.Count == 0) { _customRing = null; return; }
+
+        int n = Math.Min(names.Count, 7);
+        _customRing = new (string, string, string)[n + 1];
+        for (int i = 0; i < n; i++)
+            _customRing[i] = (PrettyClip(names[i]), "💃", names[i]);
+        _customRing[n] = ("Stop", "✖", "");
+    }
+
+    /// Turn a raw clip name ("Dance_HipHop", "emote.wave 01") into a menu-friendly label.
+    private static string PrettyClip(string raw)
+    {
+        string s = raw.Replace('_', ' ').Replace('.', ' ').Trim();
+        if (s.Length > 14) s = s[..14];
+        return s.Length == 0 ? "Clip" : char.ToUpper(s[0]) + s[1..];
+    }
 
     private Control _radialControl;
     private bool _active;
@@ -98,12 +126,12 @@ public partial class ActionMenu : CanvasLayer
         _active = true;
         Visible = true;
         ResetToRoot();
-        Input.MouseMode = Input.MouseModeEnum.Visible;
     }
 
     private void ResetToRoot()
     {
         _openSub = -1;
+        _inCustomSub = false;
         _slices = RootSlices;
         _hoveredSlice = -1;
         _radialControl?.QueueRedraw();
@@ -113,7 +141,6 @@ public partial class ActionMenu : CanvasLayer
     {
         _active = false;
         Visible = false;
-        Input.MouseMode = Input.MouseModeEnum.Captured;
         Closed?.Invoke();
     }
 
@@ -177,7 +204,7 @@ public partial class ActionMenu : CanvasLayer
     /// Step back out of a submenu. Returns false if already at the root (caller should close).
     public bool BackOut()
     {
-        if (_openSub < 0) return false;
+        if (_openSub < 0 && !_inCustomSub) return false;
         ResetToRoot();
         return true;
     }
@@ -220,12 +247,24 @@ public partial class ActionMenu : CanvasLayer
         if (_hoveredSlice < 0)
         {
             // Centre: step back out of a submenu, or close from the root ring.
-            if (_openSub >= 0) ResetToRoot();
+            if (_openSub >= 0 || _inCustomSub) ResetToRoot();
             else Hide();
             return;
         }
 
-        // Inside a submenu: the slice is an emote.
+        // Inside the avatar's custom-clip ring: emit the clip name (empty = stop).
+        if (_inCustomSub)
+        {
+            if (_hoveredSlice < _customRing.Length)
+            {
+                var picked = _customRing[_hoveredSlice];
+                Hide();
+                CustomEmotePressed?.Invoke(picked.clip);
+            }
+            return;
+        }
+
+        // Inside a built-in submenu: the slice is an emote.
         if (_openSub >= 0)
         {
             var entries = SubSlices[_openSub];
@@ -240,7 +279,11 @@ public partial class ActionMenu : CanvasLayer
 
         switch (_hoveredSlice)
         {
-            case 0: case 1: case 2:   // Emotes / Poses / Reactions → open that ring
+            case 0:   // Emotes → the avatar's own dances if it has any, else the default ring
+                if (_customRing != null) OpenCustomSub();
+                else OpenSub(0);
+                break;
+            case 1: case 2:   // Poses / Reactions → that built-in ring
                 OpenSub(_hoveredSlice);
                 break;
             case 3:
@@ -261,9 +304,22 @@ public partial class ActionMenu : CanvasLayer
     private void OpenSub(int index)
     {
         _openSub = index;
+        _inCustomSub = false;
         var entries = SubSlices[index];
         var ring = new (string, string)[entries.Length];
         for (int i = 0; i < entries.Length; i++) ring[i] = (entries[i].title, entries[i].icon);
+        _slices = ring;
+        _hoveredSlice = -1;
+        _radialControl.QueueRedraw();
+    }
+
+    /// Open the equipped avatar's own dance/emote ring.
+    private void OpenCustomSub()
+    {
+        _inCustomSub = true;
+        _openSub = -1;
+        var ring = new (string, string)[_customRing.Length];
+        for (int i = 0; i < _customRing.Length; i++) ring[i] = (_customRing[i].title, _customRing[i].icon);
         _slices = ring;
         _hoveredSlice = -1;
         _radialControl.QueueRedraw();

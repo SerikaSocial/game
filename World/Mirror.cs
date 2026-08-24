@@ -40,21 +40,10 @@ public partial class Mirror : Node3D
 
     public override void _Ready()
     {
-        // Ornate frame around the glass. Both frame and surface are on visual layer 2 so the
-        // reflection camera can cull them: otherwise the near-plane push would reveal the back
-        // of the wall in an ugly outline. The main player cameras render all layers by default.
-        var frame = new MeshInstance3D
-        {
-            Mesh = new BoxMesh { Size = new Vector3(_size.X + 0.16f, _size.Y + 0.16f, 0.08f) },
-            Position = new Vector3(0, _size.Y * 0.5f, -0.04f),
-            Layers = 1u << 1,
-        };
-        frame.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(0.35f, 0.26f, 0.16f),
-            Metallic = 0.5f, Roughness = 0.35f,
-        };
-        AddChild(frame);
+        // A bare reflective plane — no frame, no collision, nothing but the glass. The surface
+        // is kept on visual layer 2 so the reflection camera can cull it (see CullMask below);
+        // otherwise the near-plane push would reveal the back of the wall in an ugly outline.
+        // The main player cameras render all layers, so they still see the mirror normally.
 
         // Offscreen render target — renders the SAME world (OwnWorld3D=false) so the mirror
         // camera sees the real scene: the player, the room, everything.
@@ -80,7 +69,7 @@ public partial class Mirror : Node3D
             // TopLevel so its GlobalTransform is written in world space, not influenced by the
             // SubViewport's (identity) transform chain. This makes the reflection math reliable.
             TopLevel = true,
-            // Do not render the mirror frame/surface (layer 2), only the room beyond it (layer 1).
+            // Do not render the mirror surface (layer 2), only the room beyond it (layer 1).
             CullMask = 1048575u & ~(1u << 1),
         };
         _viewport.AddChild(_mirrorCam);
@@ -114,17 +103,6 @@ public partial class Mirror : Node3D
             };
         }
         AddChild(_surface);
-
-        // Invisible collision wall so the player can't walk through the mirror.
-        var collider = new StaticBody3D
-        {
-            Position = new Vector3(0, _size.Y * 0.5f, 0),
-        };
-        collider.AddChild(new CollisionShape3D
-        {
-            Shape = new BoxShape3D { Size = new Vector3(_size.X, _size.Y, 0.04f) },
-        });
-        AddChild(collider);
     }
 
     public override void _Process(double _)
@@ -139,10 +117,12 @@ public partial class Mirror : Node3D
             if (w3d != null) _viewport.World3D = w3d;
         }
 
-        // Skip the extra render when far away.
+        // Skip the extra render when far away. The active range follows the device tier —
+        // a mirror is a whole extra scene render, the first thing to pull in on a Quest.
         Vector3 planePos = _surface.GlobalPosition;
         Vector3 viewerPos = viewer.GlobalPosition;
-        if (viewerPos.DistanceTo(planePos) > _activeRange)
+        float range = Mathf.Min(_activeRange, UI.DeviceProfile.MirrorRange);
+        if (viewerPos.DistanceTo(planePos) > range)
         {
             _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
             return;

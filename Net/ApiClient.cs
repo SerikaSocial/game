@@ -142,6 +142,39 @@ public sealed class ApiClient
     public async Task SelectAvatarAsync(string avatarId) =>
         await PostAuthedAsync($"/v1/avatars/{avatarId}/select", "{}");
 
+    /// Resolve a page/media URL into concrete playable stream tracks via the server (which runs
+    /// yt-dlp — the client can't, least of all on Quest). Returns the `Resolved` JSON, or throws
+    /// with the server's error code ("no_playable_streams", "resolve_timeout", "private_host", …).
+    /// See server/api/src/routes/video.ts for the shape.
+    public async Task<JsonElement> ResolveVideoAsync(string url)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get,
+            $"{_baseUrl}/v1/video/resolve?url={Uri.EscapeDataString(url)}");
+        if (SessionToken != null)
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        var res = await _http.SendAsync(req);
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        if (!res.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}");
+        return json;
+    }
+
+    /// Resolve a peer's profile-picture URL (and display name) from their account id — the only
+    /// identity the relay carries. Returns the avatarUrl, or null if the user has none / on error.
+    public async Task<string> GetUserAvatarUrlAsync(string userId)
+    {
+        if (string.IsNullOrEmpty(userId)) return null;
+        try
+        {
+            var res = await GetAsync($"/v1/users/by-id/{userId}/card");
+            if (res.TryGetProperty("avatarUrl", out var a) && a.ValueKind == JsonValueKind.String)
+                return a.GetString();
+        }
+        catch { /* best-effort */ }
+        return null;
+    }
+
     /// Fetch raw image bytes (avatar/world thumbnails). Returns null on error.
     public async Task<byte[]> GetImageBytesAsync(string url)
     {

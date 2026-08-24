@@ -36,12 +36,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public void AddLook(Vector2 delta) => _pendingLook += delta;
 
     private Node3D _yaw;      // horizontal look, also the body facing
-    private Camera3D _camera; // pitch
+    private Node3D _pitch;    // vertical look — the orbit pivot the camera hangs off
+    private Camera3D _camera;
     private float _gravity = 9.8f;
     private MeshInstance3D _bodyMesh;
     private CollisionShape3D _collision;
     private CapsuleShape3D _capsuleShape;
-    private Label3D _nameTag;
+    private NameTag3D _nameTag;
 
     private Node3D _avatarMount;      // sits at feet, rotates to match body yaw
     private AvatarInstance _avatar;   // null until an avatar is equipped (capsule shown meanwhile)
@@ -62,6 +63,11 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     {
         _gravity = (float)ProjectSettings.GetSetting("physics/3d/default_gravity", 9.8f);
 
+        // Own layer so the camera ray can exclude us, and a mask that includes remote players
+        // so we can't walk through them.
+        CollisionLayer = PhysicsLayers.LocalPlayer;
+        CollisionMask = PhysicsLayers.LocalPlayerMask;
+
         // Capsule body + collision.
         _capsuleShape = new CapsuleShape3D { Height = StandHeight, Radius = 0.3f };
         _collision = new CollisionShape3D { Shape = _capsuleShape };
@@ -77,31 +83,50 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         AddChild(mesh);
         _bodyMesh = mesh;
 
+        // Look rig: yaw → pitch → camera. Pitch used to live on the camera itself, which meant
+        // the third-person camera tilted in place at a fixed offset instead of orbiting the
+        // player — look up and the camera stayed behind your shoulder pointing at the sky.
+        // Hanging it off a pitch pivot makes both views share one orbit.
         _yaw = new Node3D { Name = "Yaw", Position = new Vector3(0, StandCameraY, 0) };
         AddChild(_yaw);
+        _pitch = new Node3D { Name = "Pitch" };
+        _yaw.AddChild(_pitch);
         _camera = new Camera3D();
-        _yaw.AddChild(_camera);
+        _pitch.AddChild(_camera);
 
         // Avatar mount: at the feet, rotated each frame to face where the body faces.
         _avatarMount = new Node3D { Name = "AvatarMount" };
         AddChild(_avatarMount);
 
-        // Name tag above head
-        _nameTag = new Label3D
-        {
-            Position = new Vector3(0, 0.5f, 0),
-            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-            FontSize = 48,
-            PixelSize = 0.005f,
-        };
-        _camera.AddChild(_nameTag);
+        // Name tag above head. Hangs off the body, not the camera: parented to the camera it
+        // orbited with the third-person view instead of staying over the avatar's head.
+        _nameTag = new NameTag3D { Position = new Vector3(0, StandHeight + 0.3f, 0) };
+        AddChild(_nameTag);
 
-        // Headless smoke runs have no window to capture the mouse in.
-        if (!DisplayServer.GetName().Equals("headless"))
-            Input.MouseMode = Input.MouseModeEnum.Captured;
+        _camQuery = new PhysicsRayQueryParameters3D
+        {
+            CollisionMask = PhysicsLayers.CameraMask,
+            CollideWithAreas = false,
+            Exclude = new Godot.Collections.Array<Rid> { GetRid() },
+        };
+
+        // The cursor is owned by InputMode; taking it here raced with whatever screen was up
+        // when the rig spawned (the loading screen, the tutorial) and stole the pointer from it.
+        UI.InputMode.Apply();
     }
 
-    public void SetUsername(string name) => _nameTag.Text = name;
+    public void SetUsername(string name) => _nameTag.SetLabel(name);
+
+    /// Apply a downloaded profile picture to the name card.
+    public void SetProfilePicture(byte[] bytes) => _nameTag.SetProfilePicture(bytes);
+
+    /// Toggle name-tag / profile-picture visibility from settings.
+    public void SetTagPrefs(bool tags, bool pfp)
+    {
+        _nameTag.SetPrefs(tags, pfp);
+        // In first person the tag is always hidden regardless of the preference.
+        if (_firstPerson) _nameTag.SetShown(false);
+    }
 
     /// Equip a humanoid avatar built from a `.ska`. Hides the capsule stand-in and moves the
     /// eye-level camera to the avatar's measured eye height. Pass null to go back to the capsule.
@@ -118,6 +143,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         _bodyMesh.Visible = false;
         _avatarMount.AddChild(avatar);
+        _nameTag.Position = new Vector3(0, avatar.Height + 0.3f, 0);
         _standEyeY = avatar.EyeHeight;
         if (!_isCrouching) _currentCameraY = _standEyeY;
         ApplyCameraMode();
@@ -159,27 +185,147 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     private void ApplyCameraMode()
     {
         bool isFP = _cameraMode == CameraModeEnum.FirstPerson;
-        _avatar?.SetHeadVisible(!isFP);
 
-        _camera.Position = _cameraMode switch
-        {
-            CameraModeEnum.ThirdPersonBack => new Vector3(0, ThirdPersonCameraY, _thirdPersonDistance),
-            CameraModeEnum.ThirdPersonFront => new Vector3(0, ThirdPersonCameraY, -_thirdPersonDistance),
-            _ => Vector3.Zero,
-        };
+        // The head stays visible in ALL modes now. It used to be collapsed to zero scale in
+        // first person to keep the skull interior out of the view — but that scale lives on the
+        // shared skeleton, so it also erased the head from the mirror's reflection and from the
+        // avatar's shadow. Instead the first-person camera is pushed forward past the eyes with
+        // a near clip (see FpEyeForward / FpNear in UpdateCameraOffset), so the inside of the
+        // head is behind the near plane and never drawn, while mirror and shadow see a whole
+        // avatar. Force it back on in case an older path collapsed it.
+        _avatar?.SetHeadVisible(true);
 
+        // Near clip: tight in first person so the forward-pushed camera doesn't clip the face;
+        // default otherwise.
+        _camera.Near = isFP ? FpNear : 0.05f;
+
+        // The camera's *offset* is solved per-frame in SolveCamera (it depends on geometry);
+        // all that's fixed per mode is which way it faces. The selfie view looks back down the
+        // arm at the player, so it's the one that needs a yaw flip.
         _camera.Rotation = _cameraMode == CameraModeEnum.ThirdPersonFront
-            ? new Vector3(_camera.Rotation.X, Mathf.Pi, 0)
-            : new Vector3(_camera.Rotation.X, 0, 0);
+            ? new Vector3(0, Mathf.Pi, 0)
+            : Vector3.Zero;
 
-        _nameTag.Visible = !isFP;
+        // Snap rather than glide when the player deliberately switches view.
+        _camDistance = isFP ? 0f : _thirdPersonDistance;
+
+        _nameTag.SetShown(!isFP);
     }
 
-    /// Zero all momentum on respawn.
+    // First-person eye placement. The camera is pushed forward from the head bone toward where
+    // the eyes are, so it sits in front of the face — the skull interior falls behind the near
+    // plane and isn't drawn, without collapsing the head geometry (which would kill the mirror
+    // reflection and the shadow).
+    private const float FpEyeForward = 0.12f;
+    private const float FpNear = 0.06f;
+
+    // Camera collision. The camera used to sit at a hard-coded offset behind the player, so it
+    // happily sank into walls and through the floor whenever the player backed into something.
+    // Now the desired offset is raycast from the orbit pivot each frame and pulled in to the
+    // first thing it hits.
+    private const float CameraPullMargin = 0.28f;  // keep the near plane clear of the surface
+    private const float CameraMinDistance = 0.55f; // never so close it ends up inside our own head
+    private PhysicsRayQueryParameters3D _camQuery;
+    private float _camDistance;
+
+    private void SolveCamera(double delta)
+    {
+        if (_cameraMode == CameraModeEnum.FirstPerson)
+        {
+            _camDistance = 0f;
+            return;
+        }
+
+        // Behind the shoulder for the back view, in front of the face for the selfie view.
+        // -Z is forward in Godot, so "behind" is +Z.
+        float sign = _cameraMode == CameraModeEnum.ThirdPersonBack ? 1f : -1f;
+        var pivot = _pitch.GlobalPosition;
+        var dir = _pitch.GlobalBasis * new Vector3(0, 0, sign);
+        float want = _thirdPersonDistance;
+
+        var space = GetWorld3D().DirectSpaceState;
+        _camQuery.From = pivot;
+        _camQuery.To = pivot + dir * (want + CameraPullMargin);
+        var hit = space.IntersectRay(_camQuery);
+        if (hit.Count > 0 && hit.TryGetValue("position", out var p))
+        {
+            float d = pivot.DistanceTo(p.AsVector3()) - CameraPullMargin;
+            want = Mathf.Max(CameraMinDistance, Mathf.Min(want, d));
+        }
+
+        // Snapping *in* is instant (a wall must never be crossed, even for a frame); easing
+        // *out* is smoothed, otherwise the camera pops the moment you clear a doorway.
+        _camDistance = want < _camDistance
+            ? want
+            : Mathf.Lerp(_camDistance, want, (float)delta * 8f);
+    }
+
+    /// Zero all momentum on respawn. Also releases any seat — respawning out of a chair while
+    /// still bound to it left the anchor pinning us straight back into it every frame.
     public void ResetMotion()
     {
+        StandUp();
         Velocity = Vector3.Zero;
         PlayEmote(AvatarInstance.Emote.None);
+    }
+
+    // ── Sitting / lying ──────────────────────────────────────────────────────────────
+
+    private World.IOccupiable _occupying;
+
+    /// The seat or bed we're currently bound to, or null when standing.
+    public World.IOccupiable Occupying => _occupying;
+
+    /// Where the interaction ray starts and which way it points — the eye, not the camera, so
+    /// the reach is the same in first and third person.
+    public Vector3 EyePosition => _yaw.GlobalPosition;
+    public Vector3 AimForward => -_pitch.GlobalBasis.Z;
+
+    /// Bind to a seat/bed: snap onto its anchor, face the way it faces, hold its pose.
+    public void Occupy(World.IOccupiable spot)
+    {
+        if (spot == null) return;
+        if (_occupying != null && !ReferenceEquals(_occupying, spot)) StandUp();
+
+        _occupying = spot;
+        Velocity = Vector3.Zero;
+        GlobalPosition = spot.AnchorPosition;
+
+        var yr = _yaw.Rotation;
+        yr.Y = spot.AnchorYaw;
+        _yaw.Rotation = yr;
+
+        var mr = _avatarMount.Rotation;
+        mr.Y = spot.AnchorYaw;
+        _avatarMount.Rotation = mr;
+
+        // Set the emote directly rather than through PlayEmote, which toggles: sitting down on
+        // a seat while already mid-Sit emote would have cancelled the pose instead of holding it.
+        _avatar?.PlayEmote(spot.Pose);
+    }
+
+    /// Release the current seat/bed. Safe to call when already standing.
+    public void StandUp()
+    {
+        if (_occupying == null) return;
+        var spot = _occupying;
+        _occupying = null;
+        spot.Vacate();
+        _avatar?.PlayEmote(AvatarInstance.Emote.None);
+
+        // Step clear of the anchor, otherwise we're still inside the seat's trigger volume and
+        // the prompt immediately offers to sit back down.
+        var forward = new Vector3(Mathf.Sin(spot.AnchorYaw), 0, Mathf.Cos(spot.AnchorYaw));
+        GlobalPosition = spot.AnchorPosition + forward * 0.7f;
+        Velocity = Vector3.Zero;
+    }
+
+    /// Play one of the equipped avatar's own custom clips by name (empty = stop it).
+    public void PlayCustomEmote(string clip)
+    {
+        if (_avatar == null) return;
+        if (string.IsNullOrEmpty(clip)) _avatar.StopCustomEmote();
+        else _avatar.PlayCustomEmote(clip);
     }
 
     /// Trigger an emote animation on the equipped avatar.
@@ -203,10 +349,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         if (@event is InputEventMouseMotion m && Input.MouseMode == Input.MouseModeEnum.Captured)
         {
             _yaw.RotateY(-m.Relative.X * MouseSensitivity);
-            _camera.RotateX(-m.Relative.Y * MouseSensitivity);
-            var r = _camera.Rotation;
+            _pitch.RotateX(-m.Relative.Y * MouseSensitivity);
+            var r = _pitch.Rotation;
             r.X = Mathf.Clamp(r.X, -1.4f, 1.4f);
-            _camera.Rotation = r;
+            _pitch.Rotation = r;
         }
 
         // Scroll wheel zooms the third-person camera.
@@ -232,12 +378,25 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         if (ControlsEnabled && _pendingLook != Vector2.Zero)
         {
             _yaw.RotateY(-_pendingLook.X * MouseSensitivity);
-            _camera.RotateX(-_pendingLook.Y * MouseSensitivity);
-            var cr = _camera.Rotation;
+            _pitch.RotateX(-_pendingLook.Y * MouseSensitivity);
+            var cr = _pitch.Rotation;
             cr.X = Mathf.Clamp(cr.X, -1.4f, 1.4f);
-            _camera.Rotation = cr;
+            _pitch.Rotation = cr;
         }
         _pendingLook = Vector2.Zero;
+
+        // Seated/lying: the anchor owns our position, so movement, gravity and locomotion all
+        // stop. Look is still live — you can glance around from a chair. The pose is held by
+        // the emote the seat asked for, so nothing here has to drive the rig.
+        if (_occupying != null)
+        {
+            Velocity = Vector3.Zero;
+            GlobalPosition = _occupying.AnchorPosition;
+            _avatar?.Animate(delta, 0f, true, false, false);
+            SolveCamera(delta);
+            UpdateCameraOffset(delta, moving: false, sprinting: false);
+            return;
+        }
 
         if (!onFloor) v.Y -= _gravity * (float)delta;
         bool wantJump = ControlsEnabled && (Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump);
@@ -320,24 +479,38 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             _avatar.Animate(delta, planar.Length(), IsOnFloor(), _isCrouching, sprinting);
         }
 
-        // Head bob — only when moving on the ground, and only meaningful in first person.
+        SolveCamera(delta);
+        UpdateCameraOffset(delta, input.LengthSquared() > 0.01f && IsOnFloor(), sprinting);
+    }
+
+    /// Place the camera on the solved arm, plus head bob. Bob is first-person only — in third
+    /// person it just makes the whole frame wobble.
+    private void UpdateCameraOffset(double delta, bool moving, bool sprinting)
+    {
         float baseCamY = _firstPerson ? 0f : ThirdPersonCameraY;
-        bool moving = input.LengthSquared() > 0.01f && IsOnFloor();
+        float targetY;
+
         if (moving && _firstPerson)
         {
             _bobTimer += (float)delta * BobFrequency * (sprinting ? 1.4f : 1f);
-            float bob = Mathf.Sin(_bobTimer) * BobAmplitude * (sprinting ? 1.5f : 1f);
-            var camPos = _camera.Position;
-            camPos.Y = baseCamY + bob;
-            _camera.Position = camPos;
+            targetY = baseCamY + Mathf.Sin(_bobTimer) * BobAmplitude * (sprinting ? 1.5f : 1f);
         }
         else
         {
             _bobTimer = 0;
-            var camPos = _camera.Position;
-            camPos.Y = Mathf.Lerp(camPos.Y, baseCamY, (float)delta * 8f);
-            _camera.Position = camPos;
+            targetY = Mathf.Lerp(_camera.Position.Y, baseCamY, (float)delta * 8f);
         }
+
+        if (_firstPerson)
+        {
+            // Forward is -Z; push the eye ahead of the head bone so we look out of the face,
+            // not out of the middle of the skull.
+            _camera.Position = new Vector3(0, targetY, -FpEyeForward);
+            return;
+        }
+
+        float sign = _cameraMode == CameraModeEnum.ThirdPersonFront ? -1f : 1f;
+        _camera.Position = new Vector3(0, targetY, _camDistance * sign);
     }
 
     /// The transform we broadcast: body position, facing = yaw. Pitch stays local (head).

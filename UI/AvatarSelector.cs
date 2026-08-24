@@ -267,7 +267,6 @@ public partial class AvatarSelector : CanvasLayer
         _detailCard.Visible = false;
         _detailCard.GetParent<CenterContainer>().Visible = false;
         Visible = true;
-        Input.MouseMode = Input.MouseModeEnum.Visible;
         SwitchTab(false);
     }
 
