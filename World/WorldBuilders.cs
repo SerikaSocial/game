@@ -120,11 +120,13 @@ public static partial class Worlds
         root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
         root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
 
-        // Large screen on the back wall.
+        // Large screen on the back wall. QuadMesh faces -Z by default; rotate Pi around Y
+        // so the visible face points +Z toward the audience.
         var screen = new MeshInstance3D
         {
             Mesh = new QuadMesh { Size = new Vector2(14f, 7f) },
             Position = new Vector3(0, 4.5f, -d / 2 + 0.15f),
+            Rotation = new Vector3(0, Mathf.Pi, 0),
         };
         screen.MaterialOverride = new StandardMaterial3D
         {
@@ -208,7 +210,7 @@ public static partial class Worlds
                     {
                         Position = new Vector3(sx * (2.35f + sc * 2.65f), y + 0.25f, z),
                         SeatLabel = $"Row {row + 1} Seat {sc + 1}",
-                        SitYaw = Mathf.Pi, // Face directly towards the video screen (-Z)
+                        SitYaw = 0f, // Yaw 0 = facing -Z, which is toward the screen at the back wall
                         SitOffset = new Vector3(0, 0.05f, 0),
                     };
                     root.AddChild(seat);

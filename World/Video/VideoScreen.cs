@@ -53,7 +53,8 @@ public partial class VideoScreen : Node, IInteractable
 
         SerikaSocial.World.CinemaSpeakers.EnsureBus();
 
-        // SubViewport renders the VideoStreamPlayer directly into a ViewportTexture
+        // VideoStreamPlayer decodes video and exposes frames via GetVideoTexture().
+        // It must live inside a viewport to process — a SubViewport keeps it off-screen.
         _subViewport = new SubViewport
         {
             Name = "VideoViewport",
@@ -67,25 +68,20 @@ public partial class VideoScreen : Node, IInteractable
         _player = new VideoStreamPlayer
         {
             Name = "Player",
-            Position = Vector2.Zero,
-            Size = new Vector2(1280, 720),
-            CustomMinimumSize = new Vector2(1280, 720),
-            Expand = true,
+            AnchorsPreset = (int)Control.LayoutPreset.FullRect,
+            Expand = false,
             Visible = true,
             Autoplay = false,
-            // Route audio to the Cinema bus, which CinemaSpeakers captures and re-plays through
-            // positional 3D speakers for surround.
             Bus = SerikaSocial.World.CinemaSpeakers.Bus,
         };
         _subViewport.AddChild(_player);
         _player.Finished += () => Finished?.Invoke();
 
-        var vpTex = _subViewport.GetTexture();
+        // Pre-create the screen material; the video texture is plugged in during _Process
+        // once the decoder starts producing frames.
         _screenMat = new StandardMaterial3D
         {
-            AlbedoTexture = vpTex,
             EmissionEnabled = true,
-            EmissionTexture = vpTex,
             Emission = new Color(1, 1, 1),
             EmissionEnergyMultiplier = 1.8f,
             Roughness = 0.08f,
@@ -97,14 +93,13 @@ public partial class VideoScreen : Node, IInteractable
 
     public override void _Process(double delta)
     {
-        if (_player != null && _player.IsPlaying())
+        if (_player == null || !_player.IsPlaying()) return;
+        var vidTex = _player.GetVideoTexture();
+        if (vidTex == null) return;
+        if (_screenMat.AlbedoTexture != vidTex)
         {
-            var vidTex = _player.GetVideoTexture();
-            if (vidTex != null && _screenMat != null && _screenMat.AlbedoTexture != vidTex)
-            {
-                _screenMat.AlbedoTexture = vidTex;
-                _screenMat.EmissionTexture = vidTex;
-            }
+            _screenMat.AlbedoTexture = vidTex;
+            _screenMat.EmissionTexture = vidTex;
         }
     }
 
