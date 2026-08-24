@@ -140,6 +140,9 @@ public partial class SettingsMenu : CanvasLayer
 
     // ── Audio tab ───────────────────────────────────────────────────────────────────────
     private HSlider _master; private Label _masterVal;
+    private OptionButton _outputOpt;
+    private OptionButton _inputOpt;
+
     private VBoxContainer BuildAudio()
     {
         var v = Section();
@@ -158,6 +161,27 @@ public partial class SettingsMenu : CanvasLayer
             DeviceProfile.Settings.Save();
         };
         v.AddChild(Row("Master volume", _master, _masterVal));
+
+        _outputOpt = new OptionButton();
+        _outputOpt.ItemSelected += idx =>
+        {
+            string dev = _outputOpt.GetItemText((int)idx);
+            AudioServer.OutputDevice = dev;
+            DeviceProfile.Settings.OutputDevice = dev;
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Speaker / Output", _outputOpt));
+
+        _inputOpt = new OptionButton();
+        _inputOpt.ItemSelected += idx =>
+        {
+            string dev = _inputOpt.GetItemText((int)idx);
+            AudioServer.InputDevice = dev;
+            DeviceProfile.Settings.InputDevice = dev;
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Microphone / Input", _inputOpt));
+
         return v;
     }
 
@@ -252,11 +276,45 @@ public partial class SettingsMenu : CanvasLayer
 
         _master.SetValueNoSignal(DeviceProfile.Settings.MasterVolume * 100f);
         _masterVal.Text = $"{(int)(DeviceProfile.Settings.MasterVolume * 100)}%";
+
+        PopulateDevices();
+
         _sens.SetValueNoSignal(DeviceProfile.Settings.MouseSensitivity / 0.001f);
         _sensVal.Text = $"{DeviceProfile.Settings.MouseSensitivity / 0.001f:F1}";
         _thirdPerson.SetPressedNoSignal(DeviceProfile.Settings.StartThirdPerson);
         _nameTags.SetPressedNoSignal(DeviceProfile.Settings.NameTags);
         _pfp.SetPressedNoSignal(DeviceProfile.Settings.ProfilePictures);
+    }
+
+    private void PopulateDevices()
+    {
+        if (_outputOpt != null)
+        {
+            _outputOpt.Clear();
+            var outputs = AudioServer.GetOutputDeviceList();
+            string curOut = AudioServer.OutputDevice;
+            int selOut = 0;
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                _outputOpt.AddItem(outputs[i]);
+                if (outputs[i] == curOut || outputs[i] == DeviceProfile.Settings.OutputDevice) selOut = i;
+            }
+            if (outputs.Length > 0) _outputOpt.Selected = selOut;
+        }
+
+        if (_inputOpt != null)
+        {
+            _inputOpt.Clear();
+            var inputs = AudioServer.GetInputDeviceList();
+            string curIn = AudioServer.InputDevice;
+            int selIn = 0;
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                _inputOpt.AddItem(inputs[i]);
+                if (inputs[i] == curIn || inputs[i] == DeviceProfile.Settings.InputDevice) selIn = i;
+            }
+            if (inputs.Length > 0) _inputOpt.Selected = selIn;
+        }
     }
 
     /// Toggle shadow casting on every light currently in the tree — the render-scale/MSAA knobs

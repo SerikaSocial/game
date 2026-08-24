@@ -23,13 +23,14 @@ public partial class VideoQueuePanel : CanvasLayer
 
     public override void _Ready()
     {
-        Layer = 88; // just under the pause menu (90) so Esc-menu wins if both are somehow up
+        Layer = 94; // above the pause menu and settings so it is fully clickable
 
         _card = new PanelContainer
         {
             AnchorLeft = 1, AnchorRight = 1, AnchorTop = 0, AnchorBottom = 1,
-            OffsetLeft = -360, OffsetRight = -16, OffsetTop = 60, OffsetBottom = -60,
+            OffsetLeft = -380, OffsetRight = -16, OffsetTop = 50, OffsetBottom = -50,
             Visible = false,
+            MouseFilter = Control.MouseFilterEnum.Stop,
         };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16, 1, Brand.Border));
         AddChild(_card);
@@ -81,7 +82,23 @@ public partial class VideoQueuePanel : CanvasLayer
         var clearBtn = Brand.Ghost_(new Button { Text = "🗑 Clear" });
         clearBtn.Pressed += () => _manager?.Clear();
         controls.AddChild(clearBtn);
+
+        var logBtn = Brand.Ghost_(new Button { Text = "📜 Error Log" });
+        logBtn.Pressed += ToggleLog;
+        controls.AddChild(logBtn);
+
         vbox.AddChild(controls);
+
+        _logContainer = new VBoxContainer { Visible = false, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _logText = new Label
+        {
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        _logText.AddThemeFontSizeOverride("font_size", 11);
+        _logText.AddThemeColorOverride("font_color", new Color(0.95f, 0.45f, 0.45f));
+        _logContainer.AddChild(_logText);
+        vbox.AddChild(_logContainer);
 
         vbox.AddChild(new HSeparator());
 
@@ -113,6 +130,22 @@ public partial class VideoQueuePanel : CanvasLayer
         vbox.AddChild(note);
     }
 
+    private VBoxContainer _logContainer;
+    private Label _logText;
+
+    private void ToggleLog()
+    {
+        if (_logContainer == null) return;
+        _logContainer.Visible = !_logContainer.Visible;
+        if (_logContainer.Visible)
+        {
+            var logs = VideoErrorLog.ReadRecent(5);
+            _logText.Text = logs.Count > 0
+                ? string.Join("\n", logs)
+                : "No errors logged yet.\nLog file: " + VideoErrorLog.AbsolutePath;
+        }
+    }
+
     /// Point the panel at the current world's manager (or null when the world has no screens).
     public void Bind(VideoManager manager)
     {
@@ -130,15 +163,24 @@ public partial class VideoQueuePanel : CanvasLayer
         if (_manager == null) return;
         _card.Visible = true;
         Redraw();
-        InputMode.Hold(InputMode.Settings); // reuse a cursor-freeing hold; distinct from the pause menu
+        InputMode.Hold(InputMode.Video);
     }
 
     public new void Hide()
     {
         if (!_card.Visible) return;
         _card.Visible = false;
-        InputMode.Release(InputMode.Settings);
+        InputMode.Release(InputMode.Video);
         Closed?.Invoke();
+    }
+
+    public override void _UnhandledInput(InputEvent e)
+    {
+        if (IsOpen && e is InputEventKey { Pressed: true, Keycode: Key.Escape })
+        {
+            Hide();
+            GetViewport().SetInputAsHandled();
+        }
     }
 
     private void AddCurrent()

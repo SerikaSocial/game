@@ -17,6 +17,28 @@ public static class VideoErrorLog
     /// Absolute on-disk path, surfaced in the queue UI so a user can find the file.
     public static string AbsolutePath => ProjectSettings.GlobalizePath(Path);
 
+    /// Read the most recent error log entries.
+    public static System.Collections.Generic.List<string> ReadRecent(int maxLines = 10)
+    {
+        var list = new System.Collections.Generic.List<string>();
+        try
+        {
+            if (!FileAccess.FileExists(Path)) return list;
+            using var f = FileAccess.Open(Path, FileAccess.ModeFlags.Read);
+            if (f == null) return list;
+            var all = new System.Collections.Generic.List<string>();
+            while (!f.EofReached())
+            {
+                string line = f.GetLine();
+                if (!string.IsNullOrWhiteSpace(line)) all.Add(line);
+            }
+            int start = Mathf.Max(0, all.Count - maxLines);
+            for (int i = start; i < all.Count; i++) list.Add(all[i]);
+        }
+        catch { }
+        return list;
+    }
+
     public static void Record(string url, string worldName, string reason, string detail = null)
     {
         try

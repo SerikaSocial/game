@@ -159,6 +159,23 @@ public partial class RemoteAvatar : Node3D
 
     public override void _Process(double delta)
     {
+        var cam = GetViewport()?.GetCamera3D();
+        if (cam != null && _nameTag != null && _nameTag.Visible)
+        {
+            var tagPos = GlobalPosition + new Vector3(0, (_avatar?.Height ?? 1.8f) + 0.25f, 0);
+            var toTag = tagPos - cam.GlobalPosition;
+            float dist = toTag.Length();
+            if (dist > 0.2f && dist < 22.0f)
+            {
+                float dot = (-cam.GlobalTransform.Basis.Z).Dot(toTag / dist);
+                _nameTag.SetFocused(dot > 0.95f);
+            }
+            else
+            {
+                _nameTag.SetFocused(false);
+            }
+        }
+
         if (!_hasTarget) return;
         // Critically-damped-ish lerp; good enough for M1, replaced by proper snapshot
         // interpolation with a timestamp buffer in M2.

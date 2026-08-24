@@ -215,6 +215,14 @@ public partial class Main : Node3D
         _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
         AddChild(_videoQueuePanel);
         _videoQueuePanel.Closed += SyncMenuHold;
+        SerikaSocial.World.Video.VideoScreen.InteractionRequested += () =>
+        {
+            if (_videoQueuePanel?.HasVideo ?? false)
+            {
+                _videoQueuePanel.Open();
+                SyncMenuHold();
+            }
+        };
 
         _settingsMenu = new UI.SettingsMenu { Name = "SettingsMenu" };
         AddChild(_settingsMenu);
@@ -1422,7 +1430,8 @@ public partial class Main : Node3D
         (_quickMenu?.IsOpen ?? false) || (_mainMenu?.IsOpen ?? false) ||
         (_actionMenu?.IsOpen ?? false) || (_cameraMenu?.IsOpen ?? false) ||
         (_avatarSelector?.IsOpen ?? false) ||
-        (_settingsMenu?.IsOpen ?? false);
+        (_settingsMenu?.IsOpen ?? false) ||
+        (_videoQueuePanel?.IsOpen ?? false);
 
     /// Push a live setting change onto whatever it affects.
     private void OnSettingChanged(string what)
@@ -1463,6 +1472,7 @@ public partial class Main : Node3D
         if (_mainMenu?.IsOpen ?? false) { _mainMenu.Hide(); return true; }
         if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); return true; }
         if (_avatarSelector?.IsOpen ?? false) { _avatarSelector.Hide(); return true; }
+        if (_videoQueuePanel?.IsOpen ?? false) { _videoQueuePanel.Hide(); return true; }
         return false;
     }
 

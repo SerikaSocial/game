@@ -1,5 +1,6 @@
 using System;
 using Godot;
+using SerikaSocial.Player;
 
 namespace SerikaSocial.World.Video;
 
@@ -14,7 +15,7 @@ namespace SerikaSocial.World.Video;
 /// "failed to load, loading next" toast, and advance the queue. Direct `.ogv` links play now,
 /// and the whole pipeline is ready the day a decoder GDExtension is added — only `CanDecode`
 /// and the stream construction below would change.
-public partial class VideoScreen : Node
+public partial class VideoScreen : Node, IInteractable
 {
     private readonly MeshInstance3D _mesh;
     private VideoStreamPlayer _player;
@@ -24,16 +25,29 @@ public partial class VideoScreen : Node
     public event Action<string, string, string> Failed;
     /// Raised when the current clip plays to its end, so the manager can advance.
     public event Action Finished;
+    /// Raised when a player interacts with the screen in-world to open the queue.
+    public static event Action InteractionRequested;
 
     /// Group every screen joins, so the per-world VideoManager can find them all after a world
     /// builds without the builders having to hand back a list.
     public const string Group = "serika_video_screen";
+
+    public string PromptText => "Video Queue";
+    public float Range => 10f;
+    public Vector3 FocusPoint => _mesh?.GlobalPosition ?? Vector3.Zero;
+    public bool CanInteract => true;
+
+    public void Interact(LocalPlayer player)
+    {
+        InteractionRequested?.Invoke();
+    }
 
     public VideoScreen(MeshInstance3D mesh) => _mesh = mesh;
 
     public override void _Ready()
     {
         AddToGroup(Group);
+        AddToGroup(Interactable.Group);
 
         _player = new VideoStreamPlayer
         {

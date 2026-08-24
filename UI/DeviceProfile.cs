@@ -123,6 +123,8 @@ public static class DeviceProfile
         // Non-graphics settings that the settings menu also owns, kept here so there's one file.
         public static float MouseSensitivity = 0.003f;
         public static float MasterVolume = 1.0f;
+        public static string OutputDevice = "Default";
+        public static string InputDevice = "Default";
         public static bool NameTags = true;
         public static bool ProfilePictures = true;
         public static bool StartThirdPerson = false;
@@ -146,9 +148,20 @@ public static class DeviceProfile
 
             MouseSensitivity = (float)cfg.GetValue("controls", "sensitivity", MouseSensitivity);
             MasterVolume = (float)cfg.GetValue("audio", "master", MasterVolume);
+            OutputDevice = (string)cfg.GetValue("audio", "output_device", OutputDevice);
+            InputDevice = (string)cfg.GetValue("audio", "input_device", InputDevice);
             NameTags = (bool)cfg.GetValue("ui", "name_tags", NameTags);
             ProfilePictures = (bool)cfg.GetValue("ui", "pfp", ProfilePictures);
             StartThirdPerson = (bool)cfg.GetValue("controls", "third_person", StartThirdPerson);
+
+            try
+            {
+                if (!string.IsNullOrEmpty(OutputDevice) && OutputDevice != "Default")
+                    AudioServer.OutputDevice = OutputDevice;
+                if (!string.IsNullOrEmpty(InputDevice) && InputDevice != "Default")
+                    AudioServer.InputDevice = InputDevice;
+            }
+            catch { }
 
             _loading = false;
         }
@@ -168,6 +181,8 @@ public static class DeviceProfile
             cfg.SetValue("controls", "sensitivity", MouseSensitivity);
             cfg.SetValue("controls", "third_person", StartThirdPerson);
             cfg.SetValue("audio", "master", MasterVolume);
+            cfg.SetValue("audio", "output_device", OutputDevice);
+            cfg.SetValue("audio", "input_device", InputDevice);
             cfg.SetValue("ui", "name_tags", NameTags);
             cfg.SetValue("ui", "pfp", ProfilePictures);
             cfg.Save(Path);

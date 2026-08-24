@@ -46,6 +46,7 @@ public static class InputMode
     public const string AvatarSelector = "avatar";
     public const string Camera = "camera";
     public const string Settings = "settings";
+    public const string Video = "video";
     public const string Loading = "loading";
 
     /// True while the player has a rig they could be controlling (in Home or a world).
