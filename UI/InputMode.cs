@@ -56,6 +56,8 @@ public static class InputMode
     /// null-check six screens.
     public static bool AnyHold => Holds.Count > 0;
 
+    public static bool HasHold(string reason) => Holds.ContainsKey(reason);
+
     public static bool CursorFree => !_playable || _manualFree || AnyHoldWantsCursor;
 
     public static bool ControlsLive => _playable && Holds.Count == 0;

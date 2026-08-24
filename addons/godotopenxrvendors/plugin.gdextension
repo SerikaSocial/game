@@ -18,3 +18,12 @@ linux.debug.x86_64 = "res://addons/godotopenxrvendors/.bin/linux/template_debug/
 linux.release.x86_64 = "res://addons/godotopenxrvendors/.bin/linux/template_release/x86_64/libgodotopenxrvendors.so"
 linux.debug.arm64 = "res://addons/godotopenxrvendors/.bin/linux/template_debug/arm64/libgodotopenxrvendors.so"
 linux.release.arm64 = "res://addons/godotopenxrvendors/.bin/linux/template_release/arm64/libgodotopenxrvendors.so"
+
+# The upstream asset ships no `editor` entries, so the extension never loads in the editor and
+# therefore never registers its `xr_features/*` export options. Without those, no vendor AAR is
+# selected, `libgodotopenxrvendors.so` is left out of the APK, and the half-loaded extension
+# segfaults on the first frame on device.
+linux.editor.x86_64 = "res://addons/godotopenxrvendors/.bin/linux/template_debug/x86_64/libgodotopenxrvendors.so"
+linux.editor.arm64 = "res://addons/godotopenxrvendors/.bin/linux/template_debug/arm64/libgodotopenxrvendors.so"
+windows.editor.x86_64 = "res://addons/godotopenxrvendors/.bin/windows/template_debug/x86_64/libgodotopenxrvendors.dll"
+macos.editor = "res://addons/godotopenxrvendors/.bin/macos/template_debug/libgodotopenxrvendors.macos.framework"

@@ -70,8 +70,16 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private Vector3 _teleportTarget;
 
     private MeshInstance3D _laser;
+    private MeshInstance3D _laserDot;
     private Vector2 _pointerPos;
     private bool _pointerDown;
+
+    /// The world-space panel the 2D UI is rendered onto. Set by `Main` after construction; the
+    /// controller pointer and the menu-facing logic both drive off it.
+    public UI.VrUiSurface UiSurface { get; set; }
+
+    /// The headset camera, so `Main` can park the UI panel in front of the player's gaze.
+    public XRCamera3D HeadCamera => _camera;
 
     private float _gravity = 9.8f;
     private float _snapCooldown;
@@ -197,10 +205,25 @@ void fragment() {
         };
         _laser.MaterialOverride = new StandardMaterial3D
         {
-            AlbedoColor = new Color(0.72f, 0.55f, 1f),
+            AlbedoColor = Brand.Accent,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
         };
         _rightHand.AddChild(_laser);
+
+        _laserDot = new MeshInstance3D
+        {
+            Name = "PointerDot",
+            Mesh = new SphereMesh { Radius = 0.012f, Height = 0.024f },
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            Visible = false,
+        };
+        _laserDot.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = Brand.PrimaryHi,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        };
+        _laserDot.TopLevel = true;
+        AddChild(_laserDot);
     }
 
     private void BuildTeleportVisuals()
@@ -467,54 +490,68 @@ void fragment() {
         RotateY(angle);
     }
 
-    /// Drive the existing 2D menus from the right controller.
+    /// Drive the 2D menus from the right controller.
     ///
-    /// The menus are `CanvasLayer` UI, which in XR draws into the eye buffers at screen space —
-    /// readable, but there is no mouse in a headset, so before this every menu VR could open was
-    /// one it could not click. Rather than restructure the whole menu system onto SubViewport
-    /// quads, we unproject a point along the controller's aim ray into viewport coordinates and
-    /// synthesise the mouse events the existing `Control`s already handle.
+    /// The menus live on `UiSurface`'s SubViewport, drawn onto a world-space quad (see
+    /// `UI/VrUiSurface`). This casts the controller's aim ray at that quad, converts the hit to
+    /// viewport pixels and pushes the mouse events the existing `Control`s already handle.
+    ///
+    /// This previously used `Camera3D.UnprojectPosition` against the main viewport, on the
+    /// assumption that `CanvasLayer` UI reaches the XR eye buffers. It does not — the menus were
+    /// never on screen at all, so the pointer was aiming at nothing.
     ///
     /// Only runs while a menu owns input (`ControlsEnabled == false`), so the laser never
     /// interferes with normal play.
     private void UpdatePointer()
     {
         bool menuOpen = !ControlsEnabled;
-        _laser.Visible = menuOpen;
-        if (!menuOpen)
+        bool tracked = _rightHand.GetHasTrackingData();
+        _laser.Visible = menuOpen && tracked;
+        if (!menuOpen || !tracked)
         {
+            if (_laserDot != null) _laserDot.Visible = false;
             if (_pointerDown) ReleasePointer();
             return;
         }
+        if (UiSurface == null) return;
 
         var origin = _rightHand.GlobalPosition;
         var aim = -_rightHand.GlobalTransform.Basis.Z;
-        var target = origin + aim * 2.0f;
 
-        // Behind the camera unprojects to a mirrored, meaningless position.
-        if (_camera.IsPositionBehind(target)) return;
+        Vector2 screen = Vector2.Zero;
+        bool hitPanel = UiSurface.RayHit(origin, aim, out var hit) && UiSurface.WorldToViewport(hit, out screen);
 
-        var screen = _camera.UnprojectPosition(target);
-        var size = GetViewport().GetVisibleRect().Size;
-        if (screen.X < 0 || screen.Y < 0 || screen.X > size.X || screen.Y > size.Y) return;
-
-        if (screen != _pointerPos)
+        if (hitPanel)
         {
-            _pointerPos = screen;
-            Input.ParseInputEvent(new InputEventMouseMotion { Position = screen, GlobalPosition = screen });
+            if (_laserDot != null)
+            {
+                _laserDot.Visible = true;
+                _laserDot.GlobalPosition = hit;
+            }
+
+            if (screen != _pointerPos)
+            {
+                _pointerPos = screen;
+                UiSurface.Viewport.PushInput(
+                    new InputEventMouseMotion { Position = screen, GlobalPosition = screen }, true);
+            }
+        }
+        else
+        {
+            if (_laserDot != null) _laserDot.Visible = false;
         }
 
         bool pressed = _rightHand.GetFloat(ActTrigger) > 0.6f;
         if (pressed != _pointerDown)
         {
             _pointerDown = pressed;
-            Input.ParseInputEvent(new InputEventMouseButton
+            UiSurface.Viewport.PushInput(new InputEventMouseButton
             {
-                Position = screen,
-                GlobalPosition = screen,
+                Position = hitPanel ? screen : _pointerPos,
+                GlobalPosition = hitPanel ? screen : _pointerPos,
                 ButtonIndex = MouseButton.Left,
                 Pressed = pressed,
-            });
+            }, true);
             if (pressed) Pulse(_rightHand, 0.3f, 0.02f);
         }
     }
@@ -524,13 +561,14 @@ void fragment() {
     private void ReleasePointer()
     {
         _pointerDown = false;
-        Input.ParseInputEvent(new InputEventMouseButton
+        if (_laserDot != null) _laserDot.Visible = false;
+        UiSurface?.Viewport.PushInput(new InputEventMouseButton
         {
             Position = _pointerPos,
             GlobalPosition = _pointerPos,
             ButtonIndex = MouseButton.Left,
             Pressed = false,
-        });
+        }, true);
     }
 
     private void HandleButtons()
@@ -815,26 +853,26 @@ void fragment() {
         try
         {
             var tree = Engine.GetMainLoop() as SceneTree;
-            if (tree?.Root == null) return false;
+            if (tree?.Root == null) { GD.Print("TryInitVr: no scene tree"); return false; }
 
             var iface = XRServer.FindInterface("OpenXR");
-            if (iface == null) return false;
-            if (!iface.IsInitialized() && !iface.Initialize()) return false;
+            GD.Print($"TryInitVr: FindInterface(\"OpenXR\") = {(iface != null ? iface.ToString() : "null")}");
+            if (iface == null) { GD.Print("TryInitVr: no OpenXR interface found"); return false; }
+            GD.Print($"TryInitVr: IsInitialized = {iface.IsInitialized()}");
+            if (!iface.IsInitialized() && !iface.Initialize()) { GD.Print("TryInitVr: Initialize() returned false"); return false; }
+            GD.Print($"TryInitVr: after Initialize, IsInitialized = {iface.IsInitialized()}");
 
-            // Only enable XR on the viewport if the interface is truly initialized —
-            // some Android runtimes report success from Initialize() but never actually
-            // set IsInitialized(), which would leave the viewport in a broken half-XR state.
-            if (!iface.IsInitialized()) return false;
+            if (!iface.IsInitialized()) { GD.Print("TryInitVr: IsInitialized still false after Initialize"); return false; }
 
-            // Drive the main viewport through the headset. Standalone headsets are tile-based
-            // and fill-rate bound, so VR runs unthrottled and lets the compositor pace us.
             tree.Root.UseXR = true;
             Engine.MaxFps = 0;
             DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
+            GD.Print("TryInitVr: XR enabled on viewport, returning true");
             return true;
         }
-        catch
+        catch (System.Exception e)
         {
+            GD.Print($"TryInitVr: exception: {e.Message}");
             return false;
         }
     }

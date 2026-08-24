@@ -40,6 +40,14 @@ public partial class Main : Node3D
     private UI.SettingsMenu _settingsMenu;
     private SerikaSocial.World.Interactor _interactor;
     private bool _vrMode;
+    // In VR the only XRCamera3D lives inside VrPlayer, which is not spawned until after login.
+    // Until then the XR viewport has no camera at all, so both eyes rendered an empty grey void
+    // and the login screen was invisible in the headset. This temporary rig gives the XR
+    // viewport a camera from startup; SpawnLocalPlayer frees it when the real rig takes over.
+    private XROrigin3D _bootXrOrigin;
+    // In VR every CanvasLayer is parented to this surface's SubViewport instead of to Main, so
+    // the UI reaches the eye buffers via a world-space quad. Null in desktop/mobile mode.
+    private UI.VrUiSurface _vrUi;
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
     private readonly HashSet<string> _blockedUserIds = new();
     private readonly Dictionary<uint, string> _peerUserIds = new();
@@ -88,6 +96,20 @@ public partial class Main : Node3D
         UI.DeviceProfile.Detect();
         _persistThirdPerson = UI.DeviceProfile.Settings.StartThirdPerson;
 
+        // Initialize VR as early as possible — on Quest, OpenXR must be up before the
+        // first viewport render or the app stays in a 2D panel instead of immersive VR.
+        bool isTouchscreen = DisplayServer.IsTouchscreenAvailable();
+        bool hasQuest = OS.HasFeature("quest");
+        bool hasAndroid = OS.HasFeature("android");
+        GD.Print($"VR decision: hasQuest={hasQuest} hasAndroid={hasAndroid} isTouchscreen={isTouchscreen}");
+        bool wantVr = hasQuest
+            || (hasAndroid && !isTouchscreen)
+            || System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
+            || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
+        GD.Print($"VR decision: wantVr={wantVr}");
+        _vrMode = wantVr && VrPlayer.TryInitVr();
+        GD.Print($"VR decision: _vrMode={_vrMode}");
+
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
         _audio = new SpatialAudioManager { Name = "SpatialAudio" };
@@ -96,6 +118,13 @@ public partial class Main : Node3D
         AddChild(_voice);
         _voice.VoiceFrameReady += OnVoiceFrameReady;
         Worlds.BuildLoginBackdrop(_worldRoot); // neutral backdrop behind the login screen
+        if (_vrMode)
+        {
+            SpawnBootXrRig();
+            // Must exist before any UI is constructed below, since AddUi() routes into it.
+            _vrUi = new UI.VrUiSurface { Name = "VrUi" };
+            AddChild(_vrUi);
+        }
 
         var args = ParseArgs();
         if (args.ContainsKey("serika-animtest"))
@@ -127,7 +156,7 @@ public partial class Main : Node3D
         _pendingIntent = DeepLink.FromCommandLine();
 
         _hud = new Hud { Name = "Hud" };
-        AddChild(_hud);
+        AddUi(_hud);
         _hud.LoginPressed += () => _ = LoginThenRoute();
         _hud.EmailLoginPressed += (email, pass) => _ = LoginWithEmailRoute(email, pass);
         _hud.RetryPressed += () => _ = LoginThenRoute();
@@ -140,7 +169,7 @@ public partial class Main : Node3D
         // Loading screen must exist before TryRestoreSession so it can be shown
         // during session restore and startup checks.
         _loading = new LoadingScreen { Name = "LoadingScreen", Visible = false };
-        AddChild(_loading);
+        AddUi(_loading);
 
         // Dev aid: SERIKA_DEBUG_LOADING=1 shows the loading screen immediately (for screenshots).
         if (OrDefault("SERIKA_DEBUG_LOADING", "") == "1")
@@ -152,14 +181,14 @@ public partial class Main : Node3D
         // Auto-updater: check CDN for a newer version. Non-blocking — runs in the
         // background and shows a dialog only if an update is available.
         _updater = new Updater { Name = "Updater" };
-        AddChild(_updater);
+        AddUi(_updater);
         _updater.CurrentVersion = Hud.ClientVersion;
         _updater.CheckForUpdates();
 
         // The single pause hub. (The old always-hidden PauseMenu that duplicated all of this
         // has been removed — this is the only pause surface now.)
         _quickMenu = new QuickMenu { Name = "QuickMenu" };
-        AddChild(_quickMenu);
+        AddUi(_quickMenu);
         _quickMenu.HomePressed += EnterHome;
         _quickMenu.RespawnPressed += RespawnLocal;
         _quickMenu.QuitPressed += () => GetTree().Quit();
@@ -175,7 +204,7 @@ public partial class Main : Node3D
 
         // VRChat-style Main Menu (Big Menu)
         _mainMenu = new MainMenu { Name = "MainMenu" };
-        AddChild(_mainMenu);
+        AddUi(_mainMenu);
         _mainMenu.JoinWorldPressed += (id) => _ = ShowWorldDetailFor(id);
         _mainMenu.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
         _mainMenu.ImageLoader = url => _api.GetImageBytesAsync(url);
@@ -183,7 +212,7 @@ public partial class Main : Node3D
 
         // VRChat-style Action Menu (Radial Pie Menu)
         _actionMenu = new ActionMenu { Name = "ActionMenu" };
-        AddChild(_actionMenu);
+        AddUi(_actionMenu);
         _actionMenu.HomePressed += EnterHome;
         _actionMenu.RespawnPressed += RespawnLocal;
         _actionMenu.CameraPressed += OpenCameraMenu;
@@ -198,13 +227,13 @@ public partial class Main : Node3D
         AddChild(_photoCam);
 
         _cameraMenu = new CameraMenu { Name = "CameraMenu" };
-        AddChild(_cameraMenu);
+        AddUi(_cameraMenu);
         _cameraMenu.Bind(_photoCam);
         _cameraMenu.PhotoTaken += () => _inWorldHud?.Toast("📷 Photo saved to user disk!");
         _cameraMenu.Closed += OnPauseClosed;
 
         _avatarSelector = new AvatarSelector { Name = "AvatarSelector" };
-        AddChild(_avatarSelector);
+        AddUi(_avatarSelector);
         _avatarSelector.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
         _avatarSelector.Closed += OnAvatarSelectorClosed;
 
@@ -218,10 +247,10 @@ public partial class Main : Node3D
         };
 
         _interactPrompt = new UI.InteractionPrompt { Name = "InteractionPrompt" };
-        AddChild(_interactPrompt);
+        AddUi(_interactPrompt);
 
         _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
-        AddChild(_videoQueuePanel);
+        AddUi(_videoQueuePanel);
         _videoQueuePanel.Closed += SyncMenuHold;
         SerikaSocial.World.Video.VideoScreen.InteractionRequested += () =>
         {
@@ -233,15 +262,15 @@ public partial class Main : Node3D
         };
 
         _settingsMenu = new UI.SettingsMenu { Name = "SettingsMenu" };
-        AddChild(_settingsMenu);
+        AddUi(_settingsMenu);
         _settingsMenu.Closed += SyncMenuHold;
         _settingsMenu.SettingChanged += OnSettingChanged;
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
-        AddChild(_inWorldHud);
+        AddUi(_inWorldHud);
 
         _chat = new ChatOverlay { Name = "ChatOverlay" };
-        AddChild(_chat);
+        AddUi(_chat);
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
 
@@ -425,6 +454,62 @@ public partial class Main : Node3D
         }
     }
 
+    /// Mount a 2D UI layer.
+    ///
+    /// On desktop/mobile this is just `AddChild`. In VR the layer goes into the `VrUiSurface`
+    /// SubViewport instead, because a `CanvasLayer` parented to the XR viewport draws into a 2D
+    /// canvas that Godot never composites into the eye buffers — the reason the headset showed
+    /// the world but no login screen or menus.
+    private void AddUi(CanvasLayer layer)
+    {
+        if (_vrMode && _vrUi != null)
+        {
+            _vrUi.Viewport.AddChild(layer);
+            GD.Print($"VR UI: mounted {layer.Name} on panel ({_vrUi.Viewport.GetChildCount()} layers)");
+        }
+        else AddChild(layer);
+    }
+
+    /// Give the XR viewport a camera before the player rig exists.
+    ///
+    /// Godot renders an XR viewport strictly through the active `XRCamera3D`. `VrPlayer` owns the
+    /// only one, and it is not built until `SpawnLocalPlayer` runs after a successful login — so
+    /// from app start until then the headset had no camera and showed a flat grey void, with the
+    /// login UI nowhere to be seen. This stand-in origin/camera pair renders the login backdrop
+    /// (and the `CanvasLayer` UI drawn over it) until the real rig replaces it.
+    private void SpawnBootXrRig()
+    {
+        _bootXrOrigin = new XROrigin3D { Name = "BootXrOrigin" };
+        // Matches the eye height VrPlayer spawns at, so the login screen sits at a sane level.
+        _bootXrOrigin.Position = new Vector3(0, 1, 0);
+        _bootXrOrigin.AddChild(new XRCamera3D { Name = "BootXrCamera", Near = 0.05f, Far = 1000f });
+
+        // The login screen is a menu, so it needs controllers to point with. Both hands get a
+        // visible marker; the right one also carries the laser that drives the UI panel.
+        var left = new XRController3D { Name = "BootLeftHand", Tracker = "left_hand", ShowWhenTracked = true };
+        var right = new XRController3D { Name = "BootRightHand", Tracker = "right_hand", ShowWhenTracked = true };
+        left.AddChild(BootHandMarker());
+        right.AddChild(BootHandMarker());
+        _bootXrOrigin.AddChild(left);
+        _bootXrOrigin.AddChild(right);
+        _bootXrOrigin.AddChild(new UI.VrUiPointer(right, _vrUi) { Name = "BootPointer" });
+
+        AddChild(_bootXrOrigin);
+        GD.Print("VR: boot XR rig active (pre-login)");
+
+        static MeshInstance3D BootHandMarker() => new()
+        {
+            Name = "HandMarker",
+            Mesh = new SphereMesh { Radius = 0.03f, Height = 0.06f },
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = Brand.Accent,
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            },
+        };
+    }
+
     private void SpawnLocalPlayer()
     {
         // A previous player rig (e.g. Home's, when joining a world) must not survive — it
@@ -443,21 +528,27 @@ public partial class Main : Node3D
         _interactor = null;
         _interactPrompt?.Clear();
 
+        void FreeBootXrRig()
+        {
+            if (_bootXrOrigin == null) return;
+            _bootXrOrigin.QueueFree();
+            _bootXrOrigin = null;
+        }
+
         // Bring up VR only when it makes sense: on a Quest/Android build, or when a desktop
         // user explicitly asks with `--vr`. Otherwise OpenXR is never touched, so a normal
         // desktop launch produces no "failed to load runtime / no HMD" errors.
         // On touchscreen Android phones, skip VR — the OpenXR loader in the APK can partially
         // initialise and leave the viewport in a broken state, which prevented the LocalPlayer
         // and touch controls from working.
-        bool isTouchscreen = DisplayServer.IsTouchscreenAvailable();
-        bool wantVr = (OS.HasFeature("android") && !isTouchscreen)
-            || System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
-            || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
-        _vrMode = wantVr && VrPlayer.TryInitVr();
         if (_vrMode)
         {
+            // Two XRCamera3Ds in one tree fight over the XR viewport, so the boot rig must go
+            // before the real one is added.
+            FreeBootXrRig();
             var vr = new VrPlayer { Name = "LocalPlayer", Position = new Vector3(0, 1, 0) };
             AddChild(vr);
+            vr.UiSurface = _vrUi; // the controller ray needs a panel to aim at
             _local = vr;
             _localNode = vr;
             _localVr = vr;
@@ -1559,6 +1650,11 @@ public partial class Main : Node3D
     {
         if (!AnyMenuOpen) { UI.InputMode.Release(UI.InputMode.Menu); return; }
 
+        if (_vrMode && _vrUi != null && !UI.InputMode.HasHold(UI.InputMode.Menu))
+        {
+            _vrUi.FaceCamera(_localVr?.HeadCamera ?? _bootXrOrigin?.GetNodeOrNull<XRCamera3D>("BootXrCamera"));
+        }
+
         // The photo viewfinder is the one screen that wants movement suspended but the mouse
         // still captured — there the mouse aims the phantom camera, and freeing it would leave
         // the viewfinder unable to look anywhere.
@@ -1708,6 +1804,15 @@ public partial class Main : Node3D
 
 
         // Emotes have no key binds — they're all chosen from the Action menu (R).
+    }
+
+    public override void _Process(double delta)
+    {
+        // Keep the VR UI panel smoothly positioned in front of whichever camera is currently live — the boot
+        // rig before login, the player rig after.
+        if (_vrUi != null)
+            _vrUi.LazyFollow(_localVr?.HeadCamera
+                ?? _bootXrOrigin?.GetNodeOrNull<XRCamera3D>("BootXrCamera"), (float)delta);
     }
 
     public override void _PhysicsProcess(double delta)
