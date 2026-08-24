@@ -58,7 +58,7 @@ public partial class VideoScreen : Node, IInteractable
         _subViewport = new SubViewport
         {
             Name = "VideoViewport",
-            Size = new Vector2I(1280, 720),
+            Size = new Vector2I(1920, 1080),
             TransparentBg = false,
             RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
             RenderTargetClearMode = SubViewport.ClearMode.Always,
@@ -69,7 +69,7 @@ public partial class VideoScreen : Node, IInteractable
         {
             Name = "Player",
             AnchorsPreset = (int)Control.LayoutPreset.FullRect,
-            Expand = false,
+            Expand = true,
             Visible = true,
             Autoplay = false,
             Bus = SerikaSocial.World.CinemaSpeakers.Bus,
@@ -83,8 +83,8 @@ public partial class VideoScreen : Node, IInteractable
         {
             EmissionEnabled = true,
             Emission = new Color(1, 1, 1),
-            EmissionEnergyMultiplier = 1.8f,
-            Roughness = 0.08f,
+            EmissionEnergyMultiplier = 1.0f,
+            Roughness = 0.95f,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
 
@@ -100,6 +100,10 @@ public partial class VideoScreen : Node, IInteractable
         {
             _screenMat.AlbedoTexture = vidTex;
             _screenMat.EmissionTexture = vidTex;
+            if (_mesh != null && _mesh.MaterialOverride != _screenMat)
+            {
+                _mesh.MaterialOverride = _screenMat;
+            }
         }
     }
 
@@ -215,8 +219,8 @@ public partial class VideoScreen : Node, IInteractable
                 EmissionEnabled = true,
                 EmissionTexture = _thumbTex,
                 Emission = new Color(1, 1, 1),
-                EmissionEnergyMultiplier = 1.2f,
-                Roughness = 0.08f,
+                EmissionEnergyMultiplier = 1.0f,
+                Roughness = 0.95f,
                 CullMode = BaseMaterial3D.CullModeEnum.Disabled,
             };
             return;
@@ -226,7 +230,7 @@ public partial class VideoScreen : Node, IInteractable
             AlbedoColor = new Color(0.02f, 0.02f, 0.03f),
             EmissionEnabled = true,
             Emission = new Color(0.05f, 0.05f, 0.08f),
-            Roughness = 0.2f,
+            Roughness = 0.95f,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
     }

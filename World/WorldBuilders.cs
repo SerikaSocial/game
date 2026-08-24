@@ -120,20 +120,20 @@ public static partial class Worlds
         root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
         root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
 
-        // Large screen on the back wall. QuadMesh faces -Z by default; rotate Pi around Y
+        // Large widescreen cinema screen on the back wall. QuadMesh faces -Z by default; rotate Pi around Y
         // so the visible face points +Z toward the audience.
         var screen = new MeshInstance3D
         {
-            Mesh = new QuadMesh { Size = new Vector2(14f, 7f) },
+            Mesh = new QuadMesh { Size = new Vector2(17f, 7.5f) },
             Position = new Vector3(0, 4.5f, -d / 2 + 0.15f),
             Rotation = new Vector3(0, Mathf.Pi, 0),
         };
         screen.MaterialOverride = new StandardMaterial3D
         {
-            Emission = new Color(0.9f, 0.9f, 0.95f),
-            EmissionEnergyMultiplier = 2.0f,
-            AlbedoColor = new Color(0.9f, 0.9f, 0.95f),
-            Roughness = 0.08f,
+            AlbedoColor = new Color(0.02f, 0.02f, 0.03f),
+            EmissionEnabled = true,
+            Emission = new Color(0.05f, 0.05f, 0.08f),
+            Roughness = 0.95f,
         };
         screen.Name = "VideoScreen";
         root.AddChild(screen);
@@ -158,27 +158,18 @@ public static partial class Worlds
         root.AddChild(cinemaSpeakers);
         cinemaSpeakers.Setup(screenZ: -d / 2 + 0.5f, backZ: d / 2 - 0.5f, halfWidth: w / 2 - 0.9f, height: 1.4f);
 
-        // Screen frame.
+        // Screen frame framing the full cinema display.
         var frameMat = Mat(new Color(0.03f, 0.02f, 0.04f), 0.4f);
-        root.AddChild(Box(new Vector3(14.4f, 0.3f, 0.1f), new Vector3(0, 8.0f, -d / 2 + 0.12f), frameMat));
-        root.AddChild(Box(new Vector3(14.4f, 0.3f, 0.1f), new Vector3(0, 1.0f, -d / 2 + 0.12f), frameMat));
-        root.AddChild(Box(new Vector3(0.3f, 7.4f, 0.1f), new Vector3(-7.15f, 4.5f, -d / 2 + 0.12f), frameMat));
-        root.AddChild(Box(new Vector3(0.3f, 7.4f, 0.1f), new Vector3(7.15f, 4.5f, -d / 2 + 0.12f), frameMat));
+        root.AddChild(Box(new Vector3(17.4f, 0.25f, 0.1f), new Vector3(0, 8.35f, -d / 2 + 0.18f), frameMat));
+        root.AddChild(Box(new Vector3(17.4f, 0.25f, 0.1f), new Vector3(0, 0.65f, -d / 2 + 0.18f), frameMat));
+        root.AddChild(Box(new Vector3(0.25f, 7.9f, 0.1f), new Vector3(-8.6f, 4.5f, -d / 2 + 0.18f), frameMat));
+        root.AddChild(Box(new Vector3(0.25f, 7.9f, 0.1f), new Vector3(8.6f, 4.5f, -d / 2 + 0.18f), frameMat));
 
-        // Curtains.
+        // Curtains flanking the screen.
         var curtainMat = Mat(new Color(0.25f, 0.05f, 0.08f), 0.85f);
-        root.AddChild(Box(new Vector3(1.5f, h - 0.5f, 0.15f), new Vector3(-8.5f, (h - 0.5f) / 2, -d / 2 + 0.1f), curtainMat));
-        root.AddChild(Box(new Vector3(1.5f, h - 0.5f, 0.15f), new Vector3(8.5f, (h - 0.5f) / 2, -d / 2 + 0.1f), curtainMat));
-        root.AddChild(Box(new Vector3(w, 1.0f, 0.15f), new Vector3(0, h - 0.5f, -d / 2 + 0.1f), curtainMat));
-
-        root.AddChild(new SpotLight3D
-        {
-            Position = new Vector3(0, 4.5f, -d / 2 + 0.5f),
-            LightColor = new Color(0.7f, 0.7f, 0.8f),
-            LightEnergy = 2.0f,
-            SpotRange = 24f,
-            SpotAngle = 70f,
-        });
+        root.AddChild(Box(new Vector3(2.0f, h - 0.5f, 0.15f), new Vector3(-9.8f, (h - 0.5f) / 2, -d / 2 + 0.22f), curtainMat));
+        root.AddChild(Box(new Vector3(2.0f, h - 0.5f, 0.15f), new Vector3(9.8f, (h - 0.5f) / 2, -d / 2 + 0.22f), curtainMat));
+        root.AddChild(Box(new Vector3(w, 0.8f, 0.15f), new Vector3(0, h - 0.4f, -d / 2 + 0.22f), curtainMat));
 
         // Tiered seating with SeatNodes.
         var seatMat = Mat(new Color(0.12f, 0.08f, 0.15f), 0.9f);

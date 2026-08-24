@@ -152,21 +152,21 @@ public partial class VideoManager : Node
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
-                // 1. Try server-side transcode proxy (pipes streams through ffmpeg to deliver ogv/Theora).
-                string tcPath = await DownloadTranscode(item.Url, gen);
+                // 1. Try local transcode first (prepackaged ffmpeg/yt-dlp) — faster, no server load.
+                string tcPath = await TryLocalTranscodeAsync(item.Url, gen);
                 if (gen != _generation) return;
 
-                // 2. If server transcode is unavailable or returned no data, try local transcode fallback.
+                // 2. Fall back to server-side transcode proxy if local tools unavailable.
                 if (string.IsNullOrEmpty(tcPath))
                 {
-                    tcPath = await TryLocalTranscodeAsync(item.Url, gen);
+                    tcPath = await DownloadTranscode(item.Url, gen);
                     if (gen != _generation) return;
                 }
 
                 if (tcPath == null)
                 {
                     OnScreenFailed(item.Url, "transcode failed",
-                        "server transcode endpoint returned no data or ffmpeg missing");
+                        "both local and server transcode failed or tools missing");
                     return;
                 }
                 foreach (var s in _screens) s.Play(item.Url, tcPath, "ogv", "theora");
@@ -251,9 +251,8 @@ public partial class VideoManager : Node
         {
             try
             {
-                string ytdlpPath = FindBinary("yt-dlp");
                 string ffmpegPath = FindBinary("ffmpeg");
-                if (string.IsNullOrEmpty(ytdlpPath) || string.IsNullOrEmpty(ffmpegPath)) return null;
+                if (string.IsNullOrEmpty(ffmpegPath)) return null;
 
                 DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
                 string absDir = ProjectSettings.GlobalizePath("user://video-cache");
@@ -269,6 +268,35 @@ public partial class VideoManager : Node
                 {
                     try { System.IO.File.Delete(absOgv); } catch { }
                 }
+
+                // If direct media url (.mp4, .webm, .mkv, .mov), ffmpeg can transcode directly
+                bool isDirect = url.Contains(".mp4", StringComparison.OrdinalIgnoreCase) ||
+                                url.Contains(".webm", StringComparison.OrdinalIgnoreCase) ||
+                                url.Contains(".mkv", StringComparison.OrdinalIgnoreCase) ||
+                                url.Contains(".mov", StringComparison.OrdinalIgnoreCase);
+
+                if (isDirect)
+                {
+                    var ffPsi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = ffmpegPath,
+                        Arguments = $"-y -i \"{url}\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -pix_fmt yuv420p -c:v libtheora -q:v 6 -c:a libvorbis -q:a 4 -shortest \"{absOgv}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    };
+                    using (var pFf = System.Diagnostics.Process.Start(ffPsi))
+                    {
+                        if (pFf == null) return null;
+                        if (!pFf.WaitForExit(120_000)) { pFf.Kill(); return null; }
+                        if (pFf.ExitCode == 0 && System.IO.File.Exists(absOgv) && new System.IO.FileInfo(absOgv).Length > 1024)
+                        {
+                            return gen == _generation ? "user://video-cache/current.ogv" : null;
+                        }
+                    }
+                }
+
+                string ytdlpPath = FindBinary("yt-dlp");
+                if (string.IsNullOrEmpty(ytdlpPath)) return null;
 
                 // Step 1: yt-dlp download up to 720p
                 var ytPsi = new System.Diagnostics.ProcessStartInfo
@@ -291,14 +319,14 @@ public partial class VideoManager : Node
                 string inputToFf = rawFiles[0];
 
                 // Step 2: ffmpeg transcode to Theora/Vorbis OGV
-                var ffPsi = new System.Diagnostics.ProcessStartInfo
+                var ffPsiStep2 = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = ffmpegPath,
-                    Arguments = $"-y -i \"{inputToFf}\" -c:v libtheora -q:v 5 -c:a libvorbis -q:a 3 -shortest \"{absOgv}\"",
+                    Arguments = $"-y -i \"{inputToFf}\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -pix_fmt yuv420p -c:v libtheora -q:v 6 -c:a libvorbis -q:a 4 -shortest \"{absOgv}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                 };
-                using (var pFf = System.Diagnostics.Process.Start(ffPsi))
+                using (var pFf = System.Diagnostics.Process.Start(ffPsiStep2))
                 {
                     if (pFf == null) return null;
                     if (!pFf.WaitForExit(120_000)) { pFf.Kill(); return null; }
@@ -319,16 +347,99 @@ public partial class VideoManager : Node
         });
     }
 
+    private static bool _binsExtracted;
+
+    /// Extract prepackaged binaries from res://bin/ to user://bin/ on first run.
+    /// In exported builds with embed_pck, res:// files are inside the pck and can't be
+    /// executed directly, so we copy them to the writable user:// directory.
+    private static void EnsureBundledBinsExtracted()
+    {
+        if (_binsExtracted) return;
+        _binsExtracted = true;
+        try
+        {
+            string userBin = ProjectSettings.GlobalizePath("user://bin");
+            System.IO.Directory.CreateDirectory(userBin);
+
+            bool isWindows = OS.GetName() == "Windows";
+            string[] names = isWindows
+                ? new[] { "ffmpeg.exe", "yt-dlp.exe" }
+                : new[] { "ffmpeg", "yt-dlp" };
+
+            foreach (var n in names)
+            {
+                string resPath = $"res://bin/{n}";
+                string userPath = System.IO.Path.Combine(userBin, n);
+                if (System.IO.File.Exists(userPath)) continue;
+                if (!FileAccess.FileExists(resPath)) continue;
+                // Read from res:// (works inside embedded pck) and write to user://
+                var bytes = FileAccess.GetFileAsBytes(resPath);
+                if (bytes == null || bytes.Length == 0) continue;
+                using var f = FileAccess.Open($"user://bin/{n}", FileAccess.ModeFlags.Write);
+                if (f != null) f.StoreBuffer(bytes);
+                // Make executable on Unix
+                if (!isWindows)
+                {
+                    try
+                    {
+                        var psi = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "chmod",
+                            Arguments = $"+x \"{userPath}\"",
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                        };
+                        System.Diagnostics.Process.Start(psi)?.WaitForExit(3000);
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] Bin extraction failed: {ex.Message}");
+        }
+    }
+
     private static string FindBinary(string name)
     {
+        EnsureBundledBinsExtracted();
+
+        bool isWindows = OS.GetName() == "Windows";
+        string exeName = isWindows ? name + ".exe" : name;
+
+        // 1. Prepackaged binaries extracted to user://bin/
+        string userBin = ProjectSettings.GlobalizePath("user://bin");
+        string bundled = System.IO.Path.Combine(userBin, exeName);
+        if (System.IO.File.Exists(bundled)) return bundled;
+
+        // 2. Next to the game executable (for non-embedded deployments)
+        try
+        {
+            string exeDir = System.IO.Path.GetDirectoryName(OS.GetExecutablePath());
+            if (!string.IsNullOrEmpty(exeDir))
+            {
+                string beside = System.IO.Path.Combine(exeDir, "bin", exeName);
+                if (System.IO.File.Exists(beside)) return beside;
+            }
+        }
+        catch { }
+
+        // 3. System PATH locations
         string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
-        string[] candidates = {
-            $"{home}/.local/bin/{name}",
-            $"/usr/local/bin/{name}",
-            $"/usr/bin/{name}",
-            $"{home}/bin/{name}",
-            name,
-        };
+        string[] candidates = isWindows
+            ? new[] {
+                System.IO.Path.Combine(home, ".local", "bin", exeName),
+                System.IO.Path.Combine(home, "bin", exeName),
+                exeName,
+            }
+            : new[] {
+                $"{home}/.local/bin/{name}",
+                "/usr/local/bin/" + name,
+                "/usr/bin/" + name,
+                $"{home}/bin/{name}",
+                name,
+            };
         foreach (var c in candidates)
         {
             try
@@ -337,7 +448,7 @@ public partial class VideoManager : Node
             }
             catch { }
         }
-        return name;
+        return exeName;
     }
 
     private static string Str(JsonElement e, string prop) =>

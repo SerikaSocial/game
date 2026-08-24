@@ -839,7 +839,21 @@ public partial class Main : Node3D
         catch (Exception e)
         {
             GD.PrintErr($"join failed: {e.Message}");
-            CallDeferred(nameof(ShowLoginError), FriendlyError(e));
+            CallDeferred(nameof(OnJoinFailed), FriendlyError(e));
+        }
+    }
+
+    private void OnJoinFailed(string message)
+    {
+        HideLoading();
+        if (_inWorld || _inHome || _api?.SessionToken != null)
+        {
+            EnterHome();
+            _inWorldHud?.Toast($"Couldn't join: {message}", 5);
+        }
+        else
+        {
+            ShowLoginError(message);
         }
     }
 
@@ -1279,31 +1293,18 @@ public partial class Main : Node3D
             _transport?.SendObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
     }
 
-    /// The relay rejected us, or a live session went silent. Two very different UX paths: a
-    /// pre-connect rejection is an error the player retries; a mid-session drop should not dump
-    /// them into a frozen world behind an error box — tear the world down and fall back to Home
-    /// with a toast, exactly as if they'd left. Fires on the game thread (from Poll).
+    /// The relay rejected us, or a live session went silent. Clean up remotes/transport,
+    /// drop back to Home instantly and show a toast. Fires on the game thread (from Poll).
     private void OnTransportRejected(string reason)
     {
         GD.PrintErr($"transport rejected/lost: {reason}");
-        bool wasInWorld = _inWorld;
         _inWorld = false;
         TeardownRemotes();
         _transport?.Disconnect();
         _transport = null;
 
-        if (wasInWorld)
-        {
-            // We had made it into the world, then lost it — recover to Home rather than erroring.
-            EnterHome();
-            _inWorldHud?.Toast($"Disconnected: {reason}", 5);
-        }
-        else
-        {
-            // Never got in — the connect attempt itself failed; let the player retry.
-            UI.InputMode.SetPlayable(false);
-            _hud?.ShowError($"Couldn't join the world: {reason}");
-        }
+        EnterHome();
+        _inWorldHud?.Toast($"Disconnected: {reason}", 5);
     }
 
     // ── Transport events (fire on the game thread from Poll) ─────────────────────────

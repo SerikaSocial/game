@@ -192,7 +192,11 @@ public sealed class ApiClient
             if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
                 System.IO.Directory.CreateDirectory(dir);
 
-            using var res = await _http.GetAsync(url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            if (SessionToken != null)
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+
+            using var res = await _http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
             if (!res.IsSuccessStatusCode) return false;
 
             await using var stream = await res.Content.ReadAsStreamAsync();

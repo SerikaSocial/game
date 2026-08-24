@@ -2,13 +2,16 @@
 .godot/
 *.translation
 
-# .NET
-bin/
+# .NET build output (but keep bundled video tools in bin/)
+bin/*
+!bin/ffmpeg
+!bin/yt-dlp
+!bin/ffmpeg.exe
+!bin/yt-dlp.exe
 obj/
 *.user
 
-# Export artifacts and presets (presets contain signing config)
-export_presets.cfg
+# Export artifacts
 build/
 
 # Secrets

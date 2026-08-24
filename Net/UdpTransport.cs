@@ -19,12 +19,11 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     private double _helloTimer;
     private double _pingTimer;
     private double _connectTimeout;
-    private const double ConnectTimeoutSeconds = 15.0;
+    private const double ConnectTimeoutSeconds = 8.0;
 
-    // After WELCOME, how long without any datagram before we call the session dead. Generous —
-    // well past several missed 2 s keepalives — so a brief hiccup doesn't eject anyone.
+    // After WELCOME, how long without any datagram before we call the session dead.
     private double _sinceRecv;
-    private const double SilenceTimeoutSeconds = 10.0;
+    private const double SilenceTimeoutSeconds = 4.0;
     private readonly byte[] _rx = new byte[2048];
 
     public event Action<uint, PeerInfo[]> Connected;
@@ -122,7 +121,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         {
             // Keepalive doubles as an RTT probe and keeps NAT mappings open.
             _pingTimer -= dt;
-            if (_pingTimer <= 0) { Send(RelayProtocol.Ping); _pingTimer = 2.0; }
+            if (_pingTimer <= 0) { Send(RelayProtocol.Ping); _pingTimer = 1.0; }
 
             // Liveness: the relay echoes our 2 s pings and streams peer poses, so a welcomed
             // session should never go quiet for long. If it does — relay crashed, tunnel
