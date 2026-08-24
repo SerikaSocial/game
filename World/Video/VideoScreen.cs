@@ -60,16 +60,16 @@ public partial class VideoScreen : Node, IInteractable
             Size = new Vector2I(1280, 720),
             TransparentBg = false,
             RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
+            RenderTargetClearMode = SubViewport.ClearMode.Always,
         };
         AddChild(_subViewport);
 
         _player = new VideoStreamPlayer
         {
             Name = "Player",
-            AnchorRight = 1.0f,
-            AnchorBottom = 1.0f,
-            OffsetRight = 0,
-            OffsetBottom = 0,
+            Position = Vector2.Zero,
+            Size = new Vector2(1280, 720),
+            CustomMinimumSize = new Vector2(1280, 720),
             Expand = true,
             Visible = true,
             Autoplay = false,
@@ -93,6 +93,19 @@ public partial class VideoScreen : Node, IInteractable
         };
 
         PaintIdle();
+    }
+
+    public override void _Process(double delta)
+    {
+        if (_player != null && _player.IsPlaying())
+        {
+            var vidTex = _player.GetVideoTexture();
+            if (vidTex != null && _screenMat != null && _screenMat.AlbedoTexture != vidTex)
+            {
+                _screenMat.AlbedoTexture = vidTex;
+                _screenMat.EmissionTexture = vidTex;
+            }
+        }
     }
 
     /// True if this container/codec is something the engine can actually decode right now.

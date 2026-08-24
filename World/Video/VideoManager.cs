@@ -256,37 +256,39 @@ public partial class VideoManager : Node
                 if (string.IsNullOrEmpty(ytdlpPath) || string.IsNullOrEmpty(ffmpegPath)) return null;
 
                 DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
+                string absDir = ProjectSettings.GlobalizePath("user://video-cache");
                 string absOgv = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
-                string absTemp = ProjectSettings.GlobalizePath("user://video-cache/temp_raw.mp4");
+                string absTempPattern = System.IO.Path.Combine(absDir, "temp_raw.%(ext)s");
 
-                if (System.IO.File.Exists(absTemp)) System.IO.File.Delete(absTemp);
-                if (System.IO.File.Exists(absOgv)) System.IO.File.Delete(absOgv);
+                // Clean up previous temp and ogv files
+                foreach (var f in System.IO.Directory.GetFiles(absDir, "temp_raw*"))
+                {
+                    try { System.IO.File.Delete(f); } catch { }
+                }
+                if (System.IO.File.Exists(absOgv))
+                {
+                    try { System.IO.File.Delete(absOgv); } catch { }
+                }
 
-                // Step 1: yt-dlp download up to 720p with forced mp4 merge
+                // Step 1: yt-dlp download up to 720p
                 var ytPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = ytdlpPath,
-                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" --merge-output-format mp4 -o \"{absTemp}\" \"{url}\"",
+                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" -o \"{absTempPattern}\" \"{url}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
                 };
                 using (var pYt = System.Diagnostics.Process.Start(ytPsi))
                 {
                     if (pYt == null) return null;
                     if (!pYt.WaitForExit(90_000)) { pYt.Kill(); return null; }
+                    if (pYt.ExitCode != 0) return null;
                 }
 
-                // Check for output file (handling possible container extensions)
-                string inputToFf = absTemp;
-                if (!System.IO.File.Exists(inputToFf))
-                {
-                    if (System.IO.File.Exists(absTemp + ".webm")) inputToFf = absTemp + ".webm";
-                    else if (System.IO.File.Exists(absTemp + ".mkv")) inputToFf = absTemp + ".mkv";
-                    else if (System.IO.File.Exists(absTemp + ".mp4")) inputToFf = absTemp + ".mp4";
-                    else return null;
-                }
+                // Locate downloaded raw media file
+                var rawFiles = System.IO.Directory.GetFiles(absDir, "temp_raw.*");
+                if (rawFiles.Length == 0) return null;
+                string inputToFf = rawFiles[0];
 
                 // Step 2: ffmpeg transcode to Theora/Vorbis OGV
                 var ffPsi = new System.Diagnostics.ProcessStartInfo
@@ -295,13 +297,11 @@ public partial class VideoManager : Node
                     Arguments = $"-y -i \"{inputToFf}\" -c:v libtheora -q:v 5 -c:a libvorbis -q:a 3 -shortest \"{absOgv}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
                 };
                 using (var pFf = System.Diagnostics.Process.Start(ffPsi))
                 {
                     if (pFf == null) return null;
-                    if (!pFf.WaitForExit(90_000)) { pFf.Kill(); return null; }
+                    if (!pFf.WaitForExit(120_000)) { pFf.Kill(); return null; }
                     if (pFf.ExitCode != 0 || !System.IO.File.Exists(absOgv)) return null;
                 }
 
@@ -311,7 +311,11 @@ public partial class VideoManager : Node
                     ? "user://video-cache/current.ogv"
                     : null;
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                GD.PrintErr($"[VideoManager] Local transcode error: {ex.Message}");
+                return null;
+            }
         });
     }
 
