@@ -16,6 +16,62 @@ public sealed class SkaMeta
     [JsonPropertyName("heightMeters")] public float HeightMeters { get; set; } = 1.7f;
     [JsonPropertyName("eyeHeightMeters")] public float EyeHeightMeters { get; set; } = 1.6f;
     [JsonPropertyName("humanoid")] public Dictionary<string, string> Humanoid { get; set; } = new();
+
+    // ── v2 extended fields (VRC avatar imports) ──
+
+    /// PhysBone spring bone chains. Each entry describes a bone root and its physics params.
+    [JsonPropertyName("physBones")]
+    public List<PhysBoneMeta> PhysBones { get; set; } = new();
+
+    /// PhysBone colliders — sphere/capsule shapes that interact with PhysBones.
+    [JsonPropertyName("physBoneColliders")]
+    public List<PhysBoneColliderMeta> PhysBoneColliders { get; set; } = new();
+
+    /// Avatar toggles — named on/off switches for mesh groups.
+    [JsonPropertyName("toggles")]
+    public List<ToggleMeta> Toggles { get; set; } = new();
+
+    /// Material names from the source (for shader mapping).
+    [JsonPropertyName("materials")]
+    public List<MaterialMeta> Materials { get; set; } = new();
+}
+
+public sealed class PhysBoneMeta
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("rootTransform")] public string RootTransform { get; set; } = "";
+    [JsonPropertyName("stiffness")] public float Stiffness { get; set; } = 0f;
+    [JsonPropertyName("gravity")] public float Gravity { get; set; } = 0f;
+    [JsonPropertyName("force")] public float Force { get; set; } = 0f;
+    [JsonPropertyName("pull")] public float Pull { get; set; } = 0f;
+    [JsonPropertyName("spring")] public float Spring { get; set; } = 0f;
+    [JsonPropertyName("damping")] public float Damping { get; set; } = 0f;
+    [JsonPropertyName("maxStretch")] public float MaxStretch { get; set; } = 0f;
+    [JsonPropertyName("isGrabbable")] public bool IsGrabbable { get; set; } = false;
+    [JsonPropertyName("isPosable")] public bool IsPosable { get; set; } = false;
+    [JsonPropertyName("allowCollision")] public bool AllowCollision { get; set; } = true;
+}
+
+public sealed class PhysBoneColliderMeta
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("rootTransform")] public string RootTransform { get; set; } = "";
+    [JsonPropertyName("radius")] public float Radius { get; set; } = 0f;
+    [JsonPropertyName("height")] public float Height { get; set; } = 0f;
+    [JsonPropertyName("shapeType")] public int ShapeType { get; set; } = 0;
+}
+
+public sealed class ToggleMeta
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("defaultOn")] public bool DefaultOn { get; set; } = true;
+    [JsonPropertyName("saved")] public bool Saved { get; set; } = false;
+}
+
+public sealed class MaterialMeta
+{
+    [JsonPropertyName("name")] public string Name { get; set; } = "";
+    [JsonPropertyName("shader")] public string Shader { get; set; } = "";
 }
 
 /// A loaded `.ska` container: the humanoid metadata plus the raw GLB payload bytes.
@@ -45,7 +101,7 @@ public sealed class SkaFile
 
         int off = 4;
         uint version = ReadU32(data, ref off);
-        if (version != 1)
+        if (version != 1 && version != 2)
             throw new FormatException($"unsupported .ska version {version}");
 
         uint metaLen = ReadU32(data, ref off);

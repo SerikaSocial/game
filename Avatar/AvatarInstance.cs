@@ -52,6 +52,8 @@ public sealed partial class AvatarInstance : Node3D
         if (inst.Skeleton != null) inst.ResolveHumanoid();
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
         inst.SetupAnimation();
+        inst.SetupPhysBones();
+        inst.SetupToggles();
 
         return inst;
     }
@@ -225,6 +227,58 @@ public sealed partial class AvatarInstance : Node3D
         Skeleton.SetBonePoseScale(head, visible ? Vector3.One : new Vector3(1e-3f, 1e-3f, 1e-3f));
     }
 
+    /// Returns the set of bones that are the head or descendants of the head.
+    public System.Collections.Generic.HashSet<int> GetHeadBoneSet()
+    {
+        var result = new System.Collections.Generic.HashSet<int>();
+        if (Skeleton == null) return result;
+        int head = BoneOf("head");
+        if (head < 0) return result;
+        result.Add(head);
+        // Collect all descendants of the head bone.
+        for (int i = 0; i < Skeleton.GetBoneCount(); i++)
+        {
+            int p = Skeleton.GetBoneParent(i);
+            while (p >= 0)
+            {
+                if (p == head) { result.Add(i); break; }
+                p = Skeleton.GetBoneParent(p);
+            }
+        }
+        return result;
+    }
+
+    /// Returns true if a MeshInstance3D is skinned primarily to the head bone hierarchy.
+    /// Used to separate head meshes (culled in first-person) from body meshes (visible).
+    public bool IsHeadMesh(MeshInstance3D mesh)
+    {
+        if (Skeleton == null) return false;
+        var headBones = GetHeadBoneSet();
+        if (headBones.Count == 0) return false;
+
+        // Check the mesh's skinning data — if the majority of bone weights reference head bones,
+        // it's a head mesh.
+        var skin = mesh.Skin;
+        if (skin == null)
+        {
+            // Non-skinned mesh: check if it's a child of a head-bone attachment.
+            // For glTF imports, non-skinned meshes are rare on avatars.
+            return false;
+        }
+
+        // Count bone weights referencing head bones vs total.
+        int headCount = 0, totalCount = 0;
+        for (int i = 0; i < skin.GetBindCount(); i++)
+        {
+            int boneIdx = skin.GetBindBone(i);
+            totalCount++;
+            if (headBones.Contains(boneIdx)) headCount++;
+        }
+
+        // If more than half the bound bones are head bones, classify as head mesh.
+        return totalCount > 0 && headCount * 2 >= totalCount;
+    }
+
     private static Skeleton3D FindSkeleton(Node node)
     {
         if (node is Skeleton3D s) return s;
@@ -302,6 +356,28 @@ public sealed partial class AvatarInstance : Node3D
     private float _idleTime;
     private float _walkPhase;
     private float _moveBlend; // 0 = idle, 1 = walking, >1 = sprinting
+    private SpringBoneSystem _springBones;
+    private AvatarToggleSystem _toggles;
+
+    /// Avatar toggle system — manages on/off state for mesh groups (VRC expression toggles).
+    public AvatarToggleSystem Toggles => _toggles;
+
+    /// Set up spring-bone physics from .ska v2 PhysBones metadata (VRC avatar imports).
+    /// No-op for v1 .ska files (PhysBones list is empty).
+    private void SetupPhysBones()
+    {
+        if (Skeleton == null || Meta?.PhysBones == null || Meta.PhysBones.Count == 0) return;
+        _springBones = new SpringBoneSystem { Name = "SpringBones" };
+        AddChild(_springBones);
+        _springBones.Setup(Skeleton, Meta.PhysBones, Meta.PhysBoneColliders);
+    }
+
+    /// Set up avatar toggles from .ska v2 metadata. No-op for v1 files.
+    private void SetupToggles()
+    {
+        if (Meta?.Toggles == null || Meta.Toggles.Count == 0) return;
+        _toggles = new AvatarToggleSystem(this);
+    }
 
     private void SetupAnimation()
     {

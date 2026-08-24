@@ -234,10 +234,10 @@ public static partial class Worlds
 
         // Bookshelf against the left wall (collidable). Books are decorative only.
         var shelfMat = Mat(new Color(0.26f, 0.17f, 0.10f), 0.7f);
-        root.AddChild(CollidableBox(new Vector3(0.4f, 2.4f, 1.8f), new Vector3(-w / 2 + 0.3f, 1.2f, -1.5f), shelfMat));
+        root.AddChild(CollidableBox(new Vector3(0.4f, 2.4f, 1.8f), new Vector3(-w / 2 + 0.3f, 1.2f, -0.8f), shelfMat));
         for (int i = 0; i < 4; i++)
         {
-            var books = Box(new Vector3(0.32f, 0.28f, 1.6f), new Vector3(-w / 2 + 0.32f, 0.5f + i * 0.55f, -1.5f),
+            var books = Box(new Vector3(0.32f, 0.28f, 1.6f), new Vector3(-w / 2 + 0.32f, 0.5f + i * 0.55f, -0.8f),
                 Mat(Color.FromHsv((i * 0.21f) % 1f, 0.4f, 0.55f)));
             root.AddChild(books);
         }

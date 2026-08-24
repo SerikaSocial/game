@@ -96,10 +96,6 @@ textures/vram_compression/import_etc2_astc=true
 
 [xr]
 
-; Auto-initialise is OFF so a desktop with no headset doesn't try (and loudly fail) to
-; load an OpenXR runtime on every launch. VR is initialised at runtime instead — only on
-; Android/Quest or when the client is launched with `--vr` — via VrPlayer.TryInitVr().
-openxr/enabled=false
 openxr/default_action_map="res://xr_actions.json"
 openxr/form_factor="head_mounted"
 openxr/reference_space="local"

@@ -151,9 +151,19 @@ public partial class VideoManager : Node
             var track = PickDecodableTrack(resolved);
             if (track == null)
             {
-                // Nothing the engine can decode — same failure path as a broken stream.
-                OnScreenFailed(item.Url, "no decodable track",
-                    "resolver returned only mp4/webm/HLS; engine has Theora only");
+                // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
+                // Fall back to the server-side transcode proxy, which pipes the stream through
+                // ffmpeg and delivers ogv/Theora that the engine CAN decode.
+                string tcPath = await DownloadTranscode(item.Url, gen);
+                if (gen != _generation) return;
+                if (tcPath == null)
+                {
+                    OnScreenFailed(item.Url, "transcode failed",
+                        "server transcode endpoint returned no data or ffmpeg missing");
+                    return;
+                }
+                foreach (var s in _screens) s.Play(item.Url, tcPath, "ogv", "theora");
+                Toast?.Invoke($"▶ {item.Title}", 3);
                 return;
             }
 
@@ -203,6 +213,21 @@ public partial class VideoManager : Node
             // are large; keeping a history would balloon user:// with no benefit.
             string abs = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
             bool ok = await _api.DownloadToAsync(url, abs);
+            return ok && gen == _generation ? "user://video-cache/current.ogv" : null;
+        }
+        catch { return null; }
+    }
+
+    /// Download a transcoded ogv stream from the server's /v1/video/transcode endpoint.
+    /// Used when no natively decodable track is available (e.g. YouTube mp4/webm).
+    private async Task<string> DownloadTranscode(string url, int gen)
+    {
+        try
+        {
+            DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
+            string abs = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
+            string tcUrl = $"{_api.BaseUrl}/v1/video/transcode?url={Uri.EscapeDataString(url)}";
+            bool ok = await _api.DownloadToAsync(tcUrl, abs);
             return ok && gen == _generation ? "user://video-cache/current.ogv" : null;
         }
         catch { return null; }

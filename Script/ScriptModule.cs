@@ -76,6 +76,10 @@ public sealed class ScriptModule
             ushort id = (ushort)(buf[p] | (buf[p + 1] << 8)); p += 2;
             if (!AllowedHostCalls.Contains(id))
                 throw new ScriptValidationException($"disallowed host call 0x{id:x}");
+            // Trust gate: reject calls that require a higher trust level than the user has.
+            int minTrust = HostCallTrust.MinTrust((HostCall)id);
+            if (minTrust > rank)
+                throw new ScriptValidationException($"host call 0x{id:x} requires trust level {minTrust}, user has {rank}");
             hostCalls.Add(id);
         }
 

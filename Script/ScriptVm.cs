@@ -128,6 +128,23 @@ public sealed class ScriptVm
             case HostCall.VarGet: Push(_locals[(int)args[0] & 0xFF]); break;
             case HostCall.VarSet: _locals[(int)args[0] & 0xFF] = args[1]; Push(0); break;
             case HostCall.NetEmit: _host.NetEmit((int)args[0], args.Length > 1 ? args[1] : 0); Push(0); break;
+
+            // Trust≥5: Shader params (args packed as nodeSlot, uniformName-as-int-id, values)
+            // The uniform name is passed as a string pool index; the bridge resolves it.
+            case HostCall.ShaderSetFloat: _host.ShaderSetFloat((int)args[0], StringPool.Get((int)args[1]), (float)args[2]); Push(0); break;
+            case HostCall.ShaderSetColor: _host.ShaderSetColor((int)args[0], StringPool.Get((int)args[1]), (float)args[2], (float)args[3], (float)args[4], (float)args[5]); Push(0); break;
+            case HostCall.ShaderSetVec4: _host.ShaderSetVec4((int)args[0], StringPool.Get((int)args[1]), (float)args[2], (float)args[3], (float)args[4], (float)args[5]); Push(0); break;
+
+            // Trust≥6: Particles and spatial audio
+            case HostCall.ParticleBurst: _host.ParticleBurst((int)args[0]); Push(0); break;
+            case HostCall.ParticleSetRate: _host.ParticleSetRate((int)args[0], (float)args[1]); Push(0); break;
+            case HostCall.SoundPlaySpatial: _host.SoundPlaySpatial((int)args[0], (float)args[1], (float)args[2], (float)args[3]); Push(0); break;
+
+            // Trust≥8: Advanced networking
+            case HostCall.NetEmitString: _host.NetEmitString((int)args[0], StringPool.Get((int)args[1])); Push(0); break;
+            case HostCall.NetSyncGet: Push(_host.NetSyncGet(StringPool.Get((int)args[0]))); break;
+            case HostCall.NetSyncSet: _host.NetSyncSet(StringPool.Get((int)args[0]), args[1]); Push(0); break;
+
             default: throw new ScriptKilledException($"host call 0x{id:x} reached VM but is not dispatchable");
         }
     }

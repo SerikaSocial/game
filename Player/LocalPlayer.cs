@@ -58,6 +58,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     private float _currentHeight = StandHeight;
     private float _currentCameraY = StandCameraY;
     private float _bobTimer;
+    private float _smoothedHeadY; // low-pass filtered head bone Y for first-person camera
 
     public override void _Ready()
     {
@@ -146,6 +147,12 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _nameTag.Position = new Vector3(0, avatar.Height + 0.3f, 0);
         _standEyeY = avatar.EyeHeight;
         if (!_isCrouching) _currentCameraY = _standEyeY;
+        _smoothedHeadY = _currentCameraY;
+        // Place avatar visuals on render layers: head meshes go on FpHeadLayer (culled in
+        // first-person), body meshes go on FpAvatarLayer (visible in all modes). This gives
+        // a VRChat-style first-person view where you can see your hands, torso, and legs
+        // but not the inside of your own head.
+        SetAvatarVisualLayers(avatar, FpAvatarLayer, FpHeadLayer);
         ApplyCameraMode();
     }
 
@@ -186,14 +193,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     {
         bool isFP = _cameraMode == CameraModeEnum.FirstPerson;
 
-        // The head stays visible in ALL modes now. It used to be collapsed to zero scale in
-        // first person to keep the skull interior out of the view — but that scale lives on the
-        // shared skeleton, so it also erased the head from the mirror's reflection and from the
-        // avatar's shadow. Instead the first-person camera is pushed forward past the eyes with
-        // a near clip (see FpEyeForward / FpNear in UpdateCameraOffset), so the inside of the
-        // head is behind the near plane and never drawn, while mirror and shadow see a whole
-        // avatar. Force it back on in case an older path collapsed it.
+        // The head bone scale is always reset to full — we use render layers, not bone scale,
+        // to hide the head in first person. This preserves the mirror reflection and shadow.
         _avatar?.SetHeadVisible(true);
+
+        // In first person: cull only the head layer (FpHeadLayer) so the player sees their
+        // hands, torso, and legs — VRChat-style. In third person: render everything.
+        _camera.CullMask = isFP ? 1048575u & ~FpHeadLayer : 1048575u;
 
         // Near clip: tight in first person so the forward-pushed camera doesn't clip the face;
         // default otherwise.
@@ -213,11 +219,20 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     }
 
     // First-person eye placement. The camera is pushed forward from the head bone toward where
-    // the eyes are, so it sits in front of the face — the skull interior falls behind the near
-    // plane and isn't drawn, without collapsing the head geometry (which would kill the mirror
-    // reflection and the shadow).
-    private const float FpEyeForward = 0.12f;
-    private const float FpNear = 0.06f;
+    // the eyes are, so it sits in front of the face. The avatar's body (hands, torso, legs) is
+    // visible in first-person — like VRChat — while the head is hidden via a separate render
+    // layer (FpHeadLayer). The mirror camera renders all layers, so the reflection shows the
+    // full avatar including the head.
+    private const float FpEyeForward = 0.10f;
+    private const float FpNear = 0.04f;
+
+    // Render layer for the local player's avatar body (hands, torso, legs). Visible in ALL modes
+    // including first-person, so the player can see their own body — VRChat-style.
+    private const uint FpAvatarLayer = 1u << 2; // visual layer 3
+
+    // Render layer for the local player's avatar head mesh only. Culled in first-person so the
+    // inside of the skull doesn't block the camera; visible in third-person and mirror.
+    private const uint FpHeadLayer = 1u << 3; // visual layer 4
 
     // Camera collision. The camera used to sit at a hard-coded offset behind the player, so it
     // happily sank into walls and through the floor whenever the player backed into something.
@@ -413,6 +428,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             // Crouched eye height scales with the avatar rather than using a fixed 0.8 m, which
             // sat above a short avatar's head and below a tall one's shoulders.
             _currentCameraY = _isCrouching ? _standEyeY * (CrouchHeight / StandHeight) : _standEyeY;
+            _smoothedHeadY = _currentCameraY;
             _capsuleShape.Height = _currentHeight;
             _collision.Position = new Vector3(0, _currentHeight * 0.5f, 0);
             if (_bodyMesh.Mesh is CapsuleMesh cm) cm.Height = _currentHeight;
@@ -430,11 +446,17 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // Eye height. In first person, follow the rig's actual head bone rather than a computed
         // constant: the crouch clip drops the pelvis by an amount only the animation knows, so a
         // fixed crouch height left the camera buried inside the avatar's own shoulders.
+        // A low-pass filter on the head Y smooths out rapid oscillations from run/walk cycles
+        // (which dipped the camera into the torso) while still tracking the slower crouch drop.
         float targetCamY = _currentCameraY;
         if (_firstPerson && _avatar != null && _avatar.TryGetHeadGlobal(out var headXf))
         {
             float localHeadY = ToLocal(headXf.Origin).Y;
-            if (localHeadY > 0.2f) targetCamY = localHeadY;
+            if (localHeadY > 0.2f)
+            {
+                _smoothedHeadY = Mathf.Lerp(_smoothedHeadY, localHeadY, (float)delta * 3f);
+                targetCamY = _smoothedHeadY;
+            }
         }
 
         var yawPos = _yaw.Position;
@@ -511,6 +533,23 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         float sign = _cameraMode == CameraModeEnum.ThirdPersonFront ? -1f : 1f;
         _camera.Position = new Vector3(0, targetY, _camDistance * sign);
+    }
+
+    /// Recursively assign render layers to avatar visuals: head meshes → headLayer (culled in
+    /// first-person), all other visuals → bodyLayer (visible in all modes).
+    private void SetAvatarVisualLayers(Node root, uint bodyLayer, uint headLayer)
+    {
+        if (root is MeshInstance3D mesh)
+        {
+            bool isHead = _avatar != null && _avatar.IsHeadMesh(mesh);
+            mesh.Layers = isHead ? headLayer : bodyLayer;
+        }
+        else if (root is VisualInstance3D vi)
+        {
+            vi.Layers = bodyLayer;
+        }
+        foreach (var child in root.GetChildren())
+            SetAvatarVisualLayers(child, bodyLayer, headLayer);
     }
 
     /// The transform we broadcast: body position, facing = yaw. Pitch stays local (head).

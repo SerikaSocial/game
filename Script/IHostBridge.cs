@@ -27,4 +27,28 @@ public interface IHostBridge
     /// Emit a message on the relay's rate-limited script channel. The bridge is responsible for
     /// applying the server-enforced rate budget; the VM never touches a socket.
     void NetEmit(int channel, double payload);
+
+    // ── Trust≥5: Custom shader parameters ──
+    /// Set a float shader uniform by name on a declared material node.
+    void ShaderSetFloat(int nodeSlot, string uniformName, float value);
+    /// Set a color (vec4) shader uniform by name.
+    void ShaderSetColor(int nodeSlot, string uniformName, float r, float g, float b, float a);
+    /// Set a vec4 shader uniform by name.
+    void ShaderSetVec4(int nodeSlot, string uniformName, float x, float y, float z, float w);
+
+    // ── Trust≥6: Particle effects and spatial audio ──
+    /// Trigger a one-shot particle burst on a declared particle node.
+    void ParticleBurst(int nodeSlot);
+    /// Set the emission rate of a declared particle node.
+    void ParticleSetRate(int nodeSlot, float rate);
+    /// Play a spatial sound at a world position.
+    void SoundPlaySpatial(int clipSlot, float x, float y, float z);
+
+    // ── Trust≥8: Advanced networking ──
+    /// Emit a structured network message with a string payload.
+    void NetEmitString(int channel, string payload);
+    /// Get a sync var from the relay. Returns 0 if not set.
+    double NetSyncGet(string key);
+    /// Set a sync var on the relay.
+    void NetSyncSet(string key, double value);
 }

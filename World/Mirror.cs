@@ -47,8 +47,11 @@ public partial class Mirror : Node3D
 
         // Offscreen render target — renders the SAME world (OwnWorld3D=false) so the mirror
         // camera sees the real scene: the player, the room, everything.
-        int texW = Mathf.Max(256, (int)(_size.X * 300));
+        // The viewport aspect ratio must match the main screen so the SCREEN_UV shader
+        // mapping produces a correct reflection. The height is based on the mirror size
+        // for resolution; the width follows the main screen's aspect ratio (updated per-frame).
         int texH = Mathf.Max(256, (int)(_size.Y * 300));
+        int texW = Mathf.Max(256, (int)(texH * 16f / 9f));
         _viewport = new SubViewport
         {
             Size = new Vector2I(texW, texH),
@@ -117,6 +120,19 @@ public partial class Mirror : Node3D
             if (w3d != null) _viewport.World3D = w3d;
         }
 
+        // Keep the SubViewport aspect ratio in sync with the main screen so the
+        // SCREEN_UV shader mapping stays correct across window resizes / orientation changes.
+        var mainRect = GetViewport().GetVisibleRect();
+        if (mainRect.Size.X > 0 && mainRect.Size.Y > 0)
+        {
+            float mainAspect = mainRect.Size.X / mainRect.Size.Y;
+            int wantH = Mathf.Max(256, (int)(_size.Y * 300));
+            int wantW = Mathf.Max(256, (int)(wantH * mainAspect));
+            var want = new Vector2I(wantW, wantH);
+            if (_viewport.Size != want)
+                _viewport.Size = want;
+        }
+
         // Skip the extra render when far away. The active range follows the device tier —
         // a mirror is a whole extra scene render, the first thing to pull in on a Quest.
         Vector3 planePos = _surface.GlobalPosition;
@@ -156,7 +172,13 @@ public partial class Mirror : Node3D
         // center position in the reflected camera's local space.
         Vector3 camToMirrorLocal = _mirrorCam.GlobalBasis.Inverse() * cameraToMirrorOffset;
         Vector2 frustumOffset = new Vector2(-camToMirrorLocal.X, -camToMirrorLocal.Y);
-        _mirrorCam.SetFrustum(_size.X * _frustumScale, frustumOffset, near, viewer.Far);
+
+        // Frustum size must match the main camera's FOV so the SCREEN_UV shader
+        // mapping is correct. Using the mirror's physical width made the frustum
+        // far too narrow, zooming the reflection in massively.
+        float fovRad = Mathf.DegToRad(viewer.Fov);
+        float frustumSize = 2.0f * near * Mathf.Tan(fovRad * 0.5f) * _frustumScale;
+        _mirrorCam.SetFrustum(frustumSize, frustumOffset, near, viewer.Far);
 
         _viewport.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
     }

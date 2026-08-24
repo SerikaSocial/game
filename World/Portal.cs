@@ -1,7 +1,23 @@
 using System;
+using System.Collections.Generic;
 using Godot;
+using SerikaSocial.Player;
 
 namespace SerikaSocial.World;
+
+/// How a portal routes the player when entered.
+public enum PortalMode
+{
+    /// Open the full world browser (default — the Home portal behaviour).
+    WorldPicker,
+    /// Jump directly to a specific world by ID. No picker UI.
+    DirectWorld,
+    /// Open the world browser but filtered to a curated list of world IDs.
+    CuratedList,
+    /// A user-spawned invite portal. Routes to a specific world+instance for the inviter.
+    /// World rules govern whether these are allowed to spawn (off by default).
+    Invite,
+}
 
 /// A walk-through portal: a glowing arch with a swirling surface. When the local player's body
 /// enters the trigger volume it raises `Entered` (once, with a short re-arm cooldown) so Main can
@@ -9,7 +25,19 @@ namespace SerikaSocial.World;
 /// travel is decided by the subscriber.
 public partial class Portal : Area3D
 {
-    public event Action Entered;
+    public event Action<Portal> Entered;
+
+    /// Routing mode for this portal.
+    public PortalMode Mode { get; set; } = PortalMode.WorldPicker;
+
+    /// Target world ID for DirectWorld and Invite modes.
+    public string TargetWorldId { get; set; } = "";
+
+    /// Curated list of world IDs for CuratedList mode.
+    public List<string> AllowedWorldIds { get; set; }
+
+    /// Display label shown above the arch.
+    public string Label { get; private set; } = "";
 
     private double _cooldown;
     private MeshInstance3D _surface;
@@ -17,12 +45,23 @@ public partial class Portal : Area3D
 
     public static Portal Create(string label, Color tint, Vector3 position, float yawDeg = 0)
     {
+        return Create(label, tint, position, yawDeg, PortalMode.WorldPicker, null, null);
+    }
+
+    public static Portal Create(string label, Color tint, Vector3 position, float yawDeg,
+        PortalMode mode, string targetWorldId = null, List<string> allowedWorlds = null)
+    {
         var p = new Portal
         {
             Name = $"Portal_{label}",
             Position = position,
             RotationDegrees = new Vector3(0, yawDeg, 0),
             Monitoring = true,
+            CollisionMask = PhysicsLayers.LocalPlayer,
+            Mode = mode,
+            TargetWorldId = targetWorldId ?? "",
+            AllowedWorldIds = allowedWorlds ?? new List<string>(),
+            Label = label,
         };
         p.Build(label, tint);
         return p;
@@ -98,7 +137,7 @@ public partial class Portal : Area3D
         if (body is not CharacterBody3D) return;
         if (_cooldown > 0) return;
         _cooldown = 2.0;
-        Entered?.Invoke();
+        Entered?.Invoke(this);
     }
 
     public override void _Process(double delta)

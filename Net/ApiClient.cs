@@ -15,6 +15,7 @@ public sealed class ApiClient
 {
     private readonly HttpClient _http = new();
     private readonly string _baseUrl;
+    public string BaseUrl => _baseUrl;
     public string SessionToken { get; private set; }
 
     public ApiClient(string baseUrl) => _baseUrl = baseUrl.TrimEnd('/');

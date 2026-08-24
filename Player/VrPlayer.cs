@@ -192,15 +192,27 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     /// only on Android/Quest or when launched with `--vr` — so no HMD means no OpenXR errors.
     public static bool TryInitVr()
     {
-        var tree = Engine.GetMainLoop() as SceneTree;
-        if (tree?.Root == null) return false;
+        try
+        {
+            var tree = Engine.GetMainLoop() as SceneTree;
+            if (tree?.Root == null) return false;
 
-        var iface = XRServer.FindInterface("OpenXR");
-        if (iface == null) return false;
-        if (!iface.IsInitialized() && !iface.Initialize()) return false;
+            var iface = XRServer.FindInterface("OpenXR");
+            if (iface == null) return false;
+            if (!iface.IsInitialized() && !iface.Initialize()) return false;
 
-        // Drive the main viewport through the headset.
-        tree.Root.UseXR = true;
-        return iface.IsInitialized();
+            // Only enable XR on the viewport if the interface is truly initialized —
+            // some Android runtimes report success from Initialize() but never actually
+            // set IsInitialized(), which would leave the viewport in a broken half-XR state.
+            if (!iface.IsInitialized()) return false;
+
+            // Drive the main viewport through the headset.
+            tree.Root.UseXR = true;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

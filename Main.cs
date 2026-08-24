@@ -331,7 +331,29 @@ public partial class Main : Node3D
     private void BuildHomeWorld()
     {
         SwapWorld(root => _homeInfo = Worlds.BuildHome(root));
-        _homeInfo.CommonsPortal.Entered += () => { if (_api != null) OpenWorldList(); };
+        _homeInfo.CommonsPortal.Entered += OnPortalEntered;
+    }
+
+    private void OnPortalEntered(Portal portal)
+    {
+        if (_api == null) return;
+        switch (portal.Mode)
+        {
+            case PortalMode.DirectWorld:
+                if (!string.IsNullOrEmpty(portal.TargetWorldId))
+                    _ = ShowWorldDetailFor(portal.TargetWorldId);
+                break;
+            case PortalMode.CuratedList:
+                OpenWorldList(portal.AllowedWorldIds);
+                break;
+            case PortalMode.Invite:
+                if (!string.IsNullOrEmpty(portal.TargetWorldId))
+                    _ = JoinWorldById(portal.TargetWorldId);
+                break;
+            default:
+                OpenWorldList(null);
+                break;
+        }
     }
 
     private void SpawnLocalPlayer()
@@ -354,7 +376,11 @@ public partial class Main : Node3D
         // Bring up VR only when it makes sense: on a Quest/Android build, or when a desktop
         // user explicitly asks with `--vr`. Otherwise OpenXR is never touched, so a normal
         // desktop launch produces no "failed to load runtime / no HMD" errors.
-        bool wantVr = OS.HasFeature("android")
+        // On touchscreen Android phones, skip VR — the OpenXR loader in the APK can partially
+        // initialise and leave the viewport in a broken state, which prevented the LocalPlayer
+        // and touch controls from working.
+        bool isTouchscreen = DisplayServer.IsTouchscreenAvailable();
+        bool wantVr = (OS.HasFeature("android") && !isTouchscreen)
             || System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
             || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
         _vrMode = wantVr && VrPlayer.TryInitVr();
@@ -792,11 +818,11 @@ public partial class Main : Node3D
 
     // ── Home world list (opened from the pause menu, not forced) ──────────────────────
 
-    private void OpenWorldList()
+    private void OpenWorldList(List<string> filterWorldIds = null)
     {
         _hud?.ShowWorldList(_username);
         UI.InputMode.Hold(UI.InputMode.WorldList);
-        _ = PopulateWorldList();
+        _ = PopulateWorldList(filterWorldIds);
     }
 
     private void CloseWorldList()
@@ -1038,7 +1064,7 @@ public partial class Main : Node3D
 
     private List<(string id, string name, string description, int capacity, string author, string downloadUrl)> _fetchedWorlds;
 
-    private async Task PopulateWorldList()
+    private async Task PopulateWorldList(List<string> filterWorldIds = null)
     {
         if (_api == null) return;
         try
@@ -1048,6 +1074,9 @@ public partial class Main : Node3D
             foreach (var w in worlds.EnumerateArray())
             {
                 string id = w.GetProperty("id").GetString();
+                // Apply curated filter: if a filter list is provided, skip worlds not in it.
+                if (filterWorldIds != null && !filterWorldIds.Contains(id))
+                    continue;
                 string name = w.GetProperty("name").GetString();
                 string desc = w.TryGetProperty("description", out var d) ? d.GetString() : "";
                 int cap = w.TryGetProperty("capacity", out var c) ? c.GetInt32() : 32;
