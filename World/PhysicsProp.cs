@@ -139,6 +139,26 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         }
     }
 
+    /// Grab straight to a world position. The desktop path routes through `Interact`, which
+    /// needs a `LocalPlayer` to derive a hold point from eye/aim; a VR hand already *is* the
+    /// hold point, so it needs a way in that doesn't fabricate a desktop player.
+    /// Returns false when someone else is already holding this prop.
+    public bool GrabAt(Vector3 handPos)
+    {
+        if (_held) return false;
+        _held = true;
+        _heldByLocal = true;
+        _holderPeerId = 0;
+        _returnTimer = 0;
+        Freeze = true;
+        _wasSleeping = Sleeping;
+        GlobalPosition = handPos;
+        return true;
+    }
+
+    /// True while we are the ones holding this prop — lets a VR hand confirm it still owns it.
+    public bool HeldByLocal => _heldByLocal;
+
     private void Grab(LocalPlayer player)
     {
         _held = true;

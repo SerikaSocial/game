@@ -129,6 +129,18 @@ public static class DeviceProfile
         public static bool ProfilePictures = true;
         public static bool StartThirdPerson = false;
 
+        // VR comfort. Defaults are the conservative end of each axis — snap turning and a
+        // movement vignette are what a first-time headset user tolerates; smooth turning with
+        // no vignette is the setting experienced players opt into.
+        public static bool VrSnapTurn = true;
+        public static float VrSnapTurnAngle = 30f;    // degrees per snap
+        public static float VrSmoothTurnSpeed = 120f; // degrees/sec when snap turn is off
+        public static bool VrVignette = true;
+        public static float VrVignetteStrength = 0.7f; // 0..1, how far the aperture closes
+        public static bool VrTeleport = false;         // teleport locomotion instead of smooth
+        public static bool VrHaptics = true;
+        public static float VrHeightOffset = 0f;       // manual calibration, metres
+
         private static bool _loading;
 
         public static void Load()
@@ -153,6 +165,15 @@ public static class DeviceProfile
             NameTags = (bool)cfg.GetValue("ui", "name_tags", NameTags);
             ProfilePictures = (bool)cfg.GetValue("ui", "pfp", ProfilePictures);
             StartThirdPerson = (bool)cfg.GetValue("controls", "third_person", StartThirdPerson);
+
+            VrSnapTurn = (bool)cfg.GetValue("vr", "snap_turn", VrSnapTurn);
+            VrSnapTurnAngle = (float)cfg.GetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
+            VrSmoothTurnSpeed = (float)cfg.GetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);
+            VrVignette = (bool)cfg.GetValue("vr", "vignette", VrVignette);
+            VrVignetteStrength = (float)cfg.GetValue("vr", "vignette_strength", VrVignetteStrength);
+            VrTeleport = (bool)cfg.GetValue("vr", "teleport", VrTeleport);
+            VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
+            VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
 
             try
             {
@@ -185,6 +206,14 @@ public static class DeviceProfile
             cfg.SetValue("audio", "input_device", InputDevice);
             cfg.SetValue("ui", "name_tags", NameTags);
             cfg.SetValue("ui", "pfp", ProfilePictures);
+            cfg.SetValue("vr", "snap_turn", VrSnapTurn);
+            cfg.SetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
+            cfg.SetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);
+            cfg.SetValue("vr", "vignette", VrVignette);
+            cfg.SetValue("vr", "vignette_strength", VrVignetteStrength);
+            cfg.SetValue("vr", "teleport", VrTeleport);
+            cfg.SetValue("vr", "haptics", VrHaptics);
+            cfg.SetValue("vr", "height_offset", VrHeightOffset);
             cfg.Save(Path);
         }
     }

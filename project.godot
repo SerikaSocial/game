@@ -11,12 +11,20 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.1.6"
+config/version="1.2.0"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
 boot_splash/stretch_mode=0
 boot_splash/image="res://Assets/splash.png"
+
+[autoload]
+
+; Dialogue Manager registers this singleton from its EditorPlugin (plugin.gd `_enter_tree`),
+; but EditorPlugins do not run in an exported build — so without this explicit entry the
+; `DialogueManager` singleton simply does not exist at runtime and every call into the C#
+; wrapper throws NullReferenceException. Keep this in sync with plugin.gd.
+DialogueManager="*res://addons/dialogue_manager/dialogue_manager.gd"
 
 [dialogue_manager]
 
@@ -96,7 +104,11 @@ textures/vram_compression/import_etc2_astc=true
 
 [xr]
 
-openxr/default_action_map="res://xr_actions.json"
+; No `openxr/default_action_map` here on purpose. That setting loads an *OpenXRActionMap
+; resource*; it used to point at `xr_actions.json`, which can never deserialise into one, so
+; OpenXR fell back to `create_default_action_sets()` every run. With the setting absent that
+; fallback is now the deliberate choice: Godot's built-in map covers Touch, Index and the
+; simple controller, and `VrPlayer` reads those built-in action names directly.
 openxr/form_factor="head_mounted"
 openxr/reference_space="local"
 openxr/submit_depth_buffer=true

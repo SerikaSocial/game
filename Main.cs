@@ -33,6 +33,7 @@ public partial class Main : Node3D
     private ISerikaTransport _transport;
     private IPlayer _local;
     private LocalPlayer _localDesktop; // non-null in desktop mode; drives FP/TP toggle
+    private VrPlayer _localVr;         // non-null in VR mode; the two are mutually exclusive
     private Node3D _localNode;
     private UI.InteractionPrompt _interactPrompt;
     private UI.VideoQueuePanel _videoQueuePanel;
@@ -101,6 +102,12 @@ public partial class Main : Node3D
         {
             AnimDiagnostic.Run(this, args.GetValueOrDefault("clip", "Walk"),
                 args.GetValueOrDefault("ska", null));
+            return;
+        }
+        if (args.ContainsKey("serika-worldtest"))
+        {
+            WorldDiagnostic.Run(this, _worldRoot, args.GetValueOrDefault("world", null),
+                args.GetValueOrDefault("ogv", null), args.GetValueOrDefault("shot", null));
             return;
         }
         if (args.ContainsKey("serika-smoke"))
@@ -180,8 +187,8 @@ public partial class Main : Node3D
         _actionMenu.HomePressed += EnterHome;
         _actionMenu.RespawnPressed += RespawnLocal;
         _actionMenu.CameraPressed += OpenCameraMenu;
-        _actionMenu.EmotePressed += e => _localDesktop?.PlayEmote(e);
-        _actionMenu.CustomEmotePressed += clip => _localDesktop?.PlayCustomEmote(clip);
+        _actionMenu.EmotePressed += e => { _localDesktop?.PlayEmote(e); _localVr?.PlayEmote(e); };
+        _actionMenu.CustomEmotePressed += clip => { _localDesktop?.PlayCustomEmote(clip); _localVr?.PlayCustomEmote(clip); };
         _actionMenu.Closed += OnPauseClosed;
 
         // VRChat-style Camera & Photo Viewfinder Menu
@@ -207,6 +214,7 @@ public partial class Main : Node3D
         UI.InputMode.ControlsSink = live =>
         {
             if (_localDesktop != null) _localDesktop.ControlsEnabled = live;
+            if (_localVr != null) _localVr.ControlsEnabled = live;
         };
 
         _interactPrompt = new UI.InteractionPrompt { Name = "InteractionPrompt" };
@@ -378,8 +386,13 @@ public partial class Main : Node3D
         AddChild(_videoManager);
         _videoManager.Configure(_api, _worldName);
         _videoManager.Toast += (msg, secs) => _inWorldHud?.Toast(msg, secs);
+        // Skip screens belonging to the world we just left. QueueFree is deferred to the end of
+        // the frame, so the outgoing world's nodes are still in the group when this runs;
+        // registering one meant the manager held a screen that was about to be freed, and the
+        // next queue action hit a disposed VideoStreamPlayer.
         foreach (var s in screens)
-            if (s is SerikaSocial.World.Video.VideoScreen vs) _videoManager.RegisterScreen(vs);
+            if (s is SerikaSocial.World.Video.VideoScreen vs && !vs.IsQueuedForDeletion())
+                _videoManager.RegisterScreen(vs);
         _videoQueuePanel?.Bind(_videoManager);
     }
 
@@ -422,6 +435,7 @@ public partial class Main : Node3D
             _localNode = null;
             _local = null;
             _localDesktop = null;
+            _localVr = null;
         }
 
         // The interactor holds a reference to the rig it drives, so it goes with it.
@@ -446,6 +460,14 @@ public partial class Main : Node3D
             AddChild(vr);
             _local = vr;
             _localNode = vr;
+            _localVr = vr;
+            // VR used to stay a capsule — no avatar, so remote peers saw a featureless blob and
+            // no bone pose was ever broadcast. It equips the same avatar the desktop rig does.
+            vr.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
+            _actionMenu?.SetCustomEmotes(vr.Avatar?.CustomEmotes);
+            // The headset has no Esc key, so the controller face buttons are the only way in.
+            vr.MenuPressed += () => { _quickMenu?.Open(_username); SyncMenuHold(); };
+            vr.ActionMenuPressed += () => { _actionMenu?.Open(); SyncMenuHold(); };
             GD.Print("VR mode: OpenXR initialized");
         }
         else
@@ -498,7 +520,7 @@ public partial class Main : Node3D
         onActionToggle: () =>
         {
             if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
-            else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; }
+            else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; if (_localVr != null) _localVr.ControlsEnabled = false; }
         });
     }
 
@@ -814,17 +836,34 @@ public partial class Main : Node3D
         _currentWorldId = worldId;
         try
         {
-            // Check if we have a downloadUrl for this world and download it if not cached.
+            // Resolve this world's downloadUrl and make sure the local copy matches it.
+            // The list is only populated once the world browser has been opened, so joining
+            // through a portal or a deep link used to skip the download entirely and leave
+            // WorldLoader to serve whatever stale bundle was already cached — which is how a
+            // republished world could stay invisible indefinitely. Fall back to the per-world
+            // endpoint so a join always knows the current version.
+            string downloadUrl = null;
             if (_fetchedWorlds != null)
+                downloadUrl = _fetchedWorlds.Find(w => w.id == worldId).downloadUrl;
+
+            if (downloadUrl == null)
             {
-                var match = _fetchedWorlds.Find(w => w.id == worldId);
-                if (match.downloadUrl != null)
+                try
                 {
-                    ShowLoading("Downloading world…");
-                    string localPath = await _api.DownloadWorldAsync(match.downloadUrl, worldId);
-                    if (localPath != null)
-                        GD.Print($"world cached at {localPath}");
+                    var detail = await _api.GetWorldDetailAsync(worldId);
+                    if (detail.TryGetProperty("downloadUrl", out var du) &&
+                        du.ValueKind == JsonValueKind.String)
+                        downloadUrl = du.GetString();
                 }
+                catch (Exception e) { GD.PrintErr($"world detail lookup failed: {e.Message}"); }
+            }
+
+            if (downloadUrl != null)
+            {
+                ShowLoading("Downloading world…");
+                string localPath = await _api.DownloadWorldAsync(downloadUrl, worldId);
+                if (localPath != null)
+                    GD.Print($"world ready at {localPath}");
             }
 
             ShowLoading("Joining world…");
@@ -922,6 +961,7 @@ public partial class Main : Node3D
         {
             n.GlobalPosition = _spawnPos;
             if (_localDesktop != null) _localDesktop.ResetMotion();
+            if (_localVr != null) _localVr.ResetMotion();
         }
         _inWorldHud?.Toast("Respawned", 2);
     }
@@ -984,6 +1024,7 @@ public partial class Main : Node3D
             _currentAvatarId = id;
             AvatarLibrary.CurrentDefaultPath = rel;
             _localDesktop?.SetAvatar(avatar);
+            _localVr?.SetAvatar(avatar);
             _actionMenu?.SetCustomEmotes(avatar?.CustomEmotes);
 
             // Persist so it's worn on the next join and by remotes after they resync.
@@ -1058,10 +1099,16 @@ public partial class Main : Node3D
     /// chip hidden.
     private async Task ApplyLocalIdentity()
     {
-        _localDesktop?.SetTagPrefs(UI.DeviceProfile.Settings.NameTags, UI.DeviceProfile.Settings.ProfilePictures);
-        if (_api == null || string.IsNullOrEmpty(_localPfpUrl) || _localDesktop == null) return;
+        bool tags = UI.DeviceProfile.Settings.NameTags;
+        bool pfp = UI.DeviceProfile.Settings.ProfilePictures;
+        _localDesktop?.SetTagPrefs(tags, pfp);
+        _localVr?.SetTagPrefs(tags, pfp);
+        if (_api == null || string.IsNullOrEmpty(_localPfpUrl)) return;
+        if (_localDesktop == null && _localVr == null) return;
         var bytes = await _api.GetImageBytesAsync(_localPfpUrl);
-        if (bytes != null) _localDesktop.SetProfilePicture(bytes);
+        if (bytes == null) return;
+        _localDesktop?.SetProfilePicture(bytes);
+        _localVr?.SetProfilePicture(bytes);
     }
 
     /// Resolve and apply a peer's profile picture from their account id.
@@ -1546,6 +1593,7 @@ public partial class Main : Node3D
         bool tags = UI.DeviceProfile.Settings.NameTags;
         bool pfp = UI.DeviceProfile.Settings.ProfilePictures;
         _localDesktop?.SetTagPrefs(tags, pfp);
+        _localVr?.SetTagPrefs(tags, pfp);
         foreach (var r in _remotes.Values) r.SetTagPrefs(tags, pfp);
     }
 
@@ -1677,7 +1725,8 @@ public partial class Main : Node3D
             {
                 _poseTimer = 0;
                 _transport.SendPose(AvatarPose.FromTransform(
-                    _local.PoseTransform(), _poseSeq++, _localDesktop?.Avatar));
+                    _local.PoseTransform(), _poseSeq++,
+                    _localDesktop?.Avatar ?? _localVr?.Avatar));
             }
         }
 

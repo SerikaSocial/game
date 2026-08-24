@@ -71,20 +71,44 @@ public static class DeepLink
 
     /// Register this binary as the serikasocial:// handler for the current user. Best-effort,
     /// idempotent, and silent on failure. Called once at startup.
+    ///
+    /// Runs on a background thread. `OS.Execute` is *blocking* — it waits for the child to
+    /// exit — and the Windows path spawns three `reg.exe` processes. Process creation on
+    /// Windows is far more expensive than on Linux (made worse by on-access AV scanning), so
+    /// doing this inline in `_Ready` stalled the main thread before the first frame and the
+    /// window came up as "Not Responding". None of this work touches the scene tree, so it
+    /// is safe off-thread; the only Godot call that wants the main thread is
+    /// `OS.GetExecutablePath`, which we read here and capture.
     public static void RegisterHandler()
     {
+        string exe;
+        bool isWindows, isLinux;
         try
         {
-            string exe = OS.GetExecutablePath();
-            if (OS.HasFeature("windows")) RegisterWindows(exe);
-            else if (OS.HasFeature("linux")) RegisterLinux(exe);
-            // macOS registration is declared in the .app Info.plist (CFBundleURLTypes) at
-            // export time rather than at runtime.
+            exe = OS.GetExecutablePath();
+            isWindows = OS.HasFeature("windows");
+            isLinux = OS.HasFeature("linux");
         }
         catch (Exception e)
         {
             GD.Print($"deep-link registration skipped: {e.Message}");
+            return;
         }
+
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                if (isWindows) RegisterWindows(exe);
+                else if (isLinux) RegisterLinux(exe);
+                // macOS registration is declared in the .app Info.plist (CFBundleURLTypes) at
+                // export time rather than at runtime.
+            }
+            catch (Exception e)
+            {
+                GD.Print($"deep-link registration skipped: {e.Message}");
+            }
+        });
     }
 
     private static void RegisterWindows(string exe)

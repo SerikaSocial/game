@@ -63,6 +63,11 @@ public static class WorldLoader
         return null;
     }
 
+    /// Load a specific world file by absolute path, bypassing the cache and dev-folder search.
+    /// Used by the world diagnostic to inspect one exact bundle.
+    public static Vector3? LoadFromPath(string path, string worldId, Node3D root) =>
+        LoadFromFile(path, worldId, root);
+
     private static Vector3? LoadFromFile(string path, string worldId, Node3D root)
     {
         string ext = Path.GetExtension(path).ToLowerInvariant();

@@ -23,6 +23,17 @@ public partial class VideoScreen : Node, IInteractable
     private StandardMaterial3D _screenMat;
     private ImageTexture _thumbTex;
 
+    // Segment playlist. A transcoded clip arrives as a sequence of short .ogv files rather
+    // than one big one, so playback can start on segment 0 while ffmpeg is still encoding the
+    // rest. `_segIndex` is the segment currently in the player; -1 means nothing started.
+    private readonly System.Collections.Generic.List<string> _segments = new();
+    private int _segIndex = -1;
+    private bool _playlistComplete;
+    private string _playlistUrl;
+    /// True when we ran out of segments but the encoder is still producing them — the clip is
+    /// not over, we are just waiting. Resumed by the next AppendSegment.
+    private bool _starved;
+
     /// Raised when playback fails or the format can't be decoded. (url, humanReason, logDetail).
     public event Action<string, string, string> Failed;
     /// Raised when the current clip plays to its end, so the manager can advance.
@@ -55,13 +66,19 @@ public partial class VideoScreen : Node, IInteractable
 
         // VideoStreamPlayer decodes video and exposes frames via GetVideoTexture().
         // It must live inside a viewport to process — a SubViewport keeps it off-screen.
+        //
+        // Update mode starts Disabled and is only flipped to Always while a clip is actually
+        // playing. Leaving it on Always costs a full re-render of this target every frame for
+        // the entire life of the world, even though a screen is idle almost all of the time.
+        // Size matches the 720p transcode cap: a 1080p target upscaling 720p source is pure
+        // fill-rate waste, and this is a texture on a wall, not the player's viewport.
         _subViewport = new SubViewport
         {
             Name = "VideoViewport",
-            Size = new Vector2I(1920, 1080),
+            Size = new Vector2I(1280, 720),
             TransparentBg = false,
-            RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
-            RenderTargetClearMode = SubViewport.ClearMode.Always,
+            RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled,
+            RenderTargetClearMode = SubViewport.ClearMode.Once,
         };
         AddChild(_subViewport);
 
@@ -75,16 +92,21 @@ public partial class VideoScreen : Node, IInteractable
             Bus = SerikaSocial.World.CinemaSpeakers.Bus,
         };
         _subViewport.AddChild(_player);
-        _player.Finished += () => Finished?.Invoke();
+        _player.Finished += OnPlayerFinished;
 
         // Pre-create the screen material; the video texture is plugged in during _Process
         // once the decoder starts producing frames.
+        //
+        // Unshaded, and albedo only. The previous version bound the frame to *both*
+        // AlbedoTexture and EmissionTexture with the default additive emission operator, so
+        // the lit albedo and the emission were summed: any frame brighter than about 0.5
+        // exceeded 1.0 and clipped to flat white. A title card at 0.85 came out as a blank
+        // white rectangle while the audio played fine. A screen should show exactly the
+        // decoded image and not be relit by the room, which is what Unshaded gives.
         _screenMat = new StandardMaterial3D
         {
-            EmissionEnabled = true,
-            Emission = new Color(1, 1, 1),
-            EmissionEnergyMultiplier = 1.0f,
-            Roughness = 0.95f,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
 
@@ -93,13 +115,13 @@ public partial class VideoScreen : Node, IInteractable
 
     public override void _Process(double delta)
     {
-        if (_player == null || !_player.IsPlaying()) return;
+        if (!Alive || !_player.IsPlaying()) return;
         var vidTex = _player.GetVideoTexture();
         if (vidTex == null) return;
         if (_screenMat.AlbedoTexture != vidTex)
         {
+            // Albedo only — see the material setup in _Ready for why emission is not bound.
             _screenMat.AlbedoTexture = vidTex;
-            _screenMat.EmissionTexture = vidTex;
             if (_mesh != null && _mesh.MaterialOverride != _screenMat)
             {
                 _mesh.MaterialOverride = _screenMat;
@@ -119,11 +141,11 @@ public partial class VideoScreen : Node, IInteractable
     /// a still is a better idle state than a void.
     public void ShowThumbnail(byte[] jpg)
     {
-        if (jpg == null || jpg.Length < 4 || (_player != null && _player.IsPlaying())) return;
+        if (!Alive || jpg == null || jpg.Length < 4 || _player.IsPlaying()) return;
         var img = LoadImageSafely(jpg);
         if (img == null) return;
         _thumbTex = ImageTexture.CreateFromImage(img);
-        if (_player == null || !_player.IsPlaying())
+        if (!_player.IsPlaying())
         {
             PaintIdle();
         }
@@ -166,6 +188,85 @@ public partial class VideoScreen : Node, IInteractable
             return;
         }
 
+        // A single self-contained file is just a one-entry playlist that is already closed.
+        BeginPlaylist(url);
+        _playlistComplete = true;
+        AppendSegment(localPath);
+    }
+
+    /// Begin a segmented clip. Segments are fed in afterwards by `AppendSegment` as the encoder
+    /// produces them, and `CompletePlaylist` closes the sequence. Playback starts on the first
+    /// appended segment, so the wait before the first frame is one segment's encode, not the
+    /// whole clip's.
+    /// True while this screen's nodes are alive. `_player` is a Godot object: once the screen
+    /// is freed the managed wrapper survives but the native side is gone, so a plain null check
+    /// is not enough — calling through it throws ObjectDisposedException.
+    private bool Alive =>
+        GodotObject.IsInstanceValid(this) && !IsQueuedForDeletion() &&
+        GodotObject.IsInstanceValid(_player);
+
+    /// Index of the segment currently in the player, or -1 before playback starts. The manager
+    /// uses this to measure how far the encoder is ahead of playback and throttle accordingly.
+    public int PlayingSegment => _segIndex;
+
+    public void BeginPlaylist(string url)
+    {
+        if (!Alive) return;
+        _segments.Clear();
+        _segIndex = -1;
+        _playlistComplete = false;
+        _starved = false;
+        _playlistUrl = url;
+        _player.Stop();
+    }
+
+    /// Hand the screen the next ready segment. Starts playback if this is the first one, or
+    /// resumes it if the encoder had fallen behind the player.
+    public void AppendSegment(string path)
+    {
+        if (!Alive || string.IsNullOrEmpty(path)) return;
+        _segments.Add(path);
+        // Either we have not started yet, or we ran dry waiting for this.
+        if (_segIndex < 0 || _starved) PlayNextSegment();
+    }
+
+    /// No more segments are coming. If the player already drained the list, the clip is over.
+    public void CompletePlaylist()
+    {
+        if (!Alive) return;
+        _playlistComplete = true;
+        if (_starved) { _starved = false; Finished?.Invoke(); }
+    }
+
+    private void OnPlayerFinished()
+    {
+        if (_segIndex >= 0 && _segIndex + 1 < _segments.Count) { PlayNextSegment(); return; }
+        // Drained. Either the clip really ended, or the encoder has not caught up yet.
+        if (_playlistComplete)
+        {
+            SetRendering(false);
+            Finished?.Invoke();
+        }
+        else
+        {
+            // Hold the last frame rather than flashing idle — this is a stall, not an end.
+            _starved = true;
+        }
+    }
+
+    private void PlayNextSegment()
+    {
+        _starved = false;
+        _segIndex++;
+        if (_segIndex >= _segments.Count) { _segIndex--; _starved = true; return; }
+        PlayFile(_playlistUrl, _segments[_segIndex]);
+    }
+
+    /// Load one concrete .ogv file into the player. Shared by the playlist path and by direct
+    /// single-file playback of an already-Theora source.
+    private void PlayFile(string url, string localPath)
+    {
+        if (!Alive) return;
         try
         {
             string path = localPath;
@@ -175,7 +276,7 @@ public partial class VideoScreen : Node, IInteractable
                 if (System.IO.File.Exists(global)) path = global;
                 else
                 {
-                    Failed?.Invoke(url, "file missing", $"Downloaded file not found: {localPath}");
+                    Failed?.Invoke(url, "file missing", $"Segment not found: {localPath}");
                     return;
                 }
             }
@@ -191,10 +292,8 @@ public partial class VideoScreen : Node, IInteractable
                 return;
             }
 
-            if (_mesh != null)
-            {
-                _mesh.MaterialOverride = _screenMat;
-            }
+            SetRendering(true);
+            if (_mesh != null) _mesh.MaterialOverride = _screenMat;
         }
         catch (Exception e)
         {
@@ -202,9 +301,24 @@ public partial class VideoScreen : Node, IInteractable
         }
     }
 
+    /// Only spend GPU time on the offscreen target while frames are actually being produced.
+    private void SetRendering(bool on)
+    {
+        if (_subViewport == null) return;
+        _subViewport.RenderTargetUpdateMode = on
+            ? SubViewport.UpdateMode.Always
+            : SubViewport.UpdateMode.Disabled;
+    }
+
     public void Stop()
     {
-        _player?.Stop();
+        if (!Alive) return;
+        _player.Stop();
+        _segments.Clear();
+        _segIndex = -1;
+        _playlistComplete = false;
+        _starved = false;
+        SetRendering(false);
         PaintIdle();
     }
 
@@ -213,24 +327,41 @@ public partial class VideoScreen : Node, IInteractable
         if (_mesh == null) return;
         if (_thumbTex != null)
         {
+            // Dimmed a little so a still reads as "paused/idle" rather than live playback,
+            // but unshaded like the video itself so it cannot blow out to white.
             _mesh.MaterialOverride = new StandardMaterial3D
             {
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
                 AlbedoTexture = _thumbTex,
-                EmissionEnabled = true,
-                EmissionTexture = _thumbTex,
-                Emission = new Color(1, 1, 1),
-                EmissionEnergyMultiplier = 1.0f,
-                Roughness = 0.95f,
+                AlbedoColor = new Color(0.65f, 0.65f, 0.70f),
+                TextureFilter = BaseMaterial3D.TextureFilterEnum.Linear,
                 CullMode = BaseMaterial3D.CullModeEnum.Disabled,
             };
             return;
         }
         _mesh.MaterialOverride = new StandardMaterial3D
         {
-            AlbedoColor = new Color(0.02f, 0.02f, 0.03f),
+            AlbedoColor = new Color(0.03f, 0.025f, 0.05f),
             EmissionEnabled = true,
-            Emission = new Color(0.05f, 0.05f, 0.08f),
+            Emission = new Color(0.06f, 0.05f, 0.10f),
             Roughness = 0.95f,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
+    }
+
+    /// Idle state used while a clip is being fetched or transcoded, so the room can tell the
+    /// difference between "nothing queued" and "your video is coming". Without this the screen
+    /// looks identical during the transcode wait as it does when idle, which reads as broken.
+    public void ShowPreparing()
+    {
+        if (!Alive || _mesh == null || _thumbTex != null) return;
+        _mesh.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.10f, 0.07f, 0.18f),
+            EmissionEnabled = true,
+            Emission = new Color(0.22f, 0.16f, 0.42f),
+            EmissionEnergyMultiplier = 1.2f,
+            Roughness = 0.9f,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
         };
     }

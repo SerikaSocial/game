@@ -71,17 +71,90 @@ public sealed class ApiClient
         await GetAsync($"/v1/worlds/{worldId}");
     /// Download a world file (.skw) to a local path under user://, returning the absolute path.
     /// Returns null on failure.
+    /// Download a world bundle, reusing the cached copy only when it came from the same URL.
+    ///
+    /// World download URLs are content-addressed (the sha256 is in the path), so the URL
+    /// changing *is* the world changing. The cache used to be keyed on `worldId` alone with no
+    /// version recorded, which meant a stale bundle could win forever: republishing a world
+    /// never reached anyone who had already visited it. Recording the source URL alongside the
+    /// file makes a rejoin cheap and an update actually land.
     public async Task<string> DownloadWorldAsync(string url, string worldId)
     {
         try
         {
             DirAccess.MakeDirRecursiveAbsolute("user://worlds");
             string abs = ProjectSettings.GlobalizePath($"user://worlds/{worldId}.serikaworld");
+            string src = ProjectSettings.GlobalizePath($"user://worlds/{worldId}.src");
+
+            PurgeLegacyWorldCache();
+
+            if (System.IO.File.Exists(abs))
+            {
+                string cachedUrl = null;
+                if (System.IO.File.Exists(src))
+                    try { cachedUrl = (await System.IO.File.ReadAllTextAsync(src)).Trim(); } catch { }
+
+                if (cachedUrl == url)
+                {
+                    GD.Print($"world {worldId}: cache hit (unchanged)");
+                    return abs;
+                }
+
+                // Delete rather than overwrite. A failed or partial download over the top of a
+                // stale bundle leaves a file that looks valid and loads the wrong world; with
+                // it gone, a failure is a visible failure.
+                GD.Print($"world {worldId}: cached copy is stale, purging and re-downloading");
+                try { System.IO.File.Delete(abs); } catch { }
+                try { if (System.IO.File.Exists(src)) System.IO.File.Delete(src); } catch { }
+            }
+
             if (await DownloadToAsync(url, abs))
+            {
+                try { await System.IO.File.WriteAllTextAsync(src, url); }
+                catch { /* the bundle is what matters; a missing sidecar just re-downloads */ }
                 return abs;
+            }
+
+            // Download failed. An existing cached bundle is better than nothing, but it may be
+            // the wrong version, so say so rather than letting it look like a success.
+            if (System.IO.File.Exists(abs))
+            {
+                GD.PrintErr($"world {worldId}: download failed, falling back to cached copy " +
+                            "(may be out of date)");
+                return abs;
+            }
         }
         catch (Exception e) { GD.PrintErr($"world download failed: {e.Message}"); }
         return null;
+    }
+
+    private static bool _legacyCachePurged;
+
+    /// One-time sweep of world bundles cached before versions were tracked.
+    ///
+    /// Those entries have no `.src` sidecar, so their version is unknowable — and an unknown
+    /// version is exactly the case that shipped stale worlds to players for weeks. Deleting
+    /// them costs one re-download each and guarantees everyone converges on the current build.
+    private static void PurgeLegacyWorldCache()
+    {
+        if (_legacyCachePurged) return;
+        _legacyCachePurged = true;
+        try
+        {
+            string dir = ProjectSettings.GlobalizePath("user://worlds");
+            if (!System.IO.Directory.Exists(dir)) return;
+            int purged = 0;
+            foreach (var f in System.IO.Directory.GetFiles(dir, "*.serikaworld"))
+            {
+                string sidecar = System.IO.Path.ChangeExtension(f, ".src");
+                if (System.IO.File.Exists(sidecar)) continue;
+                try { System.IO.File.Delete(f); purged++; } catch { }
+            }
+            if (purged > 0)
+                GD.Print($"world cache: purged {purged} unversioned bundle(s) from before " +
+                         "version tracking; they will be re-downloaded");
+        }
+        catch (Exception e) { GD.PrintErr($"world cache purge failed: {e.Message}"); }
     }
 
     /// Fetch the WebRTC ICE server list (STUN + TURN) for a P2P instance. Authed, since TURN

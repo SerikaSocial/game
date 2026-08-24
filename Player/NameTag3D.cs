@@ -279,6 +279,10 @@ public partial class NameTag3D : Node3D
 		else
 		{
 			src = (Image)src.Duplicate();
+			// BlitRect requires both images to share a format. A decoded PNG/JPG is commonly
+			// Rgb8 or L8, so converting *after* the blit (as this used to) throws
+			// "format != p_src->format" and loses every profile picture. Convert first.
+			src.Convert(Image.Format.Rgba8);
 			int side = Mathf.Min(src.GetWidth(), src.GetHeight());
 			if (side > 0)
 			{
@@ -295,6 +299,7 @@ public partial class NameTag3D : Node3D
 		float radius = center - 1.5f;
 		float ringInner = radius - 3.5f;
 
+		// Cheap no-op when already Rgba8; still needed for the CreateDefaultAvatarImage path.
 		src.Convert(Image.Format.Rgba8);
 
 		for (int y = 0; y < size; y++)

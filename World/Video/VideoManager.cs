@@ -52,9 +52,17 @@ public partial class VideoManager : Node
         _worldName = string.IsNullOrEmpty(worldName) ? "world" : worldName;
     }
 
+    /// Drop screens whose nodes have gone away. A world switch frees the old world's screens,
+    /// and any of the deferred callbacks below can land after that has happened — touching a
+    /// freed screen throws ObjectDisposedException from deep inside an async path, where it
+    /// surfaces as a bogus "resolve failed" against the user's URL.
+    private void PruneScreens() =>
+        _screens.RemoveAll(s => !GodotObject.IsInstanceValid(s) || s.IsQueuedForDeletion());
+
     public void RegisterScreen(VideoScreen screen)
     {
         if (screen == null) return;
+        PruneScreens();
         _screens.Add(screen);
         screen.Failed += OnScreenFailed;
         // Only the first screen drives "finished" — otherwise N screens fire N advances.
@@ -75,6 +83,8 @@ public partial class VideoManager : Node
     public void Skip()
     {
         _generation++;
+        KillTranscode();
+        PruneScreens();
         foreach (var s in _screens) s.Stop();
         NowPlaying = null;
         _ = Advance();
@@ -90,7 +100,9 @@ public partial class VideoManager : Node
     public void Clear()
     {
         _generation++;
+        KillTranscode();
         _queue.Clear();
+        PruneScreens();
         foreach (var s in _screens) s.Stop();
         NowPlaying = null;
         QueueChanged?.Invoke();
@@ -152,16 +164,17 @@ public partial class VideoManager : Node
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
-                // 1. Try local transcode first (prepackaged ffmpeg/yt-dlp) — faster, no server load.
-                string tcPath = await TryLocalTranscodeAsync(item.Url, gen);
+                // 1. Local segmented transcode — ffmpeg reads the CDN directly and writes short
+                //    .ogv segments, so the first frame appears after one segment encodes rather
+                //    than after the whole clip. This returns as soon as playback has *started*.
+                if (await TryLocalTranscodeAsync(item, gen)) return;
                 if (gen != _generation) return;
 
-                // 2. Fall back to server-side transcode proxy if local tools unavailable.
-                if (string.IsNullOrEmpty(tcPath))
-                {
-                    tcPath = await DownloadTranscode(item.Url, gen);
-                    if (gen != _generation) return;
-                }
+                // 2. Fall back to the server-side transcode proxy if local tools are unavailable.
+                //    This one is still whole-file, so warn that it will take a while.
+                Toast?.Invoke("Transcoding on the server, this may take a minute…", 4);
+                string tcPath = await DownloadTranscode(item.Url, gen);
+                if (gen != _generation) return;
 
                 if (tcPath == null)
                 {
@@ -192,6 +205,12 @@ public partial class VideoManager : Node
         finally
         {
             _busy = false;
+            // A Skip/Clear/Enqueue that arrived while we were busy could not start, because
+            // Advance early-returns on `_busy` and nothing re-triggered it — that was the
+            // "queue stalls after you skip a still-loading video" bug. Now that we're free,
+            // pick up any queued work.
+            if (_queue.Count > 0 && NowPlaying == null)
+                _ = Advance();
         }
     }
 
@@ -244,118 +263,336 @@ public partial class VideoManager : Node
         return null;
     }
 
-    /// Run a local client-side transcode fallback using yt-dlp + ffmpeg if available on desktop.
-    private async Task<string> TryLocalTranscodeAsync(string url, int gen)
+    /// How long each transcoded chunk is. This is the dominant term in time-to-first-frame, so
+    /// it is deliberately short — long enough that the per-segment encoder startup cost stays
+    /// amortised, short enough that the screen lights up almost immediately.
+    private const int SegmentSeconds = 6;
+    /// Vertical cap for the transcode. Theora is a slow, single-threaded, dated encoder and this
+    /// is a texture on a wall viewed from across a room — 480p roughly halves the encode cost
+    /// versus 720p for detail nobody can see from a seat. Measured ~2.6x realtime at 480p vs
+    /// ~1.1x at 720p on this box, i.e. the difference between "builds a buffer" and "can't keep
+    /// up".
+    private const int MaxHeight = 480;
+    /// How many encoding threads ffmpeg may use. Capped so the encoder cannot claim every core
+    /// and starve the game's render thread — the single most common cause of the "video makes
+    /// the game lag" reports.
+    private const int EncodeThreads = 2;
+    /// Flow-control buffer, in segments. The encoder is allowed to run this far ahead of
+    /// playback and is then paused until the buffer drains to `LowWaterSegments`. This bounds
+    /// CPU to "keep a few seconds of buffer" regardless of clip length, instead of transcoding
+    /// a 10-minute video flat-out the moment it is queued.
+    private const int HighWaterSegments = 4;
+    private const int LowWaterSegments = 2;
+
+    private System.Diagnostics.Process _transcode;
+    private LoopbackMediaProxy _proxy;
+
+    /// Transcode locally with ffmpeg, emitting short .ogv segments and starting playback on the
+    /// first one. Returns true once playback has begun (the encoder keeps running in the
+    /// background and segments are streamed to the screens as they land); false if the local
+    /// tools are missing or the encoder never produced anything, so the caller can fall back.
+    ///
+    /// The old implementation downloaded the entire clip with yt-dlp and *then* transcoded the
+    /// whole thing before showing a single frame — two full serial passes over the media, which
+    /// on any normal-length video is minutes of black screen. Here yt-dlp is only used to
+    /// resolve direct CDN URLs (a sub-second metadata call) and ffmpeg reads and encodes them
+    /// as a stream.
+    private async Task<bool> TryLocalTranscodeAsync(Item item, int gen)
     {
-        return await Task.Run(() =>
+        // Off-thread: the first call extracts a ~100 MB ffmpeg.exe out of the pck. `async` alone
+        // would not have saved us — everything before the first `await` runs synchronously on
+        // the caller, which is the main thread.
+        string ffmpegPath = await Task.Run(() => FindBinary("ffmpeg"));
+        if (ffmpegPath == null) return false;
+
+        var (videoUrl, audioUrl) = await ResolveDirectStreamsAsync(item.Url);
+        if (gen != _generation) return false;
+        if (string.IsNullOrEmpty(videoUrl)) return false;
+
+        // ffmpeg is static-linked and segfaults on any hostname (see LoopbackMediaProxy), so
+        // it is only ever pointed at 127.0.0.1 and this relay fetches the real thing.
+        var targets = new List<string> { videoUrl };
+        if (!string.IsNullOrEmpty(audioUrl)) targets.Add(audioUrl);
+        var proxy = LoopbackMediaProxy.Start(targets);
+        if (proxy == null) return false;
+
+        string absDir;
+        try
+        {
+            DirAccess.MakeDirRecursiveAbsolute("user://video-cache/segments");
+            absDir = ProjectSettings.GlobalizePath("user://video-cache/segments");
+            foreach (var f in System.IO.Directory.GetFiles(absDir, "seg_*.ogv"))
+            {
+                try { System.IO.File.Delete(f); } catch { }
+            }
+            _cleanupCursor = 0; // fresh clip — segment numbering restarts at 0
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] segment dir prep failed: {ex.Message}");
+            proxy.Dispose();
+            return false;
+        }
+
+        // `-map` pins video from input 0 and audio from input 1 when yt-dlp gave us split
+        // streams; with a single muxed input the second -i and the maps are simply omitted.
+        // YouTube no longer offers progressive formats for most videos, so the two-input path
+        // is the common one.
+        string inputs = targets.Count > 1
+            ? $"-i \"{proxy.UrlFor(0)}\" -i \"{proxy.UrlFor(1)}\" -map 0:v:0 -map 1:a:0"
+            : $"-i \"{proxy.UrlFor(0)}\"";
+        string pattern = System.IO.Path.Combine(absDir, "seg_%04d.ogv");
+        string args =
+            $"-y -loglevel error -threads {EncodeThreads} {inputs} " +
+            // Even dimensions are required by yuv420p; the min() keeps portrait/short sources
+            // from being upscaled.
+            $"-vf \"scale=-2:min({MaxHeight}\\,ih)\" -pix_fmt yuv420p " +
+            $"-c:v libtheora -q:v 5 -threads {EncodeThreads} -c:a libvorbis -q:a 4 " +
+            $"-f segment -segment_time {SegmentSeconds} -segment_format ogg -reset_timestamps 1 " +
+            $"\"{pattern}\"";
+
+        KillTranscode();
+        try
+        {
+            _transcode = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                Arguments = args,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] ffmpeg start failed: {ex.Message}");
+            proxy.Dispose();
+            return false;
+        }
+        if (_transcode == null) { proxy.Dispose(); return false; }
+
+        // Run the encoder below the game so it can never win a CPU fight against the render
+        // thread. Lowering priority never needs privilege; raising it would, hence one-way.
+        try { _transcode.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; }
+        catch { /* not supported everywhere; the thread cap still applies */ }
+
+        // The relay must outlive the encoder, which streams from it for the whole clip.
+        _proxy = proxy;
+
+        PruneScreens();
+        foreach (var s in _screens) { s.BeginPlaylist(item.Url); s.ShowPreparing(); }
+        Toast?.Invoke($"Preparing {item.Title}…", 3);
+
+        // The pump runs for the whole length of the clip, so it must not be awaited here —
+        // `Advance` holds `_busy` until this returns, and holding it for the clip's duration
+        // would deadlock every later skip. Await only the first segment, then let it run.
+        var firstSegment = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = PumpSegmentsAsync(absDir, gen, item, firstSegment);
+        return await firstSegment.Task;
+    }
+
+    /// Watch the segment directory and hand each finished segment to the screens. A segment is
+    /// only safe to play once the *next* one exists (ffmpeg is still appending to the newest
+    /// file) or the encoder has exited. Resolves `firstSegment` as soon as playback can start,
+    /// then keeps feeding segments until the encoder finishes.
+    private async Task PumpSegmentsAsync(string absDir, int gen, Item item,
+                                         TaskCompletionSource<bool> firstSegment)
+    {
+        var proc = _transcode;
+        var proxy = _proxy;
+        var primary = _screens.Count > 0 ? _screens[0] : null; // lockstep, so one tracks playback
+        int next = 0;
+        bool startedAny = false;
+
+        while (true)
+        {
+            if (gen != _generation) // skipped/cleared — stop feeding screens
+            {
+                firstSegment.TrySetResult(startedAny);
+                return;
+            }
+
+            bool exited;
+            try { exited = proc == null || proc.HasExited; } catch { exited = true; }
+
+            // Flow control: hold the encoder to a few segments ahead of playback. `playing` is
+            // the segment on screen now; `next - 1 - playing` is how many are buffered ahead.
+            // Pausing the proxy stalls ffmpeg's input, which is what actually stops the CPU
+            // burn — see LoopbackMediaProxy. Deleting played segments keeps the cache bounded
+            // no matter how long the clip is.
+            int playing = primary != null && GodotObject.IsInstanceValid(primary)
+                ? primary.PlayingSegment : -1;
+            int buffered = next - 1 - Math.Max(0, playing);
+            if (buffered >= HighWaterSegments) proxy?.Pause();
+            else if (buffered <= LowWaterSegments) proxy?.Resume();
+            CleanupPlayedSegments(absDir, playing);
+
+            string cur = System.IO.Path.Combine(absDir, $"seg_{next:D4}.ogv");
+            string following = System.IO.Path.Combine(absDir, $"seg_{next + 1:D4}.ogv");
+
+            bool curReady = System.IO.File.Exists(cur) &&
+                            (System.IO.File.Exists(following) || exited) &&
+                            new System.IO.FileInfo(cur).Length > 1024;
+
+            if (curReady)
+            {
+                string userPath = $"user://video-cache/segments/seg_{next:D4}.ogv";
+                // Screens are Nodes — touch them on the main thread only.
+                Callable.From(() => { PruneScreens(); foreach (var s in _screens) s.AppendSegment(userPath); })
+                        .CallDeferred();
+                startedAny = true;
+                next++;
+                // Playback has begun — release the caller so the queue stops being blocked.
+                if (next == 1)
+                {
+                    Toast?.Invoke($"▶ {item.Title}", 3);
+                    firstSegment.TrySetResult(true);
+                }
+                // Yield rather than tight-looping when a burst of segments is already on disk.
+                await Task.Delay(20);
+                continue;
+            }
+
+            if (exited)
+            {
+                // Encoder is done and no further segment materialised: the clip is complete.
+                if (startedAny)
+                {
+                    Callable.From(() => { PruneScreens(); foreach (var s in _screens) s.CompletePlaylist(); })
+                            .CallDeferred();
+                }
+                else
+                {
+                    string err = "";
+                    try { err = proc != null ? await proc.StandardError.ReadToEndAsync() : ""; } catch { }
+                    GD.PrintErr($"[VideoManager] ffmpeg produced no segments: {err}");
+                }
+                // Encoding is over, so nothing needs the relay any more. `gen` still matches
+                // here, so this is our own proxy and not a newer item's.
+                var finished = _proxy;
+                _proxy = null;
+                finished?.Dispose();
+
+                firstSegment.TrySetResult(startedAny);
+                return;
+            }
+
+            await Task.Delay(250);
+        }
+    }
+
+    private int _cleanupCursor;
+
+    /// Delete segment files the player has already moved past, so a long clip does not fill
+    /// user:// with dozens of .ogv files. Keeps one segment behind the play head as a safety
+    /// margin (the decoder may briefly still reference the file it is leaving).
+    private void CleanupPlayedSegments(string absDir, int playing)
+    {
+        int deleteBelow = playing - 1;
+        for (; _cleanupCursor < deleteBelow; _cleanupCursor++)
         {
             try
             {
-                string ffmpegPath = FindBinary("ffmpeg");
-                if (string.IsNullOrEmpty(ffmpegPath)) return null;
-
-                DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
-                string absDir = ProjectSettings.GlobalizePath("user://video-cache");
-                string absOgv = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
-                string absTempPattern = System.IO.Path.Combine(absDir, "temp_raw.%(ext)s");
-
-                // Clean up previous temp and ogv files
-                foreach (var f in System.IO.Directory.GetFiles(absDir, "temp_raw*"))
-                {
-                    try { System.IO.File.Delete(f); } catch { }
-                }
-                if (System.IO.File.Exists(absOgv))
-                {
-                    try { System.IO.File.Delete(absOgv); } catch { }
-                }
-
-                // If direct media url (.mp4, .webm, .mkv, .mov), ffmpeg can transcode directly
-                bool isDirect = url.Contains(".mp4", StringComparison.OrdinalIgnoreCase) ||
-                                url.Contains(".webm", StringComparison.OrdinalIgnoreCase) ||
-                                url.Contains(".mkv", StringComparison.OrdinalIgnoreCase) ||
-                                url.Contains(".mov", StringComparison.OrdinalIgnoreCase);
-
-                if (isDirect)
-                {
-                    var ffPsi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = ffmpegPath,
-                        Arguments = $"-y -i \"{url}\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -pix_fmt yuv420p -c:v libtheora -q:v 6 -c:a libvorbis -q:a 4 -shortest \"{absOgv}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                    };
-                    using (var pFf = System.Diagnostics.Process.Start(ffPsi))
-                    {
-                        if (pFf == null) return null;
-                        if (!pFf.WaitForExit(120_000)) { pFf.Kill(); return null; }
-                        if (pFf.ExitCode == 0 && System.IO.File.Exists(absOgv) && new System.IO.FileInfo(absOgv).Length > 1024)
-                        {
-                            return gen == _generation ? "user://video-cache/current.ogv" : null;
-                        }
-                    }
-                }
-
-                string ytdlpPath = FindBinary("yt-dlp");
-                if (string.IsNullOrEmpty(ytdlpPath)) return null;
-
-                // Step 1: yt-dlp download up to 720p
-                var ytPsi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = ytdlpPath,
-                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" -o \"{absTempPattern}\" \"{url}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using (var pYt = System.Diagnostics.Process.Start(ytPsi))
-                {
-                    if (pYt == null) return null;
-                    if (!pYt.WaitForExit(90_000)) { pYt.Kill(); return null; }
-                    if (pYt.ExitCode != 0) return null;
-                }
-
-                // Locate downloaded raw media file
-                var rawFiles = System.IO.Directory.GetFiles(absDir, "temp_raw.*");
-                if (rawFiles.Length == 0) return null;
-                string inputToFf = rawFiles[0];
-
-                // Step 2: ffmpeg transcode to Theora/Vorbis OGV
-                var ffPsiStep2 = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = ffmpegPath,
-                    Arguments = $"-y -i \"{inputToFf}\" -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" -pix_fmt yuv420p -c:v libtheora -q:v 6 -c:a libvorbis -q:a 4 -shortest \"{absOgv}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                using (var pFf = System.Diagnostics.Process.Start(ffPsiStep2))
-                {
-                    if (pFf == null) return null;
-                    if (!pFf.WaitForExit(120_000)) { pFf.Kill(); return null; }
-                    if (pFf.ExitCode != 0 || !System.IO.File.Exists(absOgv)) return null;
-                }
-
-                try { if (System.IO.File.Exists(inputToFf)) System.IO.File.Delete(inputToFf); } catch { }
-
-                return gen == _generation && System.IO.File.Exists(absOgv) && new System.IO.FileInfo(absOgv).Length > 1024
-                    ? "user://video-cache/current.ogv"
-                    : null;
+                string f = System.IO.Path.Combine(absDir, $"seg_{_cleanupCursor:D4}.ogv");
+                if (System.IO.File.Exists(f)) System.IO.File.Delete(f);
             }
-            catch (Exception ex)
-            {
-                GD.PrintErr($"[VideoManager] Local transcode error: {ex.Message}");
-                return null;
-            }
-        });
+            catch { /* a locked file will be retried next clip via the dir wipe on start */ }
+        }
     }
+
+    /// Ask yt-dlp for direct CDN URLs without downloading. Returns (video, audio); audio is null
+    /// when the chosen format is already muxed. A URL that is plainly a media file is passed
+    /// straight through, so yt-dlp is not needed at all for direct links.
+    private async Task<(string video, string audio)> ResolveDirectStreamsAsync(string url)
+    {
+        if (LooksLikeDirectMedia(url)) return (url, null);
+
+        string ytdlpPath = await Task.Run(() => FindBinary("yt-dlp"));
+        if (ytdlpPath == null) return (null, null);
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ytdlpPath,
+                Arguments = "--no-warnings --no-playlist -g " +
+                            $"-f \"bv*[height<={MaxHeight}]+ba/b[height<={MaxHeight}]/b\" \"{url}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) return (null, null);
+
+            var readOut = p.StandardOutput.ReadToEndAsync();
+            // 30 s is generous for a metadata-only call; the old code allowed 90 s because it
+            // was downloading the whole video here.
+            if (!await Task.Run(() => p.WaitForExit(30_000))) { try { p.Kill(); } catch { } return (null, null); }
+            if (p.ExitCode != 0) return (null, null);
+
+            var lines = (await readOut).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            string v = lines.Length > 0 ? lines[0].Trim() : null;
+            string a = lines.Length > 1 ? lines[1].Trim() : null;
+            return (string.IsNullOrEmpty(v) ? null : v, string.IsNullOrEmpty(a) ? null : a);
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] yt-dlp resolve failed: {ex.Message}");
+            return (null, null);
+        }
+    }
+
+    private static bool LooksLikeDirectMedia(string url)
+    {
+        string path;
+        try { path = new Uri(url).AbsolutePath; } catch { return false; }
+        foreach (var ext in new[] { ".mp4", ".webm", ".mkv", ".mov", ".ogv", ".m3u8" })
+            if (path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// Stop any in-flight encode. Without this a skip leaves ffmpeg writing segments for a clip
+    /// nobody is watching, which is both wasted CPU and a source of stale files.
+    private void KillTranscode()
+    {
+        var p = _transcode;
+        _transcode = null;
+        if (p != null)
+        {
+            try { if (!p.HasExited) p.Kill(true); } catch { }
+            try { p.Dispose(); } catch { }
+        }
+
+        var proxy = _proxy;
+        _proxy = null;
+        proxy?.Dispose();
+    }
+
+    public override void _ExitTree() => KillTranscode();
 
     private static bool _binsExtracted;
 
     /// Extract prepackaged binaries from res://bin/ to user://bin/ on first run.
     /// In exported builds with embed_pck, res:// files are inside the pck and can't be
     /// executed directly, so we copy them to the writable user:// directory.
+    private static readonly object _binsLock = new object();
+
     private static void EnsureBundledBinsExtracted()
     {
-        if (_binsExtracted) return;
-        _binsExtracted = true;
+        // Now reachable from several worker threads at once (ffmpeg and yt-dlp lookups race),
+        // and a torn half-written binary is far worse than a moment of contention.
+        lock (_binsLock)
+        {
+            if (_binsExtracted) return;
+            _binsExtracted = true;
+            ExtractBundledBins();
+        }
+    }
+
+    private static void ExtractBundledBins()
+    {
         try
         {
             string userBin = ProjectSettings.GlobalizePath("user://bin");
@@ -372,11 +609,23 @@ public partial class VideoManager : Node
                 string userPath = System.IO.Path.Combine(userBin, n);
                 if (System.IO.File.Exists(userPath)) continue;
                 if (!FileAccess.FileExists(resPath)) continue;
-                // Read from res:// (works inside embedded pck) and write to user://
-                var bytes = FileAccess.GetFileAsBytes(resPath);
-                if (bytes == null || bytes.Length == 0) continue;
-                using var f = FileAccess.Open($"user://bin/{n}", FileAccess.ModeFlags.Write);
-                if (f != null) f.StoreBuffer(bytes);
+
+                // Copy from res:// (which may be inside the embedded pck) to user:// in chunks.
+                // `GetFileAsBytes` would materialise the whole binary in memory first — that is
+                // a ~100 MB spike for ffmpeg.exe on Windows, on the first run, on the main
+                // thread. Streaming it keeps the peak flat.
+                using (var src = FileAccess.Open(resPath, FileAccess.ModeFlags.Read))
+                using (var dst = FileAccess.Open($"user://bin/{n}", FileAccess.ModeFlags.Write))
+                {
+                    if (src == null || dst == null) continue;
+                    const int chunk = 4 * 1024 * 1024;
+                    while (!src.EofReached())
+                    {
+                        var buf = src.GetBuffer(chunk);
+                        if (buf == null || buf.Length == 0) break;
+                        dst.StoreBuffer(buf);
+                    }
+                }
                 // Make executable on Unix
                 if (!isWindows)
                 {
@@ -431,14 +680,12 @@ public partial class VideoManager : Node
             ? new[] {
                 System.IO.Path.Combine(home, ".local", "bin", exeName),
                 System.IO.Path.Combine(home, "bin", exeName),
-                exeName,
             }
             : new[] {
                 $"{home}/.local/bin/{name}",
                 "/usr/local/bin/" + name,
-                "/usr/bin/" + name,
                 $"{home}/bin/{name}",
-                name,
+                "/usr/bin/" + name,
             };
         foreach (var c in candidates)
         {
@@ -448,7 +695,25 @@ public partial class VideoManager : Node
             }
             catch { }
         }
-        return exeName;
+
+        // 4. Anything on PATH.
+        try
+        {
+            string pathVar = System.Environment.GetEnvironmentVariable("PATH") ?? "";
+            foreach (var dir in pathVar.Split(System.IO.Path.PathSeparator,
+                                              StringSplitOptions.RemoveEmptyEntries))
+            {
+                string c = System.IO.Path.Combine(dir.Trim(), exeName);
+                if (System.IO.File.Exists(c)) return c;
+            }
+        }
+        catch { }
+
+        // Returning the bare name here would hand callers a path that cannot be started, and
+        // the resulting Win32Exception reads as "transcode failed" rather than "ffmpeg is
+        // missing". Null is the honest answer and lets the caller fall back to the server.
+        GD.PrintErr($"[VideoManager] {exeName} not found (bundled, beside-exe, or on PATH)");
+        return null;
     }
 
     private static string Str(JsonElement e, string prop) =>

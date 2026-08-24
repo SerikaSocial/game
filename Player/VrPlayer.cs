@@ -1,181 +1,801 @@
 using Godot;
+using SerikaSocial.Avatar;
 
 namespace SerikaSocial.Player;
 
-/// VR player controller using OpenXR. Uses XROrigin3D with XRCamera3D for head tracking
-/// and XRController3D for hand tracking. Supports smooth locomotion (thumbstick) and
-/// snap turning (right thumbstick left/right). Falls back to desktop mode if no HMD.
+/// VR player controller (OpenXR). An `XROrigin3D` play space rides a `CharacterBody3D`, the
+/// headset drives an `XRCamera3D`, and the two controllers drive the avatar's hands through
+/// `VrAvatarIk`.
 ///
-/// The pose we broadcast is the camera's world transform — position + orientation of the
-/// head — which is what remote peers need to position the avatar.
+/// **Action names come from Godot's built-in OpenXR action map** (`primary`, `trigger`,
+/// `grip`, `menu_button`, `ax_button`, `by_button`, `haptic`). The project previously pointed
+/// `openxr/default_action_map` at an `xr_actions.json` — but that setting expects an
+/// `OpenXRActionMap` *resource*, so a JSON file can never load as one and OpenXR silently fell
+/// back to `create_default_action_sets()` anyway. Targeting the built-in names directly means
+/// the bindings are whatever Godot ships for each interaction profile (Touch, Index, simple),
+/// which is both correct and the same thing that was really happening before.
+///
+/// Locomotion is head-relative, the body follows the headset so you can physically walk around
+/// the guardian, and comfort options (snap vs smooth turn, tunnelling vignette, teleport) come
+/// from `DeviceProfile.Settings`.
 public partial class VrPlayer : CharacterBody3D, IPlayer
 {
-    private const float WalkSpeed = 2.0f;
-    private const float SprintSpeed = 4.0f;
-    private const float SnapTurnAngle = 30f;
-    private const float TurnDeadzone = 0.7f;
+    // Godot built-in OpenXR action names.
+    private const string ActStick = "primary";
+    private const string ActTrigger = "trigger";
+    private const string ActGrip = "grip";
+    private const string ActMenu = "menu_button";
+    private const string ActPrimaryBtn = "ax_button"; // A (right) / X (left)
+    private const string ActSecondaryBtn = "by_button"; // B (right) / Y (left)
+    private const string ActHaptic = "haptic";
 
-    public float MouseSensitivity { get; set; } = 0.003f; // unused in VR but satisfies IPlayer
+    private const float WalkSpeed = 2.2f;
+    private const float SprintSpeed = 4.2f;
+    private const float JumpVelocity = 4.5f;
+    private const float StickDeadzone = 0.18f;
+    private const float TurnDeadzone = 0.65f;
+    private const float SnapTurnCooldown = 0.28f;
+    private const float GrabRadius = 0.14f;
+    private const float MaxTeleportRange = 12f;
+
+    public float MouseSensitivity { get; set; } = 0.003f; // unused in VR; satisfies IPlayer
+
+    /// Raised when the player presses the menu button, so `Main` can open the pause hub.
+    public event System.Action MenuPressed;
+    /// Raised on the secondary face button — `Main` maps this to the radial action menu.
+    public event System.Action ActionMenuPressed;
 
     private XROrigin3D _origin;
     private XRCamera3D _camera;
     private XRController3D _leftHand;
     private XRController3D _rightHand;
-    private XRNode3D _leftHandTracker;
-    private XRNode3D _rightHandTracker;
+
+    private Node3D _avatarMount;
+    private AvatarInstance _avatar;
+    private VrAvatarIk _ik;
+    public AvatarInstance Avatar => _avatar;
+
+    private CollisionShape3D _collider;
+    private MeshInstance3D _bodyMesh;
+    private NameTag3D _nameTag;
+
+    private MeshInstance3D _vignette;
+    private ShaderMaterial _vignetteMat;
+    private float _vignetteAperture = 1f;
+
+    private MeshInstance3D _teleportArc;
+    private MeshInstance3D _teleportPad;
+    private bool _teleportAiming;
+    private bool _teleportValid;
+    private Vector3 _teleportTarget;
+
+    private MeshInstance3D _laser;
+    private Vector2 _pointerPos;
+    private bool _pointerDown;
 
     private float _gravity = 9.8f;
-    private float _snapTurnCooldown;
-    private bool _wasTurning;
+    private float _snapCooldown;
+    private bool _menuLatch, _actionLatch, _recenterLatch;
 
-    private MeshInstance3D _bodyMesh;
-    private Label3D _nameTag;
+    // Per-hand grab state. Index 0 = left, 1 = right.
+    private readonly SerikaSocial.World.PhysicsProp[] _heldProp = new SerikaSocial.World.PhysicsProp[2];
+    private readonly Vector3[] _lastHandPos = new Vector3[2];
+    private readonly Vector3[] _handVelocity = new Vector3[2];
+    private readonly bool[] _gripLatch = new bool[2];
+
+    public bool ControlsEnabled { get; set; } = true;
 
     public override void _Ready()
     {
         _gravity = (float)ProjectSettings.GetSetting("physics/3d/default_gravity", 9.8f);
 
-        // Collision capsule
-        var col = new CollisionShape3D { Shape = new CapsuleShape3D { Height = 1.8f, Radius = 0.3f } };
-        col.Position = new Vector3(0, 0.9f, 0);
-        AddChild(col);
+        _collider = new CollisionShape3D
+        {
+            Shape = new CapsuleShape3D { Height = 1.6f, Radius = 0.25f },
+            Position = new Vector3(0, 0.8f, 0),
+        };
+        AddChild(_collider);
 
-        // Visible body (capsule) — other players see this
+        // Capsule stand-in, shown only until a real avatar is equipped.
         _bodyMesh = new MeshInstance3D
         {
-            Mesh = new CapsuleMesh { Height = 1.8f, Radius = 0.3f },
-            Position = new Vector3(0, 0.9f, 0),
+            Mesh = new CapsuleMesh { Height = 1.6f, Radius = 0.25f },
+            Position = new Vector3(0, 0.8f, 0),
         };
-        _bodyMesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.9f, 0.7f, 0.2f) };
+        _bodyMesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(0.55f, 0.35f, 0.85f) };
         AddChild(_bodyMesh);
 
-        // XR Origin — the play space. Camera tracks head, controllers track hands.
+        _avatarMount = new Node3D { Name = "AvatarMount" };
+        AddChild(_avatarMount);
+
         _origin = new XROrigin3D { Name = "XROrigin" };
         AddChild(_origin);
 
-        _camera = new XRCamera3D { Name = "XRCamera" };
+        _camera = new XRCamera3D { Name = "XRCamera", Near = 0.05f, Far = 1000f };
         _origin.AddChild(_camera);
 
-        _leftHand = new XRController3D { Name = "LeftHand", Tracker = "/user/hand/left" };
-        _leftHand.ShowWhenTracked = true;
+        _leftHand = new XRController3D { Name = "LeftHand", Tracker = "left_hand", ShowWhenTracked = true };
         _origin.AddChild(_leftHand);
 
-        _rightHand = new XRController3D { Name = "RightHand", Tracker = "/user/hand/right" };
-        _rightHand.ShowWhenTracked = true;
+        _rightHand = new XRController3D { Name = "RightHand", Tracker = "right_hand", ShowWhenTracked = true };
         _origin.AddChild(_rightHand);
 
-        // Separate hand tracking targets (optical hand tracking or controller-inferred).
-        _leftHandTracker = new XRNode3D { Name = "LeftHandTracker", Tracker = "/user/hand_tracker/left" };
-        _leftHandTracker.ShowWhenTracked = true;
-        _origin.AddChild(_leftHandTracker);
+        AddHandVisual(_leftHand, new Color(0.45f, 0.62f, 0.95f));
+        AddHandVisual(_rightHand, new Color(0.95f, 0.5f, 0.42f));
 
-        _rightHandTracker = new XRNode3D { Name = "RightHandTracker", Tracker = "/user/hand_tracker/right" };
-        _rightHandTracker.ShowWhenTracked = true;
-        _origin.AddChild(_rightHandTracker);
+        _nameTag = new NameTag3D { Name = "NameTag", Position = new Vector3(0, 1.95f, 0) };
+        AddChild(_nameTag);
+        _nameTag.SetShown(false); // never show your own card
 
-        // Hand visuals — simple boxes so you can see your controllers/hands
-        AddHandVisual(_leftHand, new Color(0.3f, 0.6f, 0.9f));
-        AddHandVisual(_rightHand, new Color(0.9f, 0.4f, 0.3f));
-        AddHandVisual(_leftHandTracker, new Color(0.2f, 0.5f, 0.8f));
-        AddHandVisual(_rightHandTracker, new Color(0.8f, 0.3f, 0.2f));
+        BuildVignette();
+        BuildTeleportVisuals();
+        BuildLaser();
 
-        // Name tag floating above head
-        _nameTag = new Label3D
-        {
-            Position = new Vector3(0, 0.5f, 0),
-            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-            FontSize = 48,
-            PixelSize = 0.005f,
-        };
-        _camera.AddChild(_nameTag);
+        ApplyHeightOffset();
     }
 
-    public void SetUsername(string name) => _nameTag.Text = name;
+    // ---------------------------------------------------------------- rig construction
 
     private void AddHandVisual(Node3D parent, Color color)
     {
         var mesh = new MeshInstance3D
         {
-            Mesh = new BoxMesh { Size = new Vector3(0.05f, 0.05f, 0.1f) },
+            Mesh = new BoxMesh { Size = new Vector3(0.045f, 0.045f, 0.09f) },
         };
-        mesh.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = color,
-            Roughness = 0.5f,
-        };
+        mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = color, Roughness = 0.5f };
         parent.AddChild(mesh);
     }
 
+    /// Tunnelling vignette: a black quad parented to the camera whose centre aperture closes
+    /// while you move. This is the single most effective motion-sickness mitigation in VR, so
+    /// it is on by default and only opt-out.
+    private void BuildVignette()
+    {
+        var shader = new Shader
+        {
+            Code = @"
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, depth_test_disabled, cull_disabled, shadows_disabled;
+
+uniform float aperture : hint_range(0.0, 1.0) = 1.0;
+
+void fragment() {
+    float d = distance(UV, vec2(0.5));
+    float edge = mix(0.10, 0.78, aperture);
+    ALBEDO = vec3(0.0);
+    ALPHA = smoothstep(edge, edge + 0.16, d);
+}",
+        };
+        _vignetteMat = new ShaderMaterial { Shader = shader };
+        _vignetteMat.SetShaderParameter("aperture", 1f);
+
+        _vignette = new MeshInstance3D
+        {
+            Name = "ComfortVignette",
+            Mesh = new QuadMesh { Size = new Vector2(1.4f, 1.4f) },
+            Position = new Vector3(0, 0, -0.32f),
+            MaterialOverride = _vignetteMat,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+            Visible = false,
+        };
+        // Draw last so it sits over the world regardless of what else is on screen.
+        _vignette.SortingOffset = 100.0f;
+        _camera.AddChild(_vignette);
+    }
+
+    /// A short beam on the right hand, shown only while a menu is open, so the synthetic cursor
+    /// has something to visibly come from.
+    private void BuildLaser()
+    {
+        _laser = new MeshInstance3D
+        {
+            Name = "Pointer",
+            Mesh = new BoxMesh { Size = new Vector3(0.004f, 0.004f, 2.0f) },
+            Position = new Vector3(0, 0, -1.0f), // extends forward from the controller
+            Visible = false,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        _laser.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.72f, 0.55f, 1f),
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        };
+        _rightHand.AddChild(_laser);
+    }
+
+    private void BuildTeleportVisuals()
+    {
+        var arcMat = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.65f, 0.45f, 0.95f, 0.85f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            VertexColorUseAsAlbedo = true, // the arc tints itself red when the landing is invalid
+        };
+        _teleportArc = new MeshInstance3D
+        {
+            Name = "TeleportArc",
+            Mesh = new ImmediateMesh(),
+            MaterialOverride = arcMat,
+            Visible = false,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        AddChild(_teleportArc);
+        // The arc is built in world coordinates each frame, so it must not inherit our motion.
+        _teleportArc.TopLevel = true;
+
+        _teleportPad = new MeshInstance3D
+        {
+            Name = "TeleportPad",
+            Mesh = new CylinderMesh { TopRadius = 0.3f, BottomRadius = 0.3f, Height = 0.02f },
+            MaterialOverride = arcMat,
+            Visible = false,
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        AddChild(_teleportPad);
+        _teleportPad.TopLevel = true;
+    }
+
+    // ---------------------------------------------------------------- public API
+
+    public void SetUsername(string name) => _nameTag.SetLabel(name);
+
+    public void SetProfilePicture(byte[] bytes) => _nameTag.SetProfilePicture(bytes);
+
+    public void SetTagPrefs(bool tags, bool pfp)
+    {
+        _nameTag.SetPrefs(tags, pfp);
+        _nameTag.SetShown(false);
+    }
+
+    /// Equip a humanoid avatar. Unlike the desktop rig there is no first/third-person split —
+    /// in VR you are always inside your own head — but the head meshes still have to go, or
+    /// you spend the session looking at the inside of your own skull.
+    public void SetAvatar(AvatarInstance avatar)
+    {
+        _avatar?.QueueFree();
+        _avatar = avatar;
+        _ik = null;
+
+        if (avatar == null)
+        {
+            _bodyMesh.Visible = true;
+            _nameTag.Position = new Vector3(0, 1.95f, 0);
+            return;
+        }
+
+        _bodyMesh.Visible = false;
+        _avatarMount.AddChild(avatar);
+        _nameTag.Position = new Vector3(0, avatar.Height + 0.3f, 0);
+
+        _ik = new VrAvatarIk(avatar);
+        if (!_ik.Valid)
+        {
+            // No usable arm chain (the procedural bean, or a malformed rig). Fall back to the
+            // capsule rather than shipping a T-posed avatar into a social space.
+            GD.Print("VR: avatar has no solvable arm chain — keeping procedural animation only");
+            _ik = null;
+        }
+
+        HideOwnHead(avatar);
+        ApplyHeightOffset();
+    }
+
+    // Same visual layers the desktop rig uses, so mirrors — which render every layer — keep
+    // showing a complete avatar while our own camera drops just the head.
+    private const uint FpAvatarLayer = 1u << 2; // visual layer 3
+    private const uint FpHeadLayer = 1u << 3;   // visual layer 4
+
+    /// Cull the head meshes from our own view only. The meshes stay in the scene so mirrors,
+    /// shadows, and every remote peer still see a complete avatar.
+    private void HideOwnHead(AvatarInstance avatar)
+    {
+        foreach (var child in avatar.FindChildren("*", "MeshInstance3D", true, false))
+        {
+            if (child is not MeshInstance3D mesh) continue;
+            mesh.Layers = avatar.IsHeadMesh(mesh) ? FpHeadLayer : FpAvatarLayer;
+        }
+        _camera.CullMask = 1048575u & ~FpHeadLayer;
+    }
+
+    /// Raise or lower the play space so the avatar's eyes line up with the headset. Without
+    /// this a tall avatar on a short player floats, and the hands never reach the IK targets.
+    private void ApplyHeightOffset()
+    {
+        if (_origin == null) return;
+        float y = UI.DeviceProfile.Settings.VrHeightOffset;
+        _origin.Position = new Vector3(_origin.Position.X, y, _origin.Position.Z);
+    }
+
+    /// Toggle a built-in emote, matching `LocalPlayer.PlayEmote`. While an emote is playing the
+    /// arm IK stands down — otherwise the controllers would fight the animation and the emote
+    /// would read as a twitch.
+    public void PlayEmote(AvatarInstance.Emote emote)
+    {
+        if (_avatar == null) return;
+        _avatar.PlayEmote(_avatar.CurrentEmote == emote ? AvatarInstance.Emote.None : emote);
+    }
+
+    public void PlayCustomEmote(string clip)
+    {
+        if (_avatar == null) return;
+        if (string.IsNullOrEmpty(clip)) _avatar.StopCustomEmote();
+        else _avatar.PlayCustomEmote(clip);
+    }
+
+    /// Re-centre the play space so the player faces world-forward from where they stand.
+    /// Bound to the secondary button held with the trigger — an accidental recenter mid-session
+    /// is disorienting, so it deliberately needs two hands.
+    public void Recenter()
+    {
+        XRServer.CenterOnHmd(XRServer.RotationMode.ResetButKeepTilt, true);
+        Pulse(_leftHand, 0.4f, 0.08f);
+        Pulse(_rightHand, 0.4f, 0.08f);
+    }
+
+    // ---------------------------------------------------------------- frame loop
+
     public override void _PhysicsProcess(double delta)
     {
-        var v = Velocity;
+        float dt = (float)delta;
 
-        // Gravity
-        if (!IsOnFloor()) v.Y -= _gravity * (float)delta;
+        // The headset keeps tracking even while a menu is up; only *input* is suspended.
+        SyncBodyToHead();
 
-        // VR locomotion: left thumbstick to move in the direction the camera faces
-        var moveVec = _leftHand.GetVector2("primary");
-        if (moveVec.Length() > 0.1f)
+        if (ControlsEnabled)
         {
-            // Deadzone
-            moveVec = moveVec.Normalized() * Mathf.Min(moveVec.Length(), 1.0f);
+            HandleTurn(dt);
+            HandleGrab(dt);
+        }
 
-            // Move relative to camera yaw
-            var camBasis = _camera.GlobalTransform.Basis;
-            var forward = -camBasis.Z with { Y = 0 };
-            if (forward.LengthSquared() > 0) forward = forward.Normalized();
-            var right = camBasis.X with { Y = 0 };
-            if (right.LengthSquared() > 0) right = right.Normalized();
+        // Menu buttons stay live while a menu is open — that is how you close it again.
+        HandleButtons();
+        UpdatePointer();
 
-            bool sprinting = _leftHand.GetFloat("grip") > 0.5f || _rightHand.GetFloat("grip") > 0.5f
-                || _leftHand.GetFloat("squeeze") > 0.5f || _rightHand.GetFloat("squeeze") > 0.5f;
-            float speed = sprinting ? SprintSpeed : WalkSpeed;
+        var planarSpeed = HandleLocomotion(dt);
 
-            var dir = (forward * -moveVec.Y + right * moveVec.X) * speed;
-            v.X = dir.X;
-            v.Z = dir.Z;
+        UpdateVignette(dt, planarSpeed);
+        UpdateAvatar(dt, planarSpeed);
+    }
+
+    /// Physically walking in the guardian moves the camera inside the play space. Carry that
+    /// offset onto the `CharacterBody3D` and cancel it out of the origin, so the collider stays
+    /// under the headset and the world stays put.
+    private void SyncBodyToHead()
+    {
+        var camLocal = _camera.Position;
+        var flat = new Vector3(camLocal.X, 0, camLocal.Z);
+        if (flat.LengthSquared() < 1e-6f) return;
+
+        var worldDelta = GlobalTransform.Basis * flat;
+        GlobalPosition += worldDelta;
+        _origin.Position -= flat;
+    }
+
+    /// Returns planar speed so the caller can drive both the vignette and the walk cycle.
+    private float HandleLocomotion(float dt)
+    {
+        var v = Velocity;
+        if (!IsOnFloor()) v.Y -= _gravity * dt;
+
+        var stick = ControlsEnabled ? _leftHand.GetVector2(ActStick) : Vector2.Zero;
+        bool teleportMode = UI.DeviceProfile.Settings.VrTeleport;
+
+        if (teleportMode)
+        {
+            v.X = 0; v.Z = 0;
+            UpdateTeleport(stick);
         }
         else
         {
-            v.X = 0;
-            v.Z = 0;
+            var move = ApplyDeadzone(stick);
+            if (move != Vector2.Zero)
+            {
+                var (fwd, right) = HeadBasis();
+                bool sprinting = _leftHand.GetFloat(ActGrip) > 0.7f;
+                float speed = sprinting ? SprintSpeed : WalkSpeed;
+                var dir = (fwd * -move.Y + right * move.X) * speed;
+                v.X = dir.X;
+                v.Z = dir.Z;
+            }
+            else
+            {
+                v.X = 0; v.Z = 0;
+            }
         }
-
-        // Snap turning: right thumbstick left/right
-        _snapTurnCooldown -= (float)delta;
-        var turnVec = _rightHand.GetVector2("primary");
-        if (_snapTurnCooldown <= 0 && Mathf.Abs(turnVec.X) > TurnDeadzone)
-        {
-            float angle = turnVec.X > 0 ? SnapTurnAngle : -SnapTurnAngle;
-            _origin.RotateY(Mathf.DegToRad(angle));
-            _snapTurnCooldown = 0.3f;
-        }
-
-        // Jump: right hand trigger or pinch
-        if ((_rightHand.GetFloat("trigger") > 0.5f || _rightHand.GetInput("pinch").AsBool()) && IsOnFloor())
-            v.Y = 4.5f;
 
         Velocity = v;
         MoveAndSlide();
+        return new Vector2(Velocity.X, Velocity.Z).Length();
     }
 
-    /// The transform we broadcast: camera world position + yaw rotation.
+    /// Head-relative forward/right, flattened to the ground plane.
+    private (Vector3 fwd, Vector3 right) HeadBasis()
+    {
+        var b = _camera.GlobalTransform.Basis;
+        var fwd = -b.Z with { Y = 0 };
+        var right = b.X with { Y = 0 };
+        fwd = fwd.LengthSquared() > 1e-6f ? fwd.Normalized() : Vector3.Forward;
+        right = right.LengthSquared() > 1e-6f ? right.Normalized() : Vector3.Right;
+        return (fwd, right);
+    }
+
+    /// Rescale past the deadzone so there is no speed discontinuity at the threshold.
+    private static Vector2 ApplyDeadzone(Vector2 v)
+    {
+        float len = v.Length();
+        if (len < StickDeadzone) return Vector2.Zero;
+        return v / len * Mathf.Min((len - StickDeadzone) / (1f - StickDeadzone), 1f);
+    }
+
+    /// Turning rotates the *body*, and the origin is a child, so the play space comes with it.
+    /// Snap turning is the default because continuous rotation is the biggest sickness trigger.
+    private void HandleTurn(float dt)
+    {
+        float x = _rightHand.GetVector2(ActStick).X;
+
+        if (UI.DeviceProfile.Settings.VrSnapTurn)
+        {
+            _snapCooldown -= dt;
+            if (_snapCooldown <= 0f && Mathf.Abs(x) > TurnDeadzone)
+            {
+                float angle = Mathf.DegToRad(UI.DeviceProfile.Settings.VrSnapTurnAngle) * Mathf.Sign(x);
+                RotateAroundHead(-angle);
+                _snapCooldown = SnapTurnCooldown;
+                Pulse(_rightHand, 0.35f, 0.04f);
+            }
+            else if (Mathf.Abs(x) <= TurnDeadzone)
+            {
+                _snapCooldown = 0f; // allow an immediate snap on the next flick
+            }
+        }
+        else if (Mathf.Abs(x) > StickDeadzone)
+        {
+            float rate = Mathf.DegToRad(UI.DeviceProfile.Settings.VrSmoothTurnSpeed);
+            RotateAroundHead(-rate * x * dt);
+        }
+    }
+
+    /// Rotate about the headset rather than the body origin. Turning about the origin swings
+    /// the player through an arc, which feels like being on a fairground ride.
+    private void RotateAroundHead(float angle)
+    {
+        var pivot = _camera.GlobalPosition;
+        var offset = GlobalPosition - pivot;
+        var rotated = offset.Rotated(Vector3.Up, angle);
+        GlobalPosition = pivot + rotated;
+        RotateY(angle);
+    }
+
+    /// Drive the existing 2D menus from the right controller.
+    ///
+    /// The menus are `CanvasLayer` UI, which in XR draws into the eye buffers at screen space —
+    /// readable, but there is no mouse in a headset, so before this every menu VR could open was
+    /// one it could not click. Rather than restructure the whole menu system onto SubViewport
+    /// quads, we unproject a point along the controller's aim ray into viewport coordinates and
+    /// synthesise the mouse events the existing `Control`s already handle.
+    ///
+    /// Only runs while a menu owns input (`ControlsEnabled == false`), so the laser never
+    /// interferes with normal play.
+    private void UpdatePointer()
+    {
+        bool menuOpen = !ControlsEnabled;
+        _laser.Visible = menuOpen;
+        if (!menuOpen)
+        {
+            if (_pointerDown) ReleasePointer();
+            return;
+        }
+
+        var origin = _rightHand.GlobalPosition;
+        var aim = -_rightHand.GlobalTransform.Basis.Z;
+        var target = origin + aim * 2.0f;
+
+        // Behind the camera unprojects to a mirrored, meaningless position.
+        if (_camera.IsPositionBehind(target)) return;
+
+        var screen = _camera.UnprojectPosition(target);
+        var size = GetViewport().GetVisibleRect().Size;
+        if (screen.X < 0 || screen.Y < 0 || screen.X > size.X || screen.Y > size.Y) return;
+
+        if (screen != _pointerPos)
+        {
+            _pointerPos = screen;
+            Input.ParseInputEvent(new InputEventMouseMotion { Position = screen, GlobalPosition = screen });
+        }
+
+        bool pressed = _rightHand.GetFloat(ActTrigger) > 0.6f;
+        if (pressed != _pointerDown)
+        {
+            _pointerDown = pressed;
+            Input.ParseInputEvent(new InputEventMouseButton
+            {
+                Position = screen,
+                GlobalPosition = screen,
+                ButtonIndex = MouseButton.Left,
+                Pressed = pressed,
+            });
+            if (pressed) Pulse(_rightHand, 0.3f, 0.02f);
+        }
+    }
+
+    /// Let go of a synthetic click when the menu closes mid-press, so the UI never latches on a
+    /// button that will never see its release event.
+    private void ReleasePointer()
+    {
+        _pointerDown = false;
+        Input.ParseInputEvent(new InputEventMouseButton
+        {
+            Position = _pointerPos,
+            GlobalPosition = _pointerPos,
+            ButtonIndex = MouseButton.Left,
+            Pressed = false,
+        });
+    }
+
+    private void HandleButtons()
+    {
+        // Jump on the primary face button (A/X), edge-triggered via the floor check. Suppressed
+        // while a menu is up — the same button is the menu's select.
+        if (ControlsEnabled && _rightHand.IsButtonPressed(ActPrimaryBtn) && IsOnFloor())
+            Velocity = Velocity with { Y = JumpVelocity };
+
+        // Menu — latch so a held button opens the menu once.
+        bool menu = _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu);
+        if (menu && !_menuLatch) MenuPressed?.Invoke();
+        _menuLatch = menu;
+
+        bool action = _rightHand.IsButtonPressed(ActSecondaryBtn);
+        if (action && !_actionLatch) ActionMenuPressed?.Invoke();
+        _actionLatch = action;
+
+        // Two-handed recenter: left secondary + right trigger.
+        bool recenter = _leftHand.IsButtonPressed(ActSecondaryBtn) && _rightHand.GetFloat(ActTrigger) > 0.8f;
+        if (recenter && !_recenterLatch) Recenter();
+        _recenterLatch = recenter;
+    }
+
+    // ---------------------------------------------------------------- grabbing
+
+    /// Grip to grab a nearby `PhysicsProp`, release to throw it with the hand's actual
+    /// velocity. Hand velocity is measured from world positions rather than read from the
+    /// controller, so it stays correct while the play space itself is moving.
+    private void HandleGrab(float dt)
+    {
+        UpdateHand(0, _leftHand, dt);
+        UpdateHand(1, _rightHand, dt);
+    }
+
+    private void UpdateHand(int i, XRController3D hand, float dt)
+    {
+        var pos = hand.GlobalPosition;
+        if (dt > 0f)
+        {
+            var raw = (pos - _lastHandPos[i]) / dt;
+            // Light smoothing: a single jittery frame at release should not launch the prop.
+            _handVelocity[i] = _handVelocity[i].Lerp(raw, 0.45f);
+        }
+        _lastHandPos[i] = pos;
+
+        bool gripped = hand.GetFloat(ActGrip) > 0.6f;
+
+        if (gripped && !_gripLatch[i])
+        {
+            var prop = FindPropNear(pos);
+            if (prop != null && prop.GrabAt(pos))
+            {
+                _heldProp[i] = prop;
+                Pulse(hand, 0.6f, 0.06f);
+            }
+        }
+        else if (!gripped && _heldProp[i] != null)
+        {
+            _heldProp[i].ReleaseWithVelocity(_handVelocity[i]);
+            _heldProp[i] = null;
+            Pulse(hand, 0.25f, 0.03f);
+        }
+
+        _gripLatch[i] = gripped;
+
+        // A prop can be taken from us by the network layer; drop our claim if so.
+        if (_heldProp[i] != null)
+        {
+            if (!_heldProp[i].HeldByLocal) _heldProp[i] = null;
+            else _heldProp[i].UpdateHeldPosition(pos);
+        }
+    }
+
+    private SerikaSocial.World.PhysicsProp FindPropNear(Vector3 point)
+    {
+        var space = GetWorld3D()?.DirectSpaceState;
+        if (space == null) return null;
+
+        var shape = new SphereShape3D { Radius = GrabRadius };
+        var query = new PhysicsShapeQueryParameters3D
+        {
+            Shape = shape,
+            Transform = new Transform3D(Basis.Identity, point),
+            CollideWithBodies = true,
+            CollideWithAreas = false,
+        };
+        query.Exclude = new Godot.Collections.Array<Rid> { GetRid() };
+
+        foreach (var hit in space.IntersectShape(query, 8))
+        {
+            if (hit.TryGetValue("collider", out var c)
+                && c.As<GodotObject>() is SerikaSocial.World.PhysicsProp prop
+                && prop.CanInteract)
+                return prop;
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------- teleport
+
+    /// Push the left stick forward to aim a ballistic arc; release to teleport to where it
+    /// lands. Only surfaces flat enough to stand on are accepted.
+    private void UpdateTeleport(Vector2 stick)
+    {
+        bool aiming = ControlsEnabled && stick.Y < -0.5f;
+
+        if (aiming)
+        {
+            _teleportAiming = true;
+            var origin = _leftHand.GlobalPosition;
+            var dir = -_leftHand.GlobalTransform.Basis.Z;
+            _teleportValid = TraceArc(origin, dir, out _teleportTarget);
+            DrawArc(origin, dir);
+        }
+        else if (_teleportAiming)
+        {
+            // Released — commit.
+            _teleportAiming = false;
+            _teleportArc.Visible = false;
+            _teleportPad.Visible = false;
+            if (_teleportValid)
+            {
+                // Move the body, keeping the headset's offset within the play space intact.
+                var camFlat = GlobalTransform.Basis * new Vector3(_camera.Position.X, 0, _camera.Position.Z);
+                GlobalPosition = _teleportTarget - camFlat;
+                Velocity = Vector3.Zero;
+                Pulse(_leftHand, 0.5f, 0.06f);
+            }
+        }
+    }
+
+    /// Step a projectile arc until it hits something. Returns true when the landing spot is a
+    /// floor (normal within ~40° of up) rather than a wall or ceiling.
+    private bool TraceArc(Vector3 origin, Vector3 dir, out Vector3 landing)
+    {
+        landing = Vector3.Zero;
+        var space = GetWorld3D()?.DirectSpaceState;
+        if (space == null) return false;
+
+        var vel = dir * 8f;
+        var p = origin;
+        const float step = 0.06f;
+
+        for (int i = 0; i < 90; i++)
+        {
+            var next = p + vel * step;
+            vel.Y -= _gravity * step;
+
+            var q = PhysicsRayQueryParameters3D.Create(p, next);
+            q.Exclude = new Godot.Collections.Array<Rid> { GetRid() };
+            var hit = space.IntersectRay(q);
+
+            if (hit.Count > 0)
+            {
+                landing = hit["position"].AsVector3();
+                var normal = hit["normal"].AsVector3();
+                if (origin.DistanceTo(landing) > MaxTeleportRange) return false;
+                return normal.Dot(Vector3.Up) > 0.76f;
+            }
+            p = next;
+        }
+        return false;
+    }
+
+    private void DrawArc(Vector3 origin, Vector3 dir)
+    {
+        var mesh = (ImmediateMesh)_teleportArc.Mesh;
+        mesh.ClearSurfaces();
+        mesh.SurfaceBegin(Mesh.PrimitiveType.LineStrip);
+
+        var vel = dir * 8f;
+        var p = origin;
+        const float step = 0.06f;
+        var col = _teleportValid ? new Color(0.65f, 0.45f, 0.95f) : new Color(0.9f, 0.3f, 0.3f);
+
+        for (int i = 0; i < 90; i++)
+        {
+            mesh.SurfaceSetColor(col);
+            mesh.SurfaceAddVertex(p);
+            p += vel * step;
+            vel.Y -= _gravity * step;
+            if (_teleportValid && p.DistanceTo(_teleportTarget) < 0.12f) break;
+        }
+        mesh.SurfaceEnd();
+
+        _teleportArc.Visible = true;
+        _teleportPad.Visible = _teleportValid;
+        if (_teleportValid)
+            _teleportPad.GlobalPosition = _teleportTarget + new Vector3(0, 0.015f, 0);
+    }
+
+    // ---------------------------------------------------------------- comfort + avatar
+
+    private void UpdateVignette(float dt, float speed)
+    {
+        if (_vignette == null) return;
+
+        if (!UI.DeviceProfile.Settings.VrVignette)
+        {
+            _vignette.Visible = false;
+            return;
+        }
+
+        // Close the aperture in proportion to speed, and ease it so the vignette itself is not
+        // a jarring transition.
+        float strength = Mathf.Clamp(UI.DeviceProfile.Settings.VrVignetteStrength, 0f, 1f);
+        float moving = Mathf.Clamp(speed / SprintSpeed, 0f, 1f);
+        float target = Mathf.Lerp(1f, 1f - strength, moving);
+
+        _vignetteAperture = Mathf.Lerp(_vignetteAperture, target, Mathf.Min(1f, dt * 6f));
+        _vignetteMat.SetShaderParameter("aperture", _vignetteAperture);
+        _vignette.Visible = _vignetteAperture < 0.995f;
+    }
+
+    private void UpdateAvatar(float dt, float speed)
+    {
+        if (_avatar == null) return;
+
+        // Keep the avatar facing the way the headset faces, and standing where we stand.
+        var (fwd, _) = HeadBasis();
+        var flatCam = _camera.GlobalPosition with { Y = GlobalPosition.Y };
+        _avatarMount.GlobalPosition = flatCam;
+        _avatarMount.GlobalBasis = Basis.LookingAt(fwd, Vector3.Up);
+
+        // Procedural locomotion first, then IK overrides the head and arms on top of it.
+        _avatar.Animate(dt, speed, IsOnFloor());
+
+        // An emote owns the whole body; letting the hand IK write over it afterwards would
+        // reduce a wave or a dance to a twitch.
+        if (_avatar.CurrentEmote != AvatarInstance.Emote.None) return;
+
+        _ik?.Solve(_camera.GlobalTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition);
+    }
+
+    private static void Pulse(XRController3D hand, float amplitude, float seconds)
+    {
+        if (!UI.DeviceProfile.Settings.VrHaptics) return;
+        hand?.TriggerHapticPulse(ActHaptic, 0, amplitude, seconds, 0);
+    }
+
+    // ---------------------------------------------------------------- networking
+
+    /// The transform we broadcast: the headset's world position with body yaw. Remote peers
+    /// position the avatar from this, and the bone pose rides alongside it.
     public Transform3D PoseTransform()
     {
         var pos = _camera.GlobalPosition;
-        var rot = Basis.Identity;
-        // Use camera yaw only for body orientation
-        var camForward = -_camera.GlobalTransform.Basis.Z with { Y = 0 };
-        if (camForward.LengthSquared() > 0.001f)
-        {
-            camForward = camForward.Normalized();
-            // Build a basis looking along camForward with up = Y
-            var right = camForward.Cross(Vector3.Up).Normalized();
-            var up = right.Cross(camForward).Normalized();
-            rot = new Basis(right, up, -camForward);
-        }
-        return new Transform3D(rot, pos);
+        var (fwd, _) = HeadBasis();
+        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), pos);
     }
+
+    /// Zero all momentum — used by respawn, matching `LocalPlayer.ResetMotion`.
+    public void ResetMotion()
+    {
+        Velocity = Vector3.Zero;
+        for (int i = 0; i < 2; i++)
+        {
+            _heldProp[i]?.ReleaseWithVelocity(Vector3.Zero);
+            _heldProp[i] = null;
+            _handVelocity[i] = Vector3.Zero;
+        }
+    }
+
+    // ---------------------------------------------------------------- lifecycle
 
     /// Check if OpenXR is already initialised (a headset is live).
     public static bool IsVrAvailable()
@@ -206,8 +826,11 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
             // set IsInitialized(), which would leave the viewport in a broken half-XR state.
             if (!iface.IsInitialized()) return false;
 
-            // Drive the main viewport through the headset.
+            // Drive the main viewport through the headset. Standalone headsets are tile-based
+            // and fill-rate bound, so VR runs unthrottled and lets the compositor pace us.
             tree.Root.UseXR = true;
+            Engine.MaxFps = 0;
+            DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
             return true;
         }
         catch

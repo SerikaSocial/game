@@ -74,7 +74,12 @@ static var SETTINGS_CONFIGURATION: Dictionary = {
 	},
 
 	CUSTOM_TEST_SCENE_PATH: {
-		value = preload("./test_scene.tscn").resource_path,
+		# Local patch: was `preload("./test_scene.tscn").resource_path`. settings.gd is pulled in
+		# by the *runtime* DialogueManager autoload, so that preload dragged an editor-only scene
+		# into the exported build — where it fails to load and takes the whole addon down with it
+		# ("Unrecognized binary resource file", then a cascade of compile errors, then no
+		# dialogue at all). The preload was only ever used to spell its own path back.
+		value = "res://addons/dialogue_manager/test_scene.tscn",
 		type = TYPE_STRING,
 		hint = PROPERTY_HINT_FILE,
 		hint_string = "*.tscn,*.scn",
