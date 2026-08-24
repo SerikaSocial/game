@@ -13,7 +13,7 @@ namespace Serika.Net;
 /// authed calls. Godot-free so it can be exercised from tests and a headless harness.
 public sealed class ApiClient
 {
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(180) };
     private readonly string _baseUrl;
     public string BaseUrl => _baseUrl;
     public string SessionToken { get; private set; }
@@ -183,13 +183,21 @@ public sealed class ApiClient
         catch { return null; }
     }
 
-    /// Download a .ska to a local path (user://), returning true on success.
+    /// Download a .ska or .ogv to a local path (user://), returning true on success.
     public async Task<bool> DownloadToAsync(string url, string absPath)
     {
         try
         {
-            var bytes = await _http.GetByteArrayAsync(url);
-            await System.IO.File.WriteAllBytesAsync(absPath, bytes);
+            var dir = System.IO.Path.GetDirectoryName(absPath);
+            if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                System.IO.Directory.CreateDirectory(dir);
+
+            using var res = await _http.GetAsync(url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
+            if (!res.IsSuccessStatusCode) return false;
+
+            await using var stream = await res.Content.ReadAsStreamAsync();
+            await using var fs = new System.IO.FileStream(absPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
+            await stream.CopyToAsync(fs);
             return true;
         }
         catch { return false; }

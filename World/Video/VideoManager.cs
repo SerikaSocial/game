@@ -152,10 +152,17 @@ public partial class VideoManager : Node
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
-                // Fall back to the server-side transcode proxy, which pipes the stream through
-                // ffmpeg and delivers ogv/Theora that the engine CAN decode.
+                // 1. Try server-side transcode proxy (pipes streams through ffmpeg to deliver ogv/Theora).
                 string tcPath = await DownloadTranscode(item.Url, gen);
                 if (gen != _generation) return;
+
+                // 2. If server transcode is unavailable or returned no data, try local transcode fallback.
+                if (string.IsNullOrEmpty(tcPath))
+                {
+                    tcPath = await TryLocalTranscodeAsync(item.Url, gen);
+                    if (gen != _generation) return;
+                }
+
                 if (tcPath == null)
                 {
                     OnScreenFailed(item.Url, "transcode failed",
@@ -226,11 +233,98 @@ public partial class VideoManager : Node
         {
             DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
             string abs = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
+            if (System.IO.File.Exists(abs)) System.IO.File.Delete(abs);
+
             string tcUrl = $"{_api.BaseUrl}/v1/video/transcode?url={Uri.EscapeDataString(url)}";
             bool ok = await _api.DownloadToAsync(tcUrl, abs);
-            return ok && gen == _generation ? "user://video-cache/current.ogv" : null;
+            if (ok && System.IO.File.Exists(abs) && new System.IO.FileInfo(abs).Length > 1024)
+                return gen == _generation ? "user://video-cache/current.ogv" : null;
         }
-        catch { return null; }
+        catch { }
+        return null;
+    }
+
+    /// Run a local client-side transcode fallback using yt-dlp + ffmpeg if available on desktop.
+    private async Task<string> TryLocalTranscodeAsync(string url, int gen)
+    {
+        return await Task.Run(() =>
+        {
+            try
+            {
+                string ytdlpPath = FindBinary("yt-dlp");
+                string ffmpegPath = FindBinary("ffmpeg");
+                if (string.IsNullOrEmpty(ytdlpPath) || string.IsNullOrEmpty(ffmpegPath)) return null;
+
+                DirAccess.MakeDirRecursiveAbsolute("user://video-cache");
+                string absOgv = ProjectSettings.GlobalizePath("user://video-cache/current.ogv");
+                string absTemp = ProjectSettings.GlobalizePath("user://video-cache/temp_raw.mp4");
+
+                if (System.IO.File.Exists(absTemp)) System.IO.File.Delete(absTemp);
+                if (System.IO.File.Exists(absOgv)) System.IO.File.Delete(absOgv);
+
+                // Step 1: yt-dlp download up to 720p
+                var ytPsi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ytdlpPath,
+                    Arguments = $"--no-warnings --no-playlist -f \"bestvideo[height<=720]+bestaudio/best[height<=720]/best\" -o \"{absTemp}\" \"{url}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using (var pYt = System.Diagnostics.Process.Start(ytPsi))
+                {
+                    if (pYt == null) return null;
+                    if (!pYt.WaitForExit(90_000)) { pYt.Kill(); return null; }
+                    if (pYt.ExitCode != 0 || !System.IO.File.Exists(absTemp)) return null;
+                }
+
+                // Step 2: ffmpeg transcode to Theora/Vorbis OGV
+                var ffPsi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = $"-y -i \"{absTemp}\" -c:v libtheora -q:v 5 -c:a libvorbis -q:a 3 -shortest \"{absOgv}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using (var pFf = System.Diagnostics.Process.Start(ffPsi))
+                {
+                    if (pFf == null) return null;
+                    if (!pFf.WaitForExit(90_000)) { pFf.Kill(); return null; }
+                    if (pFf.ExitCode != 0 || !System.IO.File.Exists(absOgv)) return null;
+                }
+
+                try { if (System.IO.File.Exists(absTemp)) System.IO.File.Delete(absTemp); } catch { }
+
+                return gen == _generation && System.IO.File.Exists(absOgv) && new System.IO.FileInfo(absOgv).Length > 1024
+                    ? "user://video-cache/current.ogv"
+                    : null;
+            }
+            catch { return null; }
+        });
+    }
+
+    private static string FindBinary(string name)
+    {
+        string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+        string[] candidates = {
+            $"{home}/.local/bin/{name}",
+            $"/usr/local/bin/{name}",
+            $"/usr/bin/{name}",
+            $"{home}/bin/{name}",
+            name,
+        };
+        foreach (var c in candidates)
+        {
+            try
+            {
+                if (System.IO.File.Exists(c)) return c;
+            }
+            catch { }
+        }
+        return name;
     }
 
     private static string Str(JsonElement e, string prop) =>
