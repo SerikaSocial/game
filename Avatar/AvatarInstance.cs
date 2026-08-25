@@ -424,16 +424,15 @@ public sealed partial class AvatarInstance : Node3D
         return result;
     }
 
-    /// Scan the skeleton for bones with secondary physics keywords and auto-generate PhysBone chains.
-    /// Note: 'hair' is excluded from auto-detection so hair remains normal, solid, and stable without clipping through bodies/players.
+    /// Scan the skeleton for bones with secondary physics keywords (hair, skirt, ears, tail, breasts, ribbons) and auto-generate PhysBone chains.
     private System.Collections.Generic.List<PhysBoneMeta> AutoDetectPhysBones()
     {
         var result = new System.Collections.Generic.List<PhysBoneMeta>();
         if (Skeleton == null) return result;
 
         string[] keywords = {
-            "skirt", "ear", "tail", "bust", "breast", "titty", "mune", "oppai", "boob",
-            "cleavage", "ribbon", "cape", "wing", "sleeve", "胸", "乳", "耳", "尾", "スカート", "リボン", "袖"
+            "hair", "skirt", "ear", "tail", "bust", "breast", "titty", "mune", "oppai", "boob",
+            "cleavage", "ribbon", "cape", "wing", "sleeve", "胸", "乳", "髪", "耳", "尾", "スカート", "リボン", "袖"
         };
 
         string[] breastKeywords = { "bust", "breast", "titty", "mune", "oppai", "boob", "cleavage", "胸", "乳" };
@@ -472,13 +471,13 @@ public sealed partial class AvatarInstance : Node3D
             {
                 Name = Skeleton.GetBoneName(i),
                 RootTransform = Skeleton.GetBoneName(i),
-                Stiffness = isBreast ? 0.45f : 0.75f,
+                Stiffness = isBreast ? 0.45f : 0.70f,
                 Gravity = isBreast ? 0.10f : 0.08f,
-                Force = isBreast ? 1.10f : 0.80f,
-                Pull = isBreast ? 0.40f : 0.45f,
-                Spring = isBreast ? 0.80f : 0.75f,
-                Damping = isBreast ? 0.12f : 0.25f,
-                MaxStretch = 0.02f,
+                Force = isBreast ? 1.10f : 0.65f,
+                Pull = isBreast ? 0.40f : 0.35f,
+                Spring = isBreast ? 0.80f : 0.70f,
+                Damping = isBreast ? 0.12f : 0.22f,
+                MaxStretch = 0.01f,
                 IsGrabbable = true,
                 IsPosable = false,
             });
