@@ -25,6 +25,15 @@ public partial class TouchControls : Control
     private Action _onMicToggle;
     private Action _onActionToggle;
 
+    /// The interaction pipeline this overlay drives. Same `Interactor` desktop uses — the touch
+    /// button is just another way to call `TryInteract`, not a parallel implementation.
+    public World.Interactor Interactor { get; set; }
+
+    /// Cached so `_Draw` doesn't query the interactor mid-paint, and so the redraw only happens
+    /// when the answer actually changes rather than every poll.
+    private bool _interactVisible;
+    private string _interactLabel;
+
     private int _moveFinger = -1, _lookFinger = -1;
     private readonly HashSet<int> _buttonFingers = new();
     private Vector2 _moveCenter, _moveKnob;
@@ -47,6 +56,21 @@ public partial class TouchControls : Control
         MouseFilter = MouseFilterEnum.Ignore; // touches come through _Input, don't block the world
     }
 
+    /// Poll the interactor so the interact button can appear only when it would do something.
+    ///
+    /// Polled rather than event-driven because `Interactor` already re-scans on its own 10 Hz
+    /// timer; an extra signal would just be a second copy of that cadence. The redraw is gated on
+    /// the value actually changing, so a static scene costs one property read per frame.
+    public override void _Process(double delta)
+    {
+        bool visible = Interactor?.HasAction ?? false;
+        string label = visible ? Interactor.ActionLabel : null;
+        if (visible == _interactVisible && label == _interactLabel) return;
+        _interactVisible = visible;
+        _interactLabel = label;
+        QueueRedraw();
+    }
+
     private Vector2 Size2 => GetViewportRect().Size;
     // Right-side action buttons, stacked from bottom-right upward.
     private Vector2 JumpCenter => new(Size2.X - 130, Size2.Y - 130);
@@ -56,6 +80,10 @@ public partial class TouchControls : Control
     private Vector2 MenuCenter => new(70, 70);
     private Vector2 ChatCenter => new(170, 70);
     private Vector2 ActionCenter => new(270, 70);
+    // Diagonally in from Jump: far enough that a thumb reaching for one cannot clip the other
+    // (centres are ~158 px apart, against a combined radius of 130).
+    private Vector2 InteractCenter => new(Size2.X - 280, Size2.Y - 180);
+    private const float InteractRadius = 60f;
 
     public override void _Input(InputEvent e)
     {
@@ -75,6 +103,16 @@ public partial class TouchControls : Control
 
     private void OnPress(int index, Vector2 pos)
     {
+        // Interact first: it is only hit-testable while visible, and it sits nearest the look
+        // area, so testing it before the look fallback keeps a deliberate tap from turning into
+        // a camera drag.
+        if (_interactVisible && pos.DistanceTo(InteractCenter) <= InteractRadius)
+        {
+            Interactor?.TryInteract();
+            _buttonFingers.Add(index);
+            return;
+        }
+
         // Right-side action buttons
         if (pos.DistanceTo(JumpCenter) <= ButtonRadius)
         {
@@ -184,5 +222,18 @@ public partial class TouchControls : Control
         DrawCircle(ActionCenter, SmallRadius, new Color(1f, 0.7f, 0.3f, 0.18f));
         DrawArc(ActionCenter, SmallRadius, 0, Mathf.Tau, 32, ring, 2, true);
         DrawString(font, ActionCenter + new Vector2(-24, 6), "Action", HorizontalAlignment.Left, -1, 16, new Color(1, 1, 1, 0.8f));
+
+        // Interact — contextual, so it only occupies the screen when there is something to use.
+        // Brand accent rather than the neutral white of the always-on controls, because it is the
+        // one button here that means something different from moment to moment.
+        if (_interactVisible)
+        {
+            DrawCircle(InteractCenter, InteractRadius, new Color(Brand.Accent, 0.30f));
+            DrawArc(InteractCenter, InteractRadius, 0, Mathf.Tau, 40, ring, 3, true);
+            var verb = _interactLabel ?? "Use";
+            // Rough centring: the fallback font has no cheap measure here, and the label is short.
+            DrawString(font, InteractCenter + new Vector2(-verb.Length * 4.5f, 6), verb,
+                HorizontalAlignment.Left, -1, 18, new Color(1, 1, 1, 0.92f));
+        }
     }
 }

@@ -90,6 +90,16 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private readonly Vector3[] _lastHandPos = new Vector3[2];
     private readonly Vector3[] _handVelocity = new Vector3[2];
     private readonly bool[] _gripLatch = new bool[2];
+    private readonly bool[] _triggerLatch = new bool[2];
+
+    /// Raised on a trigger press for hand `i` (0 = left, 1 = right) during normal play. `Main`
+    /// routes it to that hand's `Interactor`; the return value says whether anything happened, so
+    /// the press can be acknowledged with a haptic pulse only when it actually did something.
+    public event System.Func<int, bool> InteractPressed;
+
+    /// The controllers, so `Main` can build a per-hand interaction rig against them.
+    public XRController3D LeftHand => _leftHand;
+    public XRController3D RightHand => _rightHand;
 
     public bool ControlsEnabled { get; set; } = true;
 
@@ -634,6 +644,23 @@ void fragment() {
         }
 
         _gripLatch[i] = gripped;
+
+        // Trigger-to-interact, strictly additive to the grip path above.
+        //
+        // Grip stays the way physics props are picked up — it works and it feels right. The
+        // trigger exists for everything grip *cannot* reach: seats, lay spots, interaction points,
+        // video screens. There is no three-way ambiguity with the UI pointer, because this whole
+        // method only runs while `ControlsEnabled` is true and `UpdatePointer` only acts while it
+        // is false — a menu being open already routes the trigger away from here.
+        bool trigger = hand.GetFloat(ActTrigger) > 0.6f;
+        if (trigger && !_triggerLatch[i])
+        {
+            // A held item claims the trigger first: while you are holding a marker pen, pulling
+            // the trigger has to mean "draw", not "sit on the nearest chair".
+            if (_heldProp[i] is SerikaSocial.World.IUsable) { /* handled by HeldItemController */ }
+            else if (InteractPressed?.Invoke(i) == true) Pulse(hand, 0.4f, 0.03f);
+        }
+        _triggerLatch[i] = trigger;
 
         // A prop can be taken from us by the network layer; drop our claim if so.
         if (_heldProp[i] != null)

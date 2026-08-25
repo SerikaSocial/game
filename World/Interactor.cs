@@ -32,6 +32,16 @@ public partial class Interactor : Node
     /// available action is standing back up.
     public IInteractable Target => _target;
 
+    /// Whether pressing interact would do anything. Unlike `Target`, this stays true while seated,
+    /// where the action is "stand up" rather than a target. Used by the touch overlay to show its
+    /// interact button only when it would do something.
+    public bool HasAction => _rig != null && _rig.Valid && _rig.Active
+        && (_rig.Occupying != null || _target != null);
+
+    /// Verb for the current action, or null when there isn't one.
+    public string ActionLabel =>
+        _rig is { Valid: true, Active: true } && _rig.Occupying != null ? "Stand up" : _target?.PromptText;
+
     public override void _Process(double delta)
     {
         if (_rig == null || !_rig.Valid)

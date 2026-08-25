@@ -39,6 +39,8 @@ public partial class Main : Node3D
     private UI.VideoQueuePanel _videoQueuePanel;
     private UI.SettingsMenu _settingsMenu;
     private SerikaSocial.World.Interactor _interactor;
+    /// One per VR hand, indexed 0 = left, 1 = right to match `VrPlayer.InteractPressed`.
+    private readonly System.Collections.Generic.List<SerikaSocial.World.Interactor> _vrInteractors = new();
     private bool _vrMode;
     // In VR the only XRCamera3D lives inside VrPlayer, which is not spawned until after login.
     // Until then the XR viewport has no camera at all, so both eyes rendered an empty grey void
@@ -515,6 +517,32 @@ public partial class Main : Node3D
         };
     }
 
+    /// One `Interactor` per VR hand, each with its own hand-mounted hint label.
+    ///
+    /// Two rather than one because either hand should be able to point at a seat, and because the
+    /// interactor caches a target — sharing one between hands would make the prompt flicker between
+    /// whatever each hand happened to be near.
+    private void SetupVrInteractors(VrPlayer vr)
+    {
+        var hands = new[] { (hand: vr.LeftHand, isLeft: true), (hand: vr.RightHand, isLeft: false) };
+        foreach (var (hand, isLeft) in hands)
+        {
+            if (hand == null) continue;
+            var label = new UI.VrInteractLabel { Name = "InteractHint" };
+            hand.AddChild(label);
+
+            var interactor = SerikaSocial.World.Interactor.Create(
+                new SerikaSocial.World.VrHandInteractRig(vr, hand, isLeft), label,
+                isLeft ? "InteractorLeft" : "InteractorRight");
+            AddChild(interactor);
+            _vrInteractors.Add(interactor);
+        }
+
+        // The hand index matches the order the rigs were added above.
+        vr.InteractPressed += i =>
+            i >= 0 && i < _vrInteractors.Count && (_vrInteractors[i]?.TryInteract() ?? false);
+    }
+
     private void SpawnLocalPlayer()
     {
         // A previous player rig (e.g. Home's, when joining a world) must not survive — it
@@ -528,9 +556,11 @@ public partial class Main : Node3D
             _localVr = null;
         }
 
-        // The interactor holds a reference to the rig it drives, so it goes with it.
+        // Interactors hold a reference to the rig they drive, so they go with it.
         _interactor?.QueueFree();
         _interactor = null;
+        foreach (var vrInteractor in _vrInteractors) vrInteractor?.QueueFree();
+        _vrInteractors.Clear();
         _interactPrompt?.Clear();
 
         void FreeBootXrRig()
@@ -564,6 +594,15 @@ public partial class Main : Node3D
             // The headset has no Esc key, so the controller face buttons are the only way in.
             vr.MenuPressed += () => { _quickMenu?.Open(_username); SyncMenuHold(); };
             vr.ActionMenuPressed += () => { _actionMenu?.Open(); SyncMenuHold(); };
+
+            // One interactor per hand, so VR can finally use seats, lay spots, interaction points
+            // and video screens — none of which grip can reach, and all of which were desktop-only.
+            // The hint has to live on the hand: a CanvasLayer prompt is composited onto the menu
+            // panel in VR, nowhere near the thing being described.
+            SetupVrInteractors(vr);
+
+            // Parity with desktop: name tag prefs and profile picture apply to the VR rig too.
+            _ = ApplyLocalIdentity();
             GD.Print("VR mode: OpenXR initialized");
         }
         else
@@ -581,9 +620,17 @@ public partial class Main : Node3D
             if (_persistThirdPerson) desktop.SetFirstPerson(false);
             SetupTouchControls(desktop);
 
-            // E-to-interact. VR has its own reach/grab affordances, so this is desktop-only.
-            _interactor = SerikaSocial.World.Interactor.Create(desktop, _interactPrompt);
+            // E-to-interact on desktop; on a touchscreen the same pipeline is driven by the
+            // interact button in TouchControls, which is why the source is tagged.
+            //
+            // Touch passes no prompt: the button itself carries the verb and only appears when
+            // there is something to use, so the corner hint would say the same thing twice.
+            bool touch = DisplayServer.IsTouchscreenAvailable();
+            _interactor = SerikaSocial.World.Interactor.Create(
+                desktop, touch ? null : _interactPrompt,
+                touch ? SerikaSocial.World.InteractSource.Touch : SerikaSocial.World.InteractSource.Desktop);
             AddChild(_interactor);
+            if (_touch != null) _touch.Interactor = _interactor;
 
             // Name card: apply tag/pfp prefs and download the local player's profile picture.
             _ = ApplyLocalIdentity();
