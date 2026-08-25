@@ -50,7 +50,7 @@ public partial class VideoScreen : Node, IInteractable
     public Vector3 FocusPoint => _mesh?.GlobalPosition ?? Vector3.Zero;
     public bool CanInteract => true;
 
-    public void Interact(LocalPlayer player)
+    public void Interact(in InteractionContext ctx)
     {
         InteractionRequested?.Invoke();
     }

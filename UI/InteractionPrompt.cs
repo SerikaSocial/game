@@ -2,14 +2,29 @@ using Godot;
 
 namespace SerikaSocial.UI;
 
+/// Anything that can advertise the current interaction.
+///
+/// Exists because this one is a `CanvasLayer`, and in VR the whole 2D canvas is composited onto a
+/// world-space panel that floats in front of you — so a prompt drawn here is either invisible or
+/// stuck to a menu surface metres from the thing it describes. VR gets `VrInteractLabel` instead.
+public interface IInteractPrompt
+{
+    void Show(string verb);
+    void Clear();
+}
+
 /// The "[E] Sit" hint that appears just under the crosshair when the player is near something
 /// interactable. Purely informational — it never takes input, so it can't steal focus from a
 /// menu or swallow the very key it's advertising.
-public partial class InteractionPrompt : CanvasLayer
+public partial class InteractionPrompt : CanvasLayer, IInteractPrompt
 {
     private PanelContainer _panel;
     private Label _label;
     private string _current;
+
+    /// Shown before the verb. "E" on desktop; on a touchscreen there is no key to press, so the
+    /// button itself is the affordance and the hint is just the verb.
+    public string KeyHint { get; set; } = "E";
 
     /// Below the HUD (50) so a toast or menu always wins, above the world.
     private const int HudLayer = 45;
@@ -46,7 +61,7 @@ public partial class InteractionPrompt : CanvasLayer
     {
         if (_current == verb && _panel.Visible) return;
         _current = verb;
-        _label.Text = $"[E]   {verb}";
+        _label.Text = string.IsNullOrEmpty(KeyHint) ? verb : $"[{KeyHint}]   {verb}";
         _panel.Visible = true;
     }
 

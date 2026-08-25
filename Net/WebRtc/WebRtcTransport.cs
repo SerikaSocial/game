@@ -133,6 +133,22 @@ public sealed class WebRtcTransport : ISerikaTransport
             case MsgType.Chat:
                 ChatReceived?.Invoke(peerId, Encoding.UTF8.GetString(payload));
                 break;
+            case MsgType.ObjectSync:
+                // The body starts at offset 0, not 5: `UdpTransport` skips a sender id the relay
+                // prepends, and there is no relay on a direct channel.
+                if (ObjectFrames.ReadObjectSync(payload, out var objId,
+                        out var x, out var y, out var z,
+                        out var qx, out var qy, out var qz, out var qw,
+                        out var lvx, out var lvy, out var lvz))
+                    ObjectSyncReceived?.Invoke(peerId, objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
+                break;
+            case MsgType.PhysGrab:
+                // hasTargetPeer: true. `SendPhysGrab` emits the client→server layout and nothing
+                // here strips the field, unlike the relay path.
+                if (ObjectFrames.ReadPhysGrab(payload, hasTargetPeer: true,
+                        out var grabType, out var boneOrObjId, out var gx, out var gy, out var gz))
+                    PhysGrabReceived?.Invoke(peerId, grabType, boneOrObjId, gx, gy, gz);
+                break;
         }
     }
 
@@ -150,30 +166,19 @@ public sealed class WebRtcTransport : ISerikaTransport
     public void SendObjectSync(ushort objId, float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz)
     {
         if (!_ready) return;
-        var buf = new byte[44];
-        int o = 0;
-        buf[o++] = (byte)(objId & 0xFF); buf[o++] = (byte)(objId >> 8);
-        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
-        WriteF32(buf, ref o, qx); WriteF32(buf, ref o, qy); WriteF32(buf, ref o, qz); WriteF32(buf, ref o, qw);
-        WriteF32(buf, ref o, lvx); WriteF32(buf, ref o, lvy); WriteF32(buf, ref o, lvz);
-        Broadcast(RelayProtocol.WriteOutbound(MsgType.ObjectSync, buf));
+        Broadcast(RelayProtocol.WriteOutbound(MsgType.ObjectSync,
+            ObjectFrames.WriteObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz)));
     }
 
+    /// Emits the *client→server* PhysGrab layout, `target_peer` included. Over the relay that field
+    /// is a routing hint the server strips before re-framing; on a direct channel nothing strips it,
+    /// so the receive path in `OnData` reads and discards it. The two must be changed together.
     public void SendPhysGrab(byte grabType, uint targetPeer, ushort boneOrObjId, float x, float y, float z)
     {
         if (!_ready) return;
-        var buf = new byte[19];
-        int o = 0;
-        buf[o++] = grabType;
-        buf[o++] = (byte)(targetPeer & 0xFF); buf[o++] = (byte)((targetPeer >> 8) & 0xFF);
-        buf[o++] = (byte)((targetPeer >> 16) & 0xFF); buf[o++] = (byte)((targetPeer >> 24) & 0xFF);
-        buf[o++] = (byte)(boneOrObjId & 0xFF); buf[o++] = (byte)(boneOrObjId >> 8);
-        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
-        Broadcast(RelayProtocol.WriteOutbound(MsgType.PhysGrab, buf));
+        Broadcast(RelayProtocol.WriteOutbound(MsgType.PhysGrab,
+            ObjectFrames.WritePhysGrab(grabType, targetPeer, boneOrObjId, x, y, z)));
     }
-
-    private static void WriteF32(byte[] b, ref int o, float v)
-    { var bytes = BitConverter.GetBytes(v); b[o++] = bytes[0]; b[o++] = bytes[1]; b[o++] = bytes[2]; b[o++] = bytes[3]; }
 
     private void Broadcast(byte[] frame)
     {

@@ -23,8 +23,9 @@ public interface IInteractable
     /// False when the thing is busy (an occupied seat), so it stops offering a prompt.
     bool CanInteract { get; }
 
-    /// Do the thing. Called with the player that pressed E.
-    void Interact(LocalPlayer player);
+    /// Do the thing. `ctx` carries who interacted, from where, and whether a tracked hand was
+    /// involved — see `InteractionContext`.
+    void Interact(in InteractionContext ctx);
 }
 
 /// Something the player is currently *in* — a seat or a bed. Pressing E again releases it.
@@ -94,11 +95,15 @@ public partial class SeatNode : Area3D, IOccupiable
     public float AnchorYaw => SitYaw;
     public Avatar.AvatarInstance.Emote Pose => Avatar.AvatarInstance.Emote.Sit;
 
-    public void Interact(LocalPlayer player)
+    public void Interact(in InteractionContext ctx)
     {
         if (_occupied) return;
+        // Occupying plants the avatar and locks its pose, which only the desktop rig knows how to
+        // do. Room-scale VR seating is its own design problem — you are still physically standing —
+        // so VR declines here rather than appearing to work and then desyncing the rig.
+        if (ctx.Desktop == null) return;
         _occupied = true;
-        player.Occupy(this);
+        ctx.Desktop.Occupy(this);
     }
 
     public void Vacate() => _occupied = false;
@@ -148,11 +153,15 @@ public partial class LayNode : Area3D, IOccupiable
     public float AnchorYaw => LayYaw;
     public Avatar.AvatarInstance.Emote Pose => Avatar.AvatarInstance.Emote.Sleeping;
 
-    public void Interact(LocalPlayer player)
+    public void Interact(in InteractionContext ctx)
     {
         if (_occupied) return;
+        // Occupying plants the avatar and locks its pose, which only the desktop rig knows how to
+        // do. Room-scale VR seating is its own design problem — you are still physically standing —
+        // so VR declines here rather than appearing to work and then desyncing the rig.
+        if (ctx.Desktop == null) return;
         _occupied = true;
-        player.Occupy(this);
+        ctx.Desktop.Occupy(this);
     }
 
     public void Vacate() => _occupied = false;
@@ -203,7 +212,7 @@ public partial class InteractionPoint : Area3D, IInteractable
     public Vector3 FocusPoint => GlobalPosition + new Vector3(0, 1.0f, 0);
     public bool CanInteract => Enabled;
 
-    public void Interact(LocalPlayer player) => Trigger(player);
+    public void Interact(in InteractionContext ctx) => Trigger(ctx.Player as Node3D);
 
     public void Trigger(Node3D interactor) => EmitSignal(SignalName.Interacted, interactor);
 }

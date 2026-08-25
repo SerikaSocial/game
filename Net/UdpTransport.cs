@@ -75,25 +75,15 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public void SendObjectSync(ushort objId, float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz)
     {
         if (!_welcomed) return;
-        var buf = new byte[44];
-        int o = 0;
-        WriteU16(buf, ref o, objId);
-        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
-        WriteF32(buf, ref o, qx); WriteF32(buf, ref o, qy); WriteF32(buf, ref o, qz); WriteF32(buf, ref o, qw);
-        WriteF32(buf, ref o, lvx); WriteF32(buf, ref o, lvy); WriteF32(buf, ref o, lvz);
-        Send(RelayProtocol.WriteOutbound(MsgType.ObjectSync, buf));
+        Send(RelayProtocol.WriteOutbound(MsgType.ObjectSync,
+            ObjectFrames.WriteObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz)));
     }
 
     public void SendPhysGrab(byte grabType, uint targetPeer, ushort boneOrObjId, float x, float y, float z)
     {
         if (!_welcomed) return;
-        var buf = new byte[19]; // grab_type(1) + target_peer(4) + bone_id(2) + pos(12)
-        int o = 0;
-        buf[o++] = grabType;
-        WriteU32(buf, ref o, targetPeer);
-        WriteU16(buf, ref o, boneOrObjId);
-        WriteF32(buf, ref o, x); WriteF32(buf, ref o, y); WriteF32(buf, ref o, z);
-        Send(RelayProtocol.WriteOutbound(MsgType.PhysGrab, buf));
+        Send(RelayProtocol.WriteOutbound(MsgType.PhysGrab,
+            ObjectFrames.WritePhysGrab(grabType, targetPeer, boneOrObjId, x, y, z)));
     }
 
     /// Drive once per frame. `dt` is seconds since last call, used for retransmit/keepalive.
@@ -217,27 +207,23 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             }
             case MsgType.ObjectSync:
             {
-                // [type][peer_id:u32][obj_id:u16][pos:3×f32][rot:4×f32][vel:3×f32]
-                if (n < 5 + 44) break;
+                // [type][peer_id:u32][body…] — skip the 5-byte relay envelope to reach the body.
                 uint sender = RelayProtocol.ReadU32(buf, 1);
-                int o = 5;
-                ushort objId = ReadU16(buf, ref o);
-                float x = ReadF32(buf, ref o), y = ReadF32(buf, ref o), z = ReadF32(buf, ref o);
-                float qx = ReadF32(buf, ref o), qy = ReadF32(buf, ref o), qz = ReadF32(buf, ref o), qw = ReadF32(buf, ref o);
-                float lvx = ReadF32(buf, ref o), lvy = ReadF32(buf, ref o), lvz = ReadF32(buf, ref o);
-                ObjectSyncReceived?.Invoke(sender, objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
+                if (ObjectFrames.ReadObjectSync(buf.AsSpan(5, System.Math.Max(0, n - 5)), out var objId,
+                        out var x, out var y, out var z,
+                        out var qx, out var qy, out var qz, out var qw,
+                        out var lvx, out var lvy, out var lvz))
+                    ObjectSyncReceived?.Invoke(sender, objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
                 break;
             }
             case MsgType.PhysGrab:
             {
-                // [type][peer_id:u32][grab_type:u8][bone_or_obj_id:u16][x:f32][y:f32][z:f32]
-                if (n < 5 + 1 + 2 + 12) break;
+                // hasTargetPeer: false — the relay strips that field and re-frames with the sender
+                // id, unlike the direct P2P channel in WebRtcTransport.
                 uint sender = RelayProtocol.ReadU32(buf, 1);
-                int o = 5;
-                byte grabType = buf[o++];
-                ushort boneId = ReadU16(buf, ref o);
-                float gx = ReadF32(buf, ref o), gy = ReadF32(buf, ref o), gz = ReadF32(buf, ref o);
-                PhysGrabReceived?.Invoke(sender, grabType, boneId, gx, gy, gz);
+                if (ObjectFrames.ReadPhysGrab(buf.AsSpan(5, System.Math.Max(0, n - 5)), hasTargetPeer: false,
+                        out var grabType, out var boneId, out var gx, out var gy, out var gz))
+                    PhysGrabReceived?.Invoke(sender, grabType, boneId, gx, gy, gz);
                 break;
             }
             case MsgType.Reject:

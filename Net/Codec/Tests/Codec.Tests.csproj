@@ -17,6 +17,10 @@
     <Compile Include="..\CodecException.cs" />
     <Compile Include="..\PoseFrame.cs" />
     <Compile Include="..\VoiceFrame.cs" />
+    <!-- ObjectSync/PhysGrab framing. Not part of the golden corpus (the relay treats these bodies
+         as opaque), but the two transports disagree on PhysGrab's layout by design, so the
+         difference needs a test to keep it from rotting. -->
+    <Compile Include="..\..\ObjectFrames.cs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -122,27 +122,27 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         }
     }
 
-    public void Interact(LocalPlayer player)
+    public virtual void Interact(in InteractionContext ctx)
     {
         if (_held && !_heldByLocal)
             return; // someone else has it
 
         if (_held)
         {
-            // Drop
             Release();
+            return;
         }
-        else
-        {
-            // Grab
-            Grab(player);
-        }
+
+        // Both platforms end up at the same place: a world position to hold the prop at. In VR
+        // that is the tracked hand; on desktop `InteractionContext` derives it from eye + aim.
+        // `GrabAt` rejects an already-held prop, so a trigger-interact and a grip-grab landing in
+        // the same frame cannot both take it.
+        GrabAt(ctx.HandPosition);
     }
 
-    /// Grab straight to a world position. The desktop path routes through `Interact`, which
-    /// needs a `LocalPlayer` to derive a hold point from eye/aim; a VR hand already *is* the
-    /// hold point, so it needs a way in that doesn't fabricate a desktop player.
-    /// Returns false when someone else is already holding this prop.
+    /// Grab straight to a world position — the single entry point for taking hold of a prop,
+    /// whether that came from a VR grip, a VR trigger, a desktop E, or a touch button.
+    /// Returns false when someone (including another hand) is already holding this prop.
     public bool GrabAt(Vector3 handPos)
     {
         if (_held) return false;
@@ -158,27 +158,6 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
 
     /// True while we are the ones holding this prop — lets a VR hand confirm it still owns it.
     public bool HeldByLocal => _heldByLocal;
-
-    private void Grab(LocalPlayer player)
-    {
-        _held = true;
-        _heldByLocal = true;
-        _holderPeerId = 0; // local player's peer id is known via transport
-        _returnTimer = 0;
-        Freeze = true; // switch to kinematic control
-        _wasSleeping = Sleeping;
-
-        // Attach to player's hand position (roughly 0.5m in front of camera)
-        // The actual position is updated each frame by the player controller
-        CallDeferred(nameof(AttachToPlayer), player);
-    }
-
-    private void AttachToPlayer(LocalPlayer player)
-    {
-        // Position in front of the player
-        var handPos = player.EyePosition + player.AimForward * 0.6f - new Vector3(0, 0.3f, 0);
-        GlobalPosition = handPos;
-    }
 
     /// Called by LocalPlayer each frame while holding to update the prop position.
     public void UpdateHeldPosition(Vector3 handPos)

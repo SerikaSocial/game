@@ -16,17 +16,17 @@ public partial class Interactor : Node
     /// enough that the array churn is negligible.
     private const double ScanInterval = 0.1;
 
-    /// Interactables more than this far behind where you're looking are ignored, so standing
-    /// between two chairs picks the one you're facing rather than the marginally closer one.
-    private const float MinFacingDot = -0.3f;
-
-    private LocalPlayer _player;
-    private InteractionPrompt _prompt;
+    private IInteractRig _rig;
+    private IInteractPrompt _prompt;
     private double _scanTimer;
     private IInteractable _target;
 
-    public static Interactor Create(LocalPlayer player, InteractionPrompt prompt) =>
-        new() { Name = "Interactor", _player = player, _prompt = prompt };
+    public static Interactor Create(LocalPlayer player, IInteractPrompt prompt,
+        InteractSource source = InteractSource.Desktop) =>
+        Create(new DesktopInteractRig(player, source), prompt, $"Interactor_{source}");
+
+    public static Interactor Create(IInteractRig rig, IInteractPrompt prompt, string name = "Interactor") =>
+        new() { Name = name, _rig = rig, _prompt = prompt };
 
     /// The interactable E would act on right now, or null. Null while seated — there the only
     /// available action is standing back up.
@@ -34,14 +34,23 @@ public partial class Interactor : Node
 
     public override void _Process(double delta)
     {
-        if (_player == null || !IsInstanceValid(_player))
+        if (_rig == null || !_rig.Valid)
         {
             _prompt?.Clear();
             return;
         }
 
+        // An untracked VR controller has a stale pose, so scanning from it would offer whatever
+        // happens to be near where the hand was last seen.
+        if (!_rig.Active)
+        {
+            _target = null;
+            _prompt?.Clear();
+            return;
+        }
+
         // Seated: the only offer is to get up, and there's no point scanning.
-        if (_player.Occupying != null)
+        if (_rig.Occupying != null)
         {
             _target = null;
             _prompt?.Show("Stand up");
@@ -60,8 +69,10 @@ public partial class Interactor : Node
     /// Nearest interactable that's in range, available, and roughly in front of the player.
     private IInteractable FindBest()
     {
-        var eye = _player.EyePosition;
-        var aim = _player.AimForward;
+        var eye = _rig.Origin;
+        var aim = _rig.Aim;
+        float minDot = _rig.MinFacingDot;
+        float rangeScale = _rig.RangeScale;
 
         IInteractable best = null;
         float bestScore = float.MaxValue;
@@ -72,12 +83,12 @@ public partial class Interactor : Node
 
             var offset = candidate.FocusPoint - eye;
             float dist = offset.Length();
-            if (dist > candidate.Range) continue;
+            if (dist > candidate.Range * rangeScale) continue;
 
             // Straight up/down (standing on the seat) has no meaningful facing, so treat a
             // degenerate offset as dead ahead rather than dividing by ~zero.
             float dot = dist > 0.01f ? aim.Dot(offset / dist) : 1f;
-            if (dot < MinFacingDot) continue;
+            if (dot < minDot) continue;
 
             // Distance decides, with a nudge toward whatever you're actually looking at.
             float score = dist - dot * 0.5f;
@@ -93,11 +104,11 @@ public partial class Interactor : Node
     /// whether to mark the key event handled.
     public bool TryInteract()
     {
-        if (_player == null || !IsInstanceValid(_player)) return false;
+        if (_rig == null || !_rig.Valid || !_rig.Active) return false;
 
-        if (_player.Occupying != null)
+        if (_rig.Occupying != null)
         {
-            _player.StandUp();
+            _rig.StandUp();
             _scanTimer = 0;   // re-scan immediately so the prompt updates this frame
             return true;
         }
@@ -106,7 +117,8 @@ public partial class Interactor : Node
         // seat — so re-check availability at the moment of use rather than trusting the scan.
         if (_target == null || !_target.CanInteract) return false;
 
-        _target.Interact(_player);
+        var ctx = _rig.MakeContext();
+        _target.Interact(in ctx);
         _target = null;
         _scanTimer = 0;
         return true;
