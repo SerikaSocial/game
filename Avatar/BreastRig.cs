@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Godot;
 
@@ -24,6 +25,11 @@ namespace SerikaSocial.Avatar;
 /// author who rigged their own chest bones, or who set `disableAutoPhysBones`, is left alone.
 public static class BreastRig
 {
+    /// Minimum share of a vertex's weight that must already belong to the torso before any of
+    /// it is moved to the chest bones. Vertices below this are arm, shoulder or neck geometry
+    /// that merely sits near the chest, and rebinding them makes limbs move with the chest.
+    private const float TorsoWeightGate = 0.5f;
+
     public const string LeftBone = "Serika_Breast_L";
     public const string RightBone = "Serika_Breast_R";
 
@@ -124,7 +130,7 @@ public static class BreastRig
                     if (p.Y < bandLow || p.Y > bandHigh) continue;
                     if ((p - chestPos).Dot(forward) <= 0f) continue;   // back and sides only
 
-                    if (TorsoWeight(bones, weights, v, inf, bindMap, torsoBones) < 0.5f) continue;
+                    if (TorsoWeight(bones, weights, v, inf, bindMap, torsoBones) < TorsoWeightGate) continue;
 
                     float side = (p - chestPos).Dot(rightDir);
                     if (side > 0f) rightCandidates.Add(p);
@@ -345,14 +351,21 @@ public static class BreastRig
         return t * t * (3f - 2f * t);
     }
 
-    /// Take `amount` of a vertex's torso weight and give it to a new bone, keeping the total at
-    /// 1. Returns true if anything moved.
+    /// Move part of a vertex's torso weight onto the new bones, keeping the total at 1.
+    /// Returns true if anything moved.
+    ///
+    /// Transactional: the vertex is only written if the whole transfer succeeds. An earlier
+    /// version scaled the torso influences down first and bailed out if a slot could not be
+    /// found afterwards, which left that vertex's weights summing to less than 1 — and a vertex
+    /// whose weights don't sum to 1 collapses toward the model origin.
     private static bool Transfer(int[] bones, float[] weights, int v, int inf, int[] bindMap,
         HashSet<int> torsoBones, (int Bind, float Amount) a, (int Bind, float Amount) b)
     {
         int baseIdx = v * inf;
 
-        // How much this vertex actually has to give.
+        // Only ever redistribute torso weight. A vertex mostly held by a shoulder or an upper
+        // arm is arm geometry that happens to sit near the chest, and rebinding it is what makes
+        // an avatar's arm twitch when its chest moves.
         float available = 0f;
         for (int i = 0; i < inf; i++)
         {
@@ -360,63 +373,64 @@ public static class BreastRig
             if (bind >= 0 && bind < bindMap.Length && torsoBones.Contains(bindMap[bind]))
                 available += weights[baseIdx + i];
         }
-        if (available <= 0.001f) return false;
+        if (available < TorsoWeightGate) return false;
 
         float takeA = available * a.Amount;
         float takeB = available * b.Amount;
         if (takeA + takeB <= 0.001f) return false;
 
-        // Scale the torso influences down by the fraction being moved out.
-        float keep = 1f - (a.Amount + b.Amount);
+        // Work on a copy so a failed placement leaves the vertex untouched.
+        Span<int> newBones = stackalloc int[8];
+        Span<float> newWeights = stackalloc float[8];
         for (int i = 0; i < inf; i++)
         {
             int bind = bones[baseIdx + i];
-            if (bind >= 0 && bind < bindMap.Length && torsoBones.Contains(bindMap[bind]))
-                weights[baseIdx + i] *= keep;
+            newBones[i] = bind;
+            bool isTorso = bind >= 0 && bind < bindMap.Length && torsoBones.Contains(bindMap[bind]);
+            newWeights[i] = weights[baseIdx + i] * (isTorso ? 1f - (a.Amount + b.Amount) : 1f);
         }
 
-        if (takeA > 0.001f && !Place(bones, weights, baseIdx, inf, a.Bind, takeA)) return false;
-        if (takeB > 0.001f && !Place(bones, weights, baseIdx, inf, b.Bind, takeB)) return false;
+        if (takeA > 0.001f && !Place(newBones, newWeights, inf, a.Bind, takeA)) return false;
+        if (takeB > 0.001f && !Place(newBones, newWeights, inf, b.Bind, takeB)) return false;
 
-        Normalize(weights, baseIdx, inf);
+        float sum = 0f;
+        for (int i = 0; i < inf; i++) sum += newWeights[i];
+        if (sum <= 1e-6f) return false;
+
+        for (int i = 0; i < inf; i++)
+        {
+            bones[baseIdx + i] = newBones[i];
+            weights[baseIdx + i] = newWeights[i] / sum;
+        }
         return true;
     }
 
     /// Write an influence into a vertex's slots: merge into an existing slot for the same bone,
-    /// else take a free one, else evict the weakest — which is the standard cost of a fixed
-    /// four-influence budget, and at these weights is visually free.
-    private static bool Place(int[] bones, float[] weights, int baseIdx, int inf, int bind, float weight)
+    /// or take one that the torso scale-down has emptied. Never evicts a live influence — the
+    /// one it would evict is the vertex's weakest, which on chest-edge geometry is typically the
+    /// shoulder or arm, and stealing that slot drags arm vertices along with the chest. A vertex
+    /// with no room is simply left alone; with a smooth falloff those are rare and read as a
+    /// slightly stiffer patch, not a seam.
+    private static bool Place(Span<int> bones, Span<float> weights, int inf, int bind, float weight)
     {
         for (int i = 0; i < inf; i++)
-            if (bones[baseIdx + i] == bind && weights[baseIdx + i] > 0f)
+            if (bones[i] == bind && weights[i] > 0f)
             {
-                weights[baseIdx + i] += weight;
+                weights[i] += weight;
                 return true;
             }
 
-        int weakest = -1;
-        float weakestW = float.MaxValue;
         for (int i = 0; i < inf; i++)
-        {
-            float w = weights[baseIdx + i];
-            if (w <= 0.0001f) { bones[baseIdx + i] = bind; weights[baseIdx + i] = weight; return true; }
-            if (w < weakestW) { weakestW = w; weakest = i; }
-        }
+            if (weights[i] <= 0.0001f)
+            {
+                bones[i] = bind;
+                weights[i] = weight;
+                return true;
+            }
 
-        if (weakest < 0 || weakestW >= weight) return false;
-        bones[baseIdx + weakest] = bind;
-        weights[baseIdx + weakest] = weight;
-        return true;
+        return false;
     }
 
-    private static void Normalize(float[] weights, int baseIdx, int inf)
-    {
-        float sum = 0f;
-        for (int i = 0; i < inf; i++) sum += weights[baseIdx + i];
-        if (sum <= 1e-6f) return;
-        float inv = 1f / sum;
-        for (int i = 0; i < inf; i++) weights[baseIdx + i] *= inv;
-    }
 
     // ── skin plumbing ─────────────────────────────────────────────────────────────────────
 

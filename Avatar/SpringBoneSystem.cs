@@ -55,13 +55,36 @@ public sealed partial class SpringBoneSystem : Node
     /// through its last millimetre isn't cut short and left visibly off its rest pose.
     private const float SleepDelay = 0.4f;
 
+    /// How much the restoring pull strengthens with deflection. At rest the pull is exactly the
+    /// authored stiffness, so soft rigs still feel soft; at 90° off rest it is 11× that.
+    ///
+    /// Chosen, not guessed. At steady state a chain trailing a body moving at `v` satisfies
+    /// `v·drag = s·(1 + Ramp·(1−cosθ))·sinθ`. For the softest hair in circulation (stiffness 0.4,
+    /// drag 0.4) at this game's 4 m/s walk, Ramp = 10 settles it around 50–60°; at the 7 m/s
+    /// sprint, around 70°. Below about 8 the chain cannot win at walking pace at all and pins
+    /// flat against its length constraint, which is what "that much force backward, maybe in
+    /// heavy wind" was describing.
+    private const float StiffnessRamp = 10f;
+
+    /// Hard cone limit applied to chains that don't specify one, as a last backstop against a
+    /// chain ending up straight out sideways. Deliberately generous — the previous solver's 25°
+    /// clamp is what made the rig look like it had no physics at all.
+    private const float DefaultMaxAngleDegrees = 72f;
+
     private Skeleton3D _skeleton;
     private readonly List<Chain> _chains = new();
     private readonly List<Collider> _colliders = new();
     private readonly Dictionary<int, GrabState> _grabs = new();
 
+    /// Anchor-bone index → its world position and rotation this frame. Cleared and refilled per
+    /// frame; kept as a field so the per-frame path doesn't allocate. The rotation is cached
+    /// alongside the position because extracting a quaternion from a basis orthonormalizes it,
+    /// which is not something to repeat 45 times for the three distinct bones Suisei uses.
+    private readonly Dictionary<int, (Vector3 Pos, Quaternion Rot)> _anchorCache = new();
+
     private float _accumulator;
     private bool _needsReset = true;
+    private bool _calibrated;
     private Camera3D _camera;
     private float _lodTimer;
     private bool _halfRatePhase;
@@ -76,8 +99,20 @@ public sealed partial class SpringBoneSystem : Node
     private float _lodNearDistance;
     private float _lodFarDistance;
 
+    /// `colliderMetas` are the colliders the avatar's author placed. `bodyColliders` are the
+    /// generated backstop — capsules down the limbs and torso, derived from the rig's own
+    /// proportions — and every collidable chain gets them *in addition* to whatever the author
+    /// assigned it.
+    ///
+    /// That additive rule exists because authored collider sets are routinely incomplete in ways
+    /// that only show up in motion. Shiroko's hair is assigned the head and two shoulders and
+    /// nothing for the torso, so her back hair swings straight through her back. Suisei's coat
+    /// skirt is assigned *no* colliders at all. Treating the author's list as the complete story
+    /// reproduces those holes; treating it as additions on top of a body that is always solid
+    /// does not, and still honours every collider they did place.
     public void Setup(Skeleton3D skeleton, IReadOnlyList<PhysBoneMeta> physBones,
-        IReadOnlyList<PhysBoneColliderMeta> colliderMetas)
+        IReadOnlyList<PhysBoneColliderMeta> colliderMetas,
+        IReadOnlyList<PhysBoneColliderMeta> bodyColliders = null, float waistY = 0f)
     {
         _skeleton = skeleton;
         _chains.Clear();
@@ -85,6 +120,7 @@ public sealed partial class SpringBoneSystem : Node
         _grabs.Clear();
         JointCount = 0;
         _needsReset = true;
+        _calibrated = false;
 
         // Run late in the frame: the owning player calls AvatarInstance.Animate() from its
         // _PhysicsProcess, and VR hand IK writes on top of that. Secondary motion must observe
@@ -104,13 +140,20 @@ public sealed partial class SpringBoneSystem : Node
         var byName = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < _colliders.Count; i++) byName[_colliders[i].Name] = i;
 
+        // The generated body backstop goes in after the authored set, and its indices are kept
+        // so every chain can be given them regardless of what the author assigned.
+        var backstop = new List<int>();
+        int authoredCount = _colliders.Count;
+        BuildColliders(bodyColliders);
+        for (int i = authoredCount; i < _colliders.Count; i++) backstop.Add(i);
+
         foreach (var pb in physBones)
         {
             if (pb == null || string.IsNullOrEmpty(pb.RootTransform)) continue;
             int rootBone = _skeleton.FindBone(pb.RootTransform);
             if (rootBone < 0) continue;
 
-            var chain = BuildChain(pb, rootBone, byName);
+            var chain = BuildChain(pb, rootBone, byName, backstop, waistY);
             if (chain != null && chain.Joints.Count > 0)
             {
                 _chains.Add(chain);
@@ -140,6 +183,7 @@ public sealed partial class SpringBoneSystem : Node
                 Shape = (ColliderShape)Mathf.Clamp(c.ShapeType, 0, 2),
                 LocalOffset = ToVector(c.Offset, Vector3.Zero),
                 LocalTail = ToVector(c.Tail, Vector3.Zero),
+                Region = Mathf.Clamp(c.Region, 0, 2),
             });
         }
     }
@@ -149,7 +193,8 @@ public sealed partial class SpringBoneSystem : Node
     /// array can solve the whole tree with each joint reading its parent's already-solved world
     /// rotation. This is what makes branching work: a skirt root with ten panels hanging off it
     /// is one chain of ten independent branches, not ten bones in a line.
-    private Chain BuildChain(PhysBoneMeta pb, int rootBone, Dictionary<string, int> colliderByName)
+    private Chain BuildChain(PhysBoneMeta pb, int rootBone, Dictionary<string, int> colliderByName,
+        List<int> bodyBackstop, float waistY)
     {
         var chain = new Chain
         {
@@ -159,30 +204,49 @@ public sealed partial class SpringBoneSystem : Node
             Stiffness = Mathf.Max(pb.Stiffness, 0f),
             Gravity = Mathf.Max(pb.Gravity, 0f),
             GravityDir = ToVector(pb.GravityDir, Vector3.Down).LimitLength(1f),
-            Drag = Mathf.Clamp(pb.Damping, 0f, 0.99f),
+            // Floor the drag. VRoid writes `dragForce: 0` for coat skirts (Suisei's are all zero),
+            // and zero drag is a perpetual-motion machine: the chain keeps every bit of velocity
+            // it ever gains and rings forever, never settling and never sleeping.
+            Drag = Mathf.Clamp(pb.Damping, 0.08f, 0.99f),
             Radius = Mathf.Max(pb.Radius, 0f),
             IsGrabbable = pb.IsGrabbable,
-            MaxAngleCos = MaxAngleToCos(pb.MaxAngleDegrees),
+            MaxAngleCos = MaxAngleToCos(pb.MaxAngleDegrees > 0f ? pb.MaxAngleDegrees
+                                                               : DefaultMaxAngleDegrees),
         };
         if (chain.GravityDir.LengthSquared() < 1e-8f) chain.GravityDir = Vector3.Down;
         else chain.GravityDir = chain.GravityDir.Normalized();
 
-        // Which colliders this chain is allowed to hit. `allowCollision: false` means none —
-        // distinct from an empty list, which means "no preference, use all of them". Chest
-        // physics relies on that distinction: its bones live inside the torso collider, so
-        // letting it collide with the body would shove it straight back out every frame.
-        if (!pb.AllowCollision)
+        // Which colliders this chain hits. `allowCollision: false` means none at all — chest
+        // physics needs that, since its bones sit inside the torso by construction and body
+        // collision would shove them out every frame.
+        //
+        // Otherwise: the author's assignments, if any, plus the body backstop always.
+        // A *null* collider list means "unspecified, use every authored collider"; an *empty*
+        // one means the author deliberately assigned none, which is what VRM's empty
+        // `colliderGroups` says and what Suisei's coat skirt has. Collapsing those two into
+        // "use everything" is what had that skirt colliding with her hands.
+        if (pb.AllowCollision)
         {
-            // No colliders.
-        }
-        else if (pb.Colliders != null && pb.Colliders.Count > 0)
-        {
-            foreach (var n in pb.Colliders)
-                if (n != null && colliderByName.TryGetValue(n, out int ci)) chain.ColliderIdx.Add(ci);
-        }
-        else
-        {
-            for (int i = 0; i < _colliders.Count; i++) chain.ColliderIdx.Add(i);
+            if (pb.Colliders == null)
+            {
+                foreach (var kv in colliderByName) chain.ColliderIdx.Add(kv.Value);
+            }
+            else
+            {
+                foreach (var n in pb.Colliders)
+                    if (n != null && colliderByName.TryGetValue(n, out int ci)) chain.ColliderIdx.Add(ci);
+            }
+
+            // Which half of the body this chain can plausibly reach, inferred from where it
+            // hangs rather than from its name — a skirt rooted on the shin (Suisei's coat) and
+            // one rooted on the hips (Shiroko's hem) both come out lower, and hair off the head
+            // comes out upper, with no keyword involved.
+            int chainRegion = _skeleton.GetBoneGlobalRest(rootBone).Origin.Y < waistY ? 2 : 1;
+
+            if (bodyBackstop != null)
+                foreach (int i in bodyBackstop)
+                    if (_colliders[i].Region == 0 || _colliders[i].Region == chainRegion)
+                        if (!chain.ColliderIdx.Contains(i)) chain.ColliderIdx.Add(i);
         }
 
         // Children lookup, built once — Skeleton3D has no child accessor that doesn't allocate.
@@ -195,25 +259,50 @@ public sealed partial class SpringBoneSystem : Node
             list.Add(i);
         }
 
-        AddJoint(chain, rootBone, -1, children);
+        AddJoint(chain, rootBone, -1, children, Transform3D.Identity);
         return chain;
     }
 
-    private void AddJoint(Chain chain, int bone, int parentJoint, Dictionary<int, List<int>> children)
+    /// Walk the subtree, turning bones into joints.
+    ///
+    /// `carry` accumulates the rest transform of any bones skipped on the way down, so a joint's
+    /// offset stays correct relative to the last bone actually simulated rather than to its
+    /// immediate skeleton parent.
+    private void AddJoint(Chain chain, int bone, int parentJoint, Dictionary<int, List<int>> children,
+        Transform3D carry)
     {
         children.TryGetValue(bone, out var kids);
 
         var rest = _skeleton.GetBoneRest(bone);
+        Transform3D local = carry * rest;   // rest, relative to the last simulated ancestor
 
-        // The tail is where this joint's child sits. With several children — a skirt root, a
-        // hair root — the average is the honest single direction for the parent to point, and
-        // each child still gets its own joint and swings independently.
+        // The tail is where this joint's child sits; with several children the average is the
+        // single direction the parent can be said to point.
         Vector3 childLocal;
+        bool hub = false;
         if (kids != null && kids.Count > 0)
         {
-            childLocal = Vector3.Zero;
-            foreach (int k in kids) childLocal += _skeleton.GetBoneRest(k).Origin;
-            childLocal /= kids.Count;
+            Vector3 sum = Vector3.Zero;
+            float meanLen = 0f;
+            foreach (int k in kids)
+            {
+                var o = _skeleton.GetBoneRest(k).Origin;
+                sum += o;
+                meanLen += o.Length();
+            }
+            childLocal = sum / kids.Count;
+            meanLen /= kids.Count;
+
+            // When children fan out in opposing directions they cancel, and the average is a
+            // near-zero vector pointing nowhere — a *hub*, not a link. Simulating one is
+            // degenerate: the axis is far shorter than the distance the body travels per step,
+            // so the joint gets slammed to a different point on its length sphere every frame,
+            // and every branch below it inherits the noise. Carry it through instead.
+            //
+            // This is a guard, not a fix for an observed rig: the two roots that prompted the
+            // check (Shiroko's `hair_phys` and `hem_phys`) measure at ratios of 0.75 and 0.55,
+            // comfortably above the threshold, and are simulated normally.
+            hub = kids.Count > 1 && meanLen > 1e-5f && childLocal.Length() < meanLen * 0.35f;
         }
         else
         {
@@ -226,24 +315,33 @@ public sealed partial class SpringBoneSystem : Node
 
         float boneLength = childLocal.Length();
 
-        // A zero-length joint cannot define a direction, so it can't be rotated meaningfully.
-        // Skip it as a joint but keep walking, or an entire branch below it would be dropped.
-        if (boneLength > 1e-5f)
+        // A hub, or a bone too short to define a direction, is carried through rather than
+        // simulated — skipping it outright would drop everything below it.
+        if (hub || boneLength <= 1e-5f)
         {
-            chain.Joints.Add(new Joint
-            {
-                BoneIdx = bone,
-                ParentJoint = parentJoint,
-                RestLocalPos = rest.Origin,
-                RestLocalRot = rest.Basis.GetRotationQuaternion().Normalized(),
-                BoneAxis = childLocal / boneLength,
-                Length = boneLength,
-            });
-            parentJoint = chain.Joints.Count - 1;
+            if (kids != null)
+                foreach (int k in kids) AddJoint(chain, k, parentJoint, children, local);
+            return;
         }
 
+        chain.Joints.Add(new Joint
+        {
+            BoneIdx = bone,
+            ParentJoint = parentJoint,
+            RestLocalPos = local.Origin,
+            RestLocalRot = local.Basis.GetRotationQuaternion().Normalized(),
+            // Rotation contributed by skipped ancestors. The solver works relative to the last
+            // simulated joint, but `SetBonePoseRotation` wants a pose relative to the bone's
+            // real skeleton parent, so this is divided back out on write-back.
+            CarryRot = carry.Basis.GetRotationQuaternion().Normalized(),
+            BoneAxis = childLocal / boneLength,
+            Length = boneLength,
+        });
+        parentJoint = chain.Joints.Count - 1;
+
         if (kids == null) return;
-        foreach (int k in kids) AddJoint(chain, k, parentJoint, children);
+        // Children start a fresh carry: this bone is simulated, so it is their reference frame.
+        foreach (int k in kids) AddJoint(chain, k, parentJoint, children, Transform3D.Identity);
     }
 
     // ── frame loop ────────────────────────────────────────────────────────────────────────
@@ -334,14 +432,25 @@ public sealed partial class SpringBoneSystem : Node
 
         bool anyAwake = false;
 
+        // Chains overwhelmingly share anchors — Suisei's 36 coat-skirt chains hang off two shin
+        // bones and her nine hair chains off one head bone. Querying per chain made the anchor
+        // lookups alone the dominant per-frame cost for that avatar, and they are the one thing
+        // a sleeping chain still has to do (it needs the anchor to know when to wake).
+        _anchorCache.Clear();
+
         foreach (var chain in _chains)
         {
-            Transform3D anchor = chain.AnchorBone >= 0
-                ? skelXform * _skeleton.GetBoneGlobalPose(chain.AnchorBone)
-                : skelXform;
+            (Vector3 pos, Quaternion rot) anchor;
+            if (chain.AnchorBone < 0) anchor = (skelXform.Origin, skelRot);
+            else if (!_anchorCache.TryGetValue(chain.AnchorBone, out anchor))
+            {
+                var world = skelXform * _skeleton.GetBoneGlobalPose(chain.AnchorBone);
+                anchor = (world.Origin, world.Basis.GetRotationQuaternion().Normalized());
+                _anchorCache[chain.AnchorBone] = anchor;
+            }
 
-            var pos = anchor.Origin;
-            var rot = anchor.Basis.GetRotationQuaternion().Normalized();
+            var pos = anchor.pos;
+            var rot = anchor.rot;
 
             if (!_needsReset && pos.DistanceTo(chain.PrevAnchorPos) > TeleportThreshold)
                 teleported = true;
@@ -380,7 +489,35 @@ public sealed partial class SpringBoneSystem : Node
         if (_needsReset)
         {
             ResetToRest();
+            if (!_calibrated) { CalibrateRestSeparation(); _calibrated = true; }
             _needsReset = false;
+        }
+    }
+
+    /// Record how far each joint sits from each of its colliders in the authored rest pose.
+    ///
+    /// Run once, on the first frame the rig is placed in the world, because it needs the
+    /// colliders in world space — which is only true after `PrepareFrame` has posed them. The
+    /// numbers become the floor on how far collision may push each joint, so a rig that was
+    /// authored resting against (or inside) the body keeps that shape.
+    private void CalibrateRestSeparation()
+    {
+        foreach (var chain in _chains)
+        {
+            int n = chain.ColliderIdx.Count;
+            if (n == 0) continue;
+
+            foreach (var j in chain.Joints)
+            {
+                j.RestSeparation = new float[n];
+                for (int k = 0; k < n; k++)
+                {
+                    var col = _colliders[chain.ColliderIdx[k]];
+                    j.RestSeparation[k] = col.Shape == ColliderShape.Inside
+                        ? float.MaxValue                       // inside-colliders are a ceiling, not a floor
+                        : j.Tail.DistanceTo(Nearest(col, j.Tail));
+                }
+            }
         }
     }
 
@@ -442,10 +579,20 @@ public sealed partial class SpringBoneSystem : Node
                 {
                     Vector3 inertia = (j.Tail - j.PrevTail) * (1f - chain.Drag);
 
-                    // Constant-magnitude pull toward the rest direction, as VRM defines it, so
-                    // author-tuned stiffness values mean what they meant in Unity. Clamped to the
-                    // bone length so very short joints (hair tips) can't overshoot and buzz.
-                    float pull = Mathf.Min(stiffness * dt, length);
+                    // Restoring pull toward the rest direction. VRM's model uses a *constant*
+                    // magnitude here, and that is precisely why hair flies out horizontally when
+                    // you walk: a constant pull `s` can only balance a body moving at `v` while
+                    // `s > v · drag`, and authored stiffness (0.4–1.0) loses that race at walking
+                    // speed. Past that point the chain saturates against its length constraint —
+                    // pinned at 90°, which reads as gale-force wind.
+                    //
+                    // So the pull ramps with how far the joint has strayed: identical to the
+                    // authored value at rest, so soft rigs still feel soft and author tuning is
+                    // preserved where it is actually observed, but several times stronger out at
+                    // large deflections, where it turns a saturating chain into one that settles
+                    // at a believable lag angle.
+                    float deviation = 1f - Mathf.Clamp(restDir.Dot((j.Tail - head).Normalized()), -1f, 1f);
+                    float pull = Mathf.Min(stiffness * (1f + StiffnessRamp * deviation) * dt, length);
                     Vector3 external = chain.GravityWorld * (chain.Gravity * dt);
 
                     tail = j.Tail + inertia + restDir * pull + external;
@@ -457,6 +604,7 @@ public sealed partial class SpringBoneSystem : Node
                 if (chain.ColliderIdx.Count > 0)
                 {
                     float hitRadius = chain.Radius * chain.Scale;
+                    var restSep = j.RestSeparation;
 
                     // Resolve and re-constrain twice. One pass is not enough: pushing the tail
                     // out of a collider moves it off the bone-length sphere, and snapping it back
@@ -467,7 +615,20 @@ public sealed partial class SpringBoneSystem : Node
                     for (int iter = 0; iter < 2; iter++)
                     {
                         for (int k = 0; k < chain.ColliderIdx.Count; k++)
-                            tail = Resolve(_colliders[chain.ColliderIdx[k]], tail, hitRadius);
+                        {
+                            var col = _colliders[chain.ColliderIdx[k]];
+
+                            // Never push a joint further out than where its author put it. A coat
+                            // that hugs a thigh rests *inside* the leg capsule by design; forcing
+                            // it out to the capsule's surface every frame inflated Suisei's skirt
+                            // 15 cm off her legs while she stood still. The collider's job here is
+                            // to stop the joint going deeper than it started, not to relocate it.
+                            float minDist = restSep != null && k < restSep.Length
+                                ? Mathf.Min(col.WorldRadius + hitRadius, restSep[k])
+                                : col.WorldRadius + hitRadius;
+
+                            tail = Resolve(col, tail, minDist);
+                        }
 
                         // Ordering matters: resolve first, constrain second, so the joint rotates
                         // *around* the collider rather than being stretched off it.
@@ -525,7 +686,9 @@ public sealed partial class SpringBoneSystem : Node
             {
                 var j = joints[ji];
                 Quaternion parentRot = j.ParentJoint < 0 ? chain.AnchorRot : joints[j.ParentJoint].WorldRot;
-                var local = (parentRot.Inverse() * j.WorldRot).Normalized();
+                // Divide out the skipped ancestors' rotation: the pose Godot wants is relative
+                // to this bone's real parent, not to the last bone the solver simulated.
+                var local = ((parentRot * j.CarryRot).Inverse() * j.WorldRot).Normalized();
                 _skeleton.SetBonePoseRotation(j.BoneIdx, local);
             }
         }
@@ -591,37 +754,22 @@ public sealed partial class SpringBoneSystem : Node
         return head + d * (length / Mathf.Sqrt(lenSq));
     }
 
-    /// Push a tail point of radius `hitRadius` out of (or, for an inside-sphere, into) a collider.
-    private static Vector3 Resolve(Collider col, Vector3 tail, float hitRadius)
+    /// Keep a tail point at least `minDist` from a collider's core (or, for an inside-sphere,
+    /// within it).
+    private static Vector3 Resolve(Collider col, Vector3 tail, float minDist)
     {
-        switch (col.Shape)
+        if (col.Shape == ColliderShape.Inside)
         {
-            case ColliderShape.Capsule:
-            {
-                // Closest point on the capsule's core segment, then treat it as a sphere there.
-                Vector3 seg = col.WorldTail - col.WorldCenter;
-                float segLenSq = seg.LengthSquared();
-                Vector3 nearest = segLenSq < 1e-12f
-                    ? col.WorldCenter
-                    : col.WorldCenter + seg * Mathf.Clamp(seg.Dot(tail - col.WorldCenter) / segLenSq, 0f, 1f);
-                return PushOut(tail, nearest, col.WorldRadius + hitRadius);
-            }
-
-            case ColliderShape.Inside:
-            {
-                // Keep the tail within the sphere instead of outside it — VRM 1.0 uses this to
-                // fence hair inside a hood or a helmet.
-                float limit = col.WorldRadius - hitRadius;
-                if (limit <= 0f) return col.WorldCenter;
-                Vector3 d = tail - col.WorldCenter;
-                float distSq = d.LengthSquared();
-                if (distSq <= limit * limit) return tail;
-                return col.WorldCenter + d * (limit / Mathf.Sqrt(distSq));
-            }
-
-            default:
-                return PushOut(tail, col.WorldCenter, col.WorldRadius + hitRadius);
+            // Keep the tail within the sphere instead of outside it — VRM 1.0 uses this to
+            // fence hair inside a hood or a helmet.
+            if (minDist <= 0f) return col.WorldCenter;
+            Vector3 d = tail - col.WorldCenter;
+            float distSq = d.LengthSquared();
+            if (distSq <= minDist * minDist) return tail;
+            return col.WorldCenter + d * (minDist / Mathf.Sqrt(distSq));
         }
+
+        return PushOut(tail, Nearest(col, tail), minDist);
     }
 
     private static Vector3 PushOut(Vector3 p, Vector3 center, float minDist)
@@ -788,12 +936,21 @@ public sealed partial class SpringBoneSystem : Node
                 float best = float.MaxValue;
                 bool anchored = false;
 
-                foreach (int ci in chain.ColliderIdx)
+                for (int k = 0; k < chain.ColliderIdx.Count; k++)
                 {
-                    var col = _colliders[ci];
+                    var col = _colliders[chain.ColliderIdx[k]];
                     if (col.Shape == ColliderShape.Inside) continue;
 
-                    best = Mathf.Min(best, j.Tail.DistanceTo(Nearest(col, j.Tail)) - col.WorldRadius);
+                    // Measure against the floor the solver actually enforces: the body surface,
+                    // or where the author rested this joint if that was already inside it. A hair
+                    // root sits under the scalp by design, and calling that a 10 cm penetration
+                    // says more about the metric than about the rig. What matters is whether the
+                    // joint ends up *deeper* than it was authored.
+                    float floor = col.WorldRadius;
+                    if (j.RestSeparation != null && k < j.RestSeparation.Length)
+                        floor = Mathf.Min(floor, j.RestSeparation[k]);
+
+                    best = Mathf.Min(best, j.Tail.DistanceTo(Nearest(col, j.Tail)) - floor);
                     if (j.Head.DistanceTo(Nearest(col, j.Head)) < col.WorldRadius) anchored = true;
                 }
 
@@ -812,6 +969,95 @@ public sealed partial class SpringBoneSystem : Node
         float segLenSq = seg.LengthSquared();
         if (segLenSq < 1e-12f) return col.WorldCenter;
         return col.WorldCenter + seg * Mathf.Clamp(seg.Dot(p - col.WorldCenter) / segLenSq, 0f, 1f);
+    }
+
+    /// Largest per-joint deflection from rest, in degrees. Far more interpretable than tip
+    /// displacement: a long chain accumulates displacement across many joints even when each one
+    /// is barely bent, so displacement alone can't tell "long hair trailing naturally" from
+    /// "every joint pinned flat against its length constraint".
+    /// Joints whose head is inside a collider are excluded: they are held off the body by the
+    /// push-out every step, so their angle reports how deep the collider is, not how hard the
+    /// chain is being thrown. Returns the worst free joint and names it.
+    public (float Degrees, string Bone) DebugMaxAngleDegrees()
+    {
+        float worst = 0f;
+        string worstBone = "(none)";
+
+        foreach (var chain in _chains)
+        {
+            var joints = chain.Joints;
+            for (int ji = 0; ji < joints.Count; ji++)
+            {
+                var j = joints[ji];
+
+                // Skip joints whose head is inside a collider, and joints whose tail is resting
+                // against one. Both are held at an angle the body's shape dictates rather than
+                // one the motion produced — a hair root lying along the skull reads as a 65°
+                // deflection and has nothing to do with how hard the chain is being thrown.
+                bool constrained = false;
+                float hit = chain.Radius * chain.Scale;
+                foreach (int ci in chain.ColliderIdx)
+                {
+                    var col = _colliders[ci];
+                    if (col.Shape == ColliderShape.Inside) continue;
+                    if (j.Head.DistanceTo(Nearest(col, j.Head)) < col.WorldRadius ||
+                        j.Tail.DistanceTo(Nearest(col, j.Tail)) < col.WorldRadius + hit + 0.001f)
+                    {
+                        constrained = true;
+                        break;
+                    }
+                }
+                if (constrained) continue;
+
+                Quaternion parentRot = j.ParentJoint < 0 ? chain.AnchorRot : joints[j.ParentJoint].WorldRot;
+                Vector3 restDir = (parentRot * j.RestLocalRot * j.BoneAxis).Normalized();
+                Vector3 curDir = (j.Tail - j.Head).Normalized();
+                float deg = Mathf.RadToDeg(Mathf.Acos(Mathf.Clamp(restDir.Dot(curDir), -1f, 1f)));
+                if (deg > worst) { worst = deg; worstBone = $"{chain.Name}/{_skeleton.GetBoneName(j.BoneIdx)}"; }
+            }
+        }
+        return (worst, worstBone);
+    }
+
+    /// How far the settled rig sits from the pose its author actually built, per joint, in
+    /// metres. Should be ~0 at rest: the solver's job is to hold the authored shape when nothing
+    /// is moving. A large value means colliders are shoving the rig off the body — a garment
+    /// that hugs a leg being pushed out into a balloon, say — which is a silent failure the
+    /// clearance check cannot see, because it measures against those very colliders.
+    public (float Max, string Bone) DebugRestDrift()
+    {
+        float worst = 0f;
+        string worstBone = "(none)";
+
+        foreach (var chain in _chains)
+        {
+            var joints = chain.Joints;
+            for (int ji = 0; ji < joints.Count; ji++)
+            {
+                var j = joints[ji];
+                Quaternion parentRot = j.ParentJoint < 0 ? chain.AnchorRot : joints[j.ParentJoint].WorldRot;
+                Vector3 restTail = j.Head + (parentRot * j.RestLocalRot * j.BoneAxis).Normalized() *
+                                   (j.Length * chain.Scale);
+                float d = restTail.DistanceTo(j.Tail);
+                if (d > worst) { worst = d; worstBone = $"{chain.Name}/{_skeleton.GetBoneName(j.BoneIdx)}"; }
+            }
+        }
+        return (worst, worstBone);
+    }
+
+    /// Per-chain tail positions, so a diagnostic can tell which chains are moving and which are
+    /// dead. An avatar-wide "it moves" average happily hides a skirt that is completely frozen
+    /// while the hair next to it swings.
+    public IReadOnlyList<(string Chain, int Joints, Vector3[] Tails)> DebugChainTails()
+    {
+        var report = new List<(string, int, Vector3[])>();
+        foreach (var chain in _chains)
+        {
+            var tails = new Vector3[chain.Joints.Count];
+            for (int i = 0; i < chain.Joints.Count; i++) tails[i] = chain.Joints[i].Tail;
+            report.Add((chain.Name, chain.Joints.Count, tails));
+        }
+        return report;
     }
 
     /// World-space tail of every joint, for measuring how far a rig actually moves.
@@ -861,10 +1107,15 @@ public sealed partial class SpringBoneSystem : Node
     {
         public int BoneIdx;
         public int ParentJoint;         // index into Chain.Joints, -1 for the chain root
-        public Vector3 RestLocalPos;    // rest origin, in the parent bone's space
-        public Quaternion RestLocalRot; // rest rotation, relative to the parent bone
+        public Vector3 RestLocalPos;    // rest origin, relative to the last simulated ancestor
+        public Quaternion RestLocalRot; // rest rotation, relative to the last simulated ancestor
+        public Quaternion CarryRot = Quaternion.Identity; // rotation of ancestors we skipped
         public Vector3 BoneAxis;        // unit direction to the (average) child, in bone space
         public float Length;
+
+        /// Distance from this joint's rest tail to each of its chain's colliders, parallel to
+        /// `Chain.ColliderIdx`. Null until the first frame calibrates it.
+        public float[] RestSeparation;
 
         public Vector3 Head;
         public Vector3 Tail;
@@ -880,6 +1131,7 @@ public sealed partial class SpringBoneSystem : Node
         public ColliderShape Shape;
         public Vector3 LocalOffset;
         public Vector3 LocalTail;
+        public int Region;              // 0 = both halves, 1 = upper, 2 = lower
 
         public Vector3 WorldCenter;
         public Vector3 WorldTail;

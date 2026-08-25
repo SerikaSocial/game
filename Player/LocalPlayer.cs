@@ -477,7 +477,11 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         float targetCamY = _currentCameraY;
         if (_firstPerson && _avatar != null && _avatar.TryGetHeadGlobal(out var headXf))
         {
-            float localHeadY = ToLocal(headXf.Origin).Y;
+            // The head *bone* sits at the base of the skull, not at the eyes, so sitting the
+            // camera exactly on it puts the viewpoint around jaw height — inside the collar,
+            // where looking down showed the interior of the avatar's own chest. Lift by the
+            // rig's measured eye offset so first person is actually at eye level.
+            float localHeadY = ToLocal(headXf.Origin).Y + _avatar.EyeOffsetY;
             if (localHeadY > 0.2f)
             {
                 _smoothedHeadY = Mathf.Lerp(_smoothedHeadY, localHeadY, (float)delta * 3f);

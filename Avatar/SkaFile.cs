@@ -104,6 +104,11 @@ public sealed class PhysBoneColliderMeta
 
     /// Capsule far end, in the owning bone's local space. Only read when `shapeType` is 1.
     [JsonPropertyName("tail")] public float[] Tail { get; set; } = null;
+
+    /// Which half of the body this covers: 0 = both, 1 = upper, 2 = lower. Used to keep the
+    /// generated body backstop from testing hair against shins — same answer either way, but
+    /// paid for on every joint, every frame.
+    [JsonPropertyName("region")] public int Region { get; set; } = 0;
 }
 
 public sealed class ToggleMeta

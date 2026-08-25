@@ -769,10 +769,11 @@ public partial class Main : Node3D
             string url = await _api.GetCurrentAvatarUrlAsync();
             if (string.IsNullOrEmpty(url)) return;
             DirAccess.MakeDirRecursiveAbsolute("user://avatars");
-            string abs = ProjectSettings.GlobalizePath("user://avatars/current.ska");
-            if (await _api.DownloadToAsync(url, abs))
+            string rel = $"user://avatars/{CacheNameForUrl(url)}.ska";
+            string abs = ProjectSettings.GlobalizePath(rel);
+            if (System.IO.File.Exists(abs) || await _api.DownloadToAsync(url, abs))
             {
-                _localAvatarPath = "user://avatars/current.ska";
+                _localAvatarPath = rel;
                 AvatarLibrary.CurrentDefaultPath = _localAvatarPath;
                 GD.Print($"equipped custom avatar from {url}");
             }
@@ -798,7 +799,7 @@ public partial class Main : Node3D
             if (string.IsNullOrEmpty(url)) return;
 
             DirAccess.MakeDirRecursiveAbsolute("user://avatars");
-            string rel = "user://avatars/default-outfit.ska";
+            string rel = $"user://avatars/{CacheNameForUrl(url)}.ska";
             string abs = ProjectSettings.GlobalizePath(rel);
             if (System.IO.File.Exists(abs) || await _api.DownloadToAsync(url, abs))
                 AvatarLibrary.DefaultOutfitPath = rel;
@@ -1234,7 +1235,7 @@ public partial class Main : Node3D
         try
         {
             DirAccess.MakeDirRecursiveAbsolute("user://avatars");
-            string rel = $"user://avatars/{SanitizeId(id)}.ska";
+            string rel = $"user://avatars/{CacheNameForUrl(downloadUrl)}.ska";
             string abs = ProjectSettings.GlobalizePath(rel);
 
             if (!System.IO.File.Exists(abs) && !await _api.DownloadToAsync(downloadUrl, abs))
@@ -1369,6 +1370,25 @@ public partial class Main : Node3D
         foreach (char c in id)
             sb.Append(char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_');
         return sb.Length == 0 ? "current" : sb.ToString();
+    }
+
+    /// Cache filename for a `.ska` download URL.
+    ///
+    /// Must key on the URL, never on the avatar/user id. Asset URLs are content-addressed
+    /// (`/av/<hh>/<sha256>.ska`), so re-converting an avatar server-side changes the URL but
+    /// leaves the id alone — an id-keyed cache then serves the superseded bytes forever, with
+    /// no way for the user to clear it. That is exactly what kept the broken pre-fix PMX
+    /// payload on disk after the server-side repair, and what froze peers at whichever avatar
+    /// they happened to be wearing the first time you saw them.
+    private static string CacheNameForUrl(string url)
+    {
+        int q = url.IndexOfAny(new[] { '?', '#' });
+        string path = q >= 0 ? url.Substring(0, q) : url;
+        int slash = path.LastIndexOf('/');
+        string leaf = slash >= 0 ? path.Substring(slash + 1) : path;
+        if (leaf.EndsWith(".ska", StringComparison.OrdinalIgnoreCase))
+            leaf = leaf.Substring(0, leaf.Length - 4);
+        return SanitizeId(leaf);
     }
 
     private bool _tutorialShown;
@@ -1746,9 +1766,11 @@ public partial class Main : Node3D
             string url = await _api.GetAvatarUrlForUserAsync(userId);
             if (string.IsNullOrEmpty(url)) return;
 
-            // Cached per user under user://avatars/, same convention as EquipAvatar.
+            // Cached by content hash under user://avatars/, same convention as EquipAvatar, so a
+            // peer who swaps avatars mid-session resolves to a different file instead of reusing
+            // whatever they wore when we first saw them.
             DirAccess.MakeDirRecursiveAbsolute("user://avatars");
-            string rel = $"user://avatars/peer-{SanitizeId(userId)}.ska";
+            string rel = $"user://avatars/{CacheNameForUrl(url)}.ska";
             string abs = ProjectSettings.GlobalizePath(rel);
             if (!System.IO.File.Exists(abs) && !await _api.DownloadToAsync(url, abs)) return;
 

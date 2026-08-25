@@ -49,7 +49,7 @@ public sealed partial class AvatarInstance : Node3D
         inst.AddChild(model);
 
         inst.Skeleton = FindSkeleton(model);
-        if (inst.Skeleton != null) inst.ResolveHumanoid();
+        if (inst.Skeleton != null) { inst.ResolveHumanoid(); inst.ResolveEyeOffset(); }
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
         inst.SetupAnimation();
         // The glTF state is passed through so the avatar's own VRM spring rig can be read out of
@@ -218,6 +218,35 @@ public sealed partial class AvatarInstance : Node3D
         return true;
     }
 
+    /// How far above the head bone this rig's eyes actually sit, in metres.
+    ///
+    /// The head bone in a humanoid rig is at the base of the skull, not at the eyes — putting a
+    /// first-person camera on it leaves the viewpoint down around the jaw and collar, which is
+    /// why looking down showed the inside of the avatar's own chest. Measured from the eye bones
+    /// when the rig has them, so it scales with the avatar rather than being a fixed nudge.
+    public float EyeOffsetY { get; private set; } = 0.08f;
+
+    private void ResolveEyeOffset()
+    {
+        int head = BoneOf("head");
+        if (Skeleton == null || head < 0) return;
+
+        float headY = Skeleton.GetBoneGlobalRest(head).Origin.Y;
+
+        int le = BoneOf("leftEye"), re = BoneOf("rightEye");
+        if (le >= 0 && re >= 0)
+        {
+            float eyeY = (Skeleton.GetBoneGlobalRest(le).Origin.Y +
+                          Skeleton.GetBoneGlobalRest(re).Origin.Y) * 0.5f;
+            EyeOffsetY = Mathf.Clamp(eyeY - headY, 0.02f, 0.25f);
+            return;
+        }
+
+        // No eye bones — fall back to the metadata's eye height. It's the avatar's height less a
+        // constant rather than a measurement, so clamp it to a plausible skull's worth of offset.
+        EyeOffsetY = Mathf.Clamp(EyeHeight - headY, 0.03f, 0.18f);
+    }
+
     /// Hide the head bone in first-person view so camera isn't blocked by skull geometry.
     /// Neck, chest, shoulders, arms, hands, legs, and body remain at full scale and fully visible.
     public void SetHeadVisible(bool visible)
@@ -250,43 +279,79 @@ public sealed partial class AvatarInstance : Node3D
         return result;
     }
 
-    /// Returns true if a MeshInstance3D is strictly a head/face mesh.
-    /// Body, arms, hands, legs, and outfit meshes are NEVER classified as head meshes.
+    private readonly Dictionary<ulong, bool> _headMeshCache = new();
+
+    /// Whether a mesh is purely head geometry, and so safe to cull in first person.
+    ///
+    /// Decided by where the mesh's skin *weight* actually sits, not by which bones its skin
+    /// binds. That distinction is the whole problem: a VRM skin binds the entire skeleton to
+    /// every mesh — all 136 of Shiroko's bones appear in the bind list of her skirt — so any test
+    /// that asks "is a spine bone bound here?" answers yes for the face too, and no mesh is ever
+    /// classified as a head. The result was that in first person your own face was never culled,
+    /// and looking down put the camera inside it.
+    ///
+    /// Weight mass has no such ambiguity: a face mesh is ~100% weighted to head descendants, a
+    /// jacket ~0%, and a mesh that genuinely spans both falls in between and is left visible —
+    /// which is the safe answer, since culling it would delete the body too.
     public bool IsHeadMesh(MeshInstance3D mesh)
     {
-        if (mesh == null) return false;
+        if (mesh == null || Skeleton == null) return false;
+        if (_headMeshCache.TryGetValue(mesh.GetInstanceId(), out bool cached)) return cached;
 
-        string meshName = mesh.Name.ToString().ToLowerInvariant();
-        if (meshName.Contains("body") || meshName.Contains("outfit") || meshName.Contains("clothes") || meshName.Contains("arm") || meshName.Contains("hand") || meshName.Contains("leg"))
-        {
-            return false;
-        }
+        bool result = ClassifyHeadMesh(mesh);
+        _headMeshCache[mesh.GetInstanceId()] = result;
+        return result;
+    }
 
-        if (Skeleton == null) return false;
+    private bool ClassifyHeadMesh(MeshInstance3D mesh)
+    {
+        if (mesh.Mesh is not ArrayMesh am || mesh.Skin == null) return false;
+
         var headBones = GetHeadBoneSet();
         if (headBones.Count == 0) return false;
 
-        var skin = mesh.Skin;
-        if (skin == null) return false;
-
-        int headCount = 0, totalCount = 0;
-        bool hasBodyBones = false;
-        for (int i = 0; i < skin.GetBindCount(); i++)
+        int bindCount = mesh.Skin.GetBindCount();
+        var bindMap = new int[bindCount];
+        for (int i = 0; i < bindCount; i++)
         {
-            int boneIdx = skin.GetBindBone(i);
-            totalCount++;
-            if (headBones.Contains(boneIdx)) headCount++;
-            string bName = Skeleton.GetBoneName(boneIdx).ToLowerInvariant();
-            if (bName.Contains("arm") || bName.Contains("hand") || bName.Contains("leg") || bName.Contains("hips") || bName.Contains("spine") || bName.Contains("chest"))
+            int b = mesh.Skin.GetBindBone(i);
+            if (b < 0)
             {
-                hasBodyBones = true;
+                // Godot's glTF importer creates *named* binds, so the index is -1 and the bone
+                // has to be looked up by name.
+                var bn = mesh.Skin.GetBindName(i);
+                b = bn.IsEmpty ? -1 : Skeleton.FindBone(bn);
+            }
+            bindMap[i] = b;
+        }
+
+        double headWeight = 0, totalWeight = 0;
+        for (int s = 0; s < am.GetSurfaceCount(); s++)
+        {
+            var arrays = am.SurfaceGetArrays(s);
+            var verts = arrays[(int)Mesh.ArrayType.Vertex].AsVector3Array();
+            var bones = arrays[(int)Mesh.ArrayType.Bones].AsInt32Array();
+            var weights = arrays[(int)Mesh.ArrayType.Weights].AsFloat32Array();
+            if (verts.Length == 0 || bones.Length == 0 || weights.Length != bones.Length) continue;
+
+            int inf = bones.Length / verts.Length;
+            if (inf != 4 && inf != 8) continue;
+
+            for (int i = 0; i < bones.Length; i++)
+            {
+                int bind = bones[i];
+                if (bind < 0 || bind >= bindCount) continue;
+                int bone = bindMap[bind];
+                if (bone < 0) continue;
+
+                float w = weights[i];
+                totalWeight += w;
+                if (headBones.Contains(bone)) headWeight += w;
             }
         }
 
-        // If the mesh is bound to arms, hands, legs, hips, spine or chest, it contains body parts — DO NOT CULL IT!
-        if (hasBodyBones) return false;
-
-        return totalCount > 0 && headCount * 2 > totalCount;
+        // Strictly head. Anything with real body weight in it stays visible.
+        return totalWeight > 0 && headWeight / totalWeight > 0.95;
     }
 
     private static Skeleton3D FindSkeleton(Node node)
@@ -428,17 +493,122 @@ public sealed partial class AvatarInstance : Node3D
 
         if (list.Count == 0) return;
 
-        if (colliders == null || colliders.Count == 0)
-            colliders = AutoDetectColliders();
-
+        // The generated body colliders are always built, even when the author supplied their
+        // own. They are a backstop, not a fallback: authored sets routinely leave the torso or
+        // the legs uncovered, and the result is hair through the back or a skirt through a thigh.
         _springBones = new SpringBoneSystem { Name = "SpringBones" };
         AddChild(_springBones);
-        _springBones.Setup(Skeleton, list, colliders);
+        int hips = BoneOf("hips");
+        float waistY = hips >= 0 ? Skeleton.GetBoneGlobalRest(hips).Origin.Y : 0f;
+        _springBones.Setup(Skeleton, list, colliders, AutoDetectColliders(), waistY);
     }
 
     /// Reset secondary physics to rest. Call after teleporting or respawning, or every chain
     /// reads the jump as a metres-per-frame acceleration and the avatar's hair goes horizontal.
     public void ResetPhysics() => _springBones?.NotifyTeleport();
+
+    /// How thick each body bone actually is, measured from the avatar's own skin.
+    ///
+    /// For every vertex, the bone holding most of its weight is asked how far away it is; each
+    /// bone's radius is then a percentile of those distances. A percentile rather than the
+    /// maximum because the collider wants to sit just under the skin: a backstop flush with the
+    /// surface shoves clothing off the body, and one at the maximum would enclose fingertips and
+    /// hair roots too. Bones with too few vertices to be meaningful are left out, and the caller
+    /// falls back to a proportion of the shoulder span for those.
+    private Dictionary<int, float> MeasureBoneRadii()
+    {
+        var samples = new Dictionary<int, List<float>>();
+        if (Skeleton == null || _model == null) return new Dictionary<int, float>();
+
+        var meshes = new List<MeshInstance3D>();
+        CollectMeshInstances(_model, meshes);
+
+        foreach (var mi in meshes)
+        {
+            if (mi.Mesh is not ArrayMesh am || mi.Skin == null) continue;
+
+            // Vertex bone indices address the skin's bind list, not the skeleton.
+            int bindCount = mi.Skin.GetBindCount();
+            var bindMap = new int[bindCount];
+            for (int i = 0; i < bindCount; i++)
+            {
+                int b = mi.Skin.GetBindBone(i);
+                if (b < 0)
+                {
+                    string bn = mi.Skin.GetBindName(i);
+                    b = string.IsNullOrEmpty(bn) ? -1 : Skeleton.FindBone(bn);
+                }
+                bindMap[i] = b;
+            }
+
+            for (int s = 0; s < am.GetSurfaceCount(); s++)
+            {
+                var arrays = am.SurfaceGetArrays(s);
+                var verts = arrays[(int)Mesh.ArrayType.Vertex].AsVector3Array();
+                var bones = arrays[(int)Mesh.ArrayType.Bones].AsInt32Array();
+                var weights = arrays[(int)Mesh.ArrayType.Weights].AsFloat32Array();
+                if (verts.Length == 0 || bones.Length == 0 || weights.Length != bones.Length) continue;
+
+                int inf = bones.Length / verts.Length;
+                if (inf != 4 && inf != 8) continue;
+
+                for (int v = 0; v < verts.Length; v++)
+                {
+                    // Dominant influence only. A vertex split across a bone and its neighbour
+                    // sits at a joint, where "how thick is this bone" has no clean answer.
+                    int best = -1;
+                    float bestW = 0.6f;
+                    for (int k = 0; k < inf; k++)
+                    {
+                        float w = weights[v * inf + k];
+                        if (w <= bestW) continue;
+                        int bind = bones[v * inf + k];
+                        if (bind < 0 || bind >= bindCount) continue;
+                        bestW = w;
+                        best = bindMap[bind];
+                    }
+                    if (best < 0) continue;
+
+                    if (!samples.TryGetValue(best, out var list)) samples[best] = list = new List<float>();
+                    list.Add(DistanceToBoneAxis(best, verts[v]));
+                }
+            }
+        }
+
+        var radii = new Dictionary<int, float>();
+        foreach (var (bone, list) in samples)
+        {
+            if (list.Count < 32) continue;   // too sparse to trust
+            list.Sort();
+            radii[bone] = list[(int)(list.Count * 0.75f)];
+        }
+        return radii;
+    }
+
+    /// Perpendicular distance from a point to the segment running from a bone to its first child
+    /// — the axis its collider capsule will lie along. Falls back to the bone origin for a leaf.
+    private float DistanceToBoneAxis(int bone, Vector3 p)
+    {
+        Vector3 a = Skeleton.GetBoneGlobalRest(bone).Origin;
+
+        int child = -1;
+        for (int i = 0; i < Skeleton.GetBoneCount(); i++)
+            if (Skeleton.GetBoneParent(i) == bone) { child = i; break; }
+        if (child < 0) return a.DistanceTo(p);
+
+        Vector3 ab = Skeleton.GetBoneGlobalRest(child).Origin - a;
+        float lenSq = ab.LengthSquared();
+        if (lenSq < 1e-8f) return a.DistanceTo(p);
+
+        float t = Mathf.Clamp(ab.Dot(p - a) / lenSq, 0f, 1f);
+        return (a + ab * t).DistanceTo(p);
+    }
+
+    private static void CollectMeshInstances(Node node, List<MeshInstance3D> into)
+    {
+        if (node is MeshInstance3D mi) into.Add(mi);
+        foreach (var c in node.GetChildren()) CollectMeshInstances(c, into);
+    }
 
     /// Body colliders for rigs that ship none of their own.
     ///
@@ -461,9 +631,15 @@ public sealed partial class AvatarInstance : Node3D
             : 0.3f;
         if (span < 1e-3f) span = 0.3f;
 
+        // Where possible the radius is measured from the avatar's own mesh rather than taken as
+        // a fraction of the shoulder span. A proportion that fits one body shape fits the next
+        // one badly: too fat and the capsule swallows the very bones it is meant to guide,
+        // pinning skirts against their angle limit; too thin and hair sails through the back.
+        var measured = MeasureBoneRadii();
+
         // A capsule spanning a bone to its child — the right shape for a limb, and the reason a
         // skirt now slides down a thigh instead of through it.
-        void AddLimb(string role, string childRole, float radiusFactor)
+        void AddLimb(string role, string childRole, float radiusFactor, int region)
         {
             int idx = BoneOf(role);
             int childIdx = BoneOf(childRole);
@@ -479,14 +655,15 @@ public sealed partial class AvatarInstance : Node3D
             {
                 Name = role,
                 RootTransform = Skeleton.GetBoneName(idx),
-                Radius = span * radiusFactor,
+                Radius = measured.TryGetValue(idx, out float mr) ? mr : span * radiusFactor,
                 ShapeType = 1,
                 Offset = new[] { 0f, 0f, 0f },
                 Tail = new[] { tail.X, tail.Y, tail.Z },
+                Region = region,
             });
         }
 
-        void AddSphere(string role, float radiusFactor, Vector3 offset)
+        void AddSphere(string role, float radiusFactor, Vector3 offset, int region)
         {
             int idx = BoneOf(role);
             if (idx < 0) return;
@@ -494,30 +671,36 @@ public sealed partial class AvatarInstance : Node3D
             {
                 Name = role,
                 RootTransform = Skeleton.GetBoneName(idx),
-                Radius = span * radiusFactor,
+                Radius = measured.TryGetValue(idx, out float mr) ? mr : span * radiusFactor,
                 ShapeType = 0,
                 Offset = new[] { offset.X, offset.Y, offset.Z },
+                Region = region,
             });
         }
 
+        // Region tags (1 = upper, 2 = lower, 0 = both) keep the backstop from testing hair
+        // against shins. Same answer either way, but paid for per joint per frame.
+        const int Upper = 1, Lower = 2, Both = 0;
+
         // Legs — the ones that were missing, and the whole reason skirts clipped.
-        AddLimb("leftUpperLeg", "leftLowerLeg", 0.30f);
-        AddLimb("rightUpperLeg", "rightLowerLeg", 0.30f);
-        AddLimb("leftLowerLeg", "leftFoot", 0.22f);
-        AddLimb("rightLowerLeg", "rightFoot", 0.22f);
+        AddLimb("leftUpperLeg", "leftLowerLeg", 0.30f, Lower);
+        AddLimb("rightUpperLeg", "rightLowerLeg", 0.30f, Lower);
+        AddLimb("leftLowerLeg", "leftFoot", 0.22f, Lower);
+        AddLimb("rightLowerLeg", "rightFoot", 0.22f, Lower);
 
         // Torso, as one capsule from the hips to the neck rather than a stack of spheres.
-        AddLimb("spine", "neck", 0.42f);
-        AddLimb("hips", "spine", 0.44f);
+        // Both halves: a skirt rides against the hips and back hair against the shoulder blades.
+        AddLimb("spine", "neck", 0.42f, Both);
+        AddLimb("hips", "spine", 0.44f, Both);
 
         // Arms, so hair and capes don't pass through them.
-        AddLimb("leftUpperArm", "leftLowerArm", 0.16f);
-        AddLimb("rightUpperArm", "rightLowerArm", 0.16f);
-        AddLimb("leftLowerArm", "leftHand", 0.13f);
-        AddLimb("rightLowerArm", "rightHand", 0.13f);
+        AddLimb("leftUpperArm", "leftLowerArm", 0.16f, Upper);
+        AddLimb("rightUpperArm", "rightLowerArm", 0.16f, Upper);
+        AddLimb("leftLowerArm", "leftHand", 0.13f, Upper);
+        AddLimb("rightLowerArm", "rightHand", 0.13f, Upper);
 
         // Head, nudged up so the sphere covers the skull rather than the jaw.
-        AddSphere("head", 0.36f, new Vector3(0, span * 0.28f, 0));
+        AddSphere("head", 0.36f, new Vector3(0, span * 0.28f, 0), Upper);
 
         return result;
     }

@@ -24,8 +24,24 @@ namespace SerikaSocial.Avatar;
 ///     is the failure mode a too-stiff or under-damped solver produces.
 public static class PhysDiagnostic
 {
+    /// Mirrors LocalPlayer.WalkSpeed / SprintSpeed — the speeds the rig is actually driven at.
+    private const float WalkSpeed = 4.0f;
+    private const float SprintSpeed = 7.0f;
 
+
+    /// `async void` swallows exceptions: the method simply stops, `Quit` is never reached, and
+    /// headless Godot spins forever looking like a hang rather than a failure. Wrap it.
     public static async void Run(Node host, string skaPath)
+    {
+        try { await RunInner(host, skaPath); }
+        catch (Exception e)
+        {
+            GD.Print($"PHYSTEST FAIL exception: {e}");
+            host.GetTree().Quit(1);
+        }
+    }
+
+    private static async System.Threading.Tasks.Task RunInner(Node host, string skaPath)
     {
         GD.Print($"PHYSTEST ska={skaPath ?? "(bean)"}");
 
@@ -41,6 +57,17 @@ public static class PhysDiagnostic
 
         GD.Print($"PHYSTEST rig bones={skel.GetBoneCount()} chains={spring.ChainCount} " +
                  $"joints={spring.JointCount} colliders={spring.ColliderCount}");
+
+        // First-person viewpoint: the camera rides the head bone plus this offset. If it lands
+        // below the head bone or implausibly far above it, first person sits inside the chest.
+        int headIdx = skel.FindBone("head");
+        if (headIdx < 0 && avatar.RoleToBoneForDiagnostics().TryGetValue("head", out int hr)) headIdx = hr;
+        if (headIdx >= 0)
+        {
+            float headY = skel.GetBoneGlobalRest(headIdx).Origin.Y;
+            GD.Print($"PHYSTEST EYE headBoneY={headY:F3} offset={avatar.EyeOffsetY:F3} " +
+                     $"viewY={headY + avatar.EyeOffsetY:F3} avatarHeight={avatar.Height:F3}");
+        }
 
         int lb = skel.FindBone(BreastRig.LeftBone);
         int rb = skel.FindBone(BreastRig.RightBone);
@@ -73,25 +100,80 @@ public static class PhysDiagnostic
 
         var rest = spring.DebugClearances();
         Report("REST", rest);
-        bool penetrationOk = CheckPenetration("rest", rest, 0f);
+        // 1 mm of slack: the floor each joint is held to is calibrated from a settled pose, and
+        // settling converges to within a fraction of a millimetre rather than exactly.
+        bool penetrationOk = CheckPenetration("rest", rest, -0.001f);
+
+        // Standing still, the rig should hold the shape its author built. Drift here means the
+        // body colliders are pushing it off that shape — a coat shoved out into a balloon, hair
+        // held off the scalp — which no clearance measurement can reveal, since clearance is
+        // measured against the very colliders doing the pushing.
+        var (drift, driftBone) = spring.DebugRestDrift();
+        GD.Print($"PHYSTEST DRIFT settled pose is {drift:F4}m off the authored rest at {driftBone}");
+        bool driftOk = drift < 0.03f;
+        if (!driftOk)
+            GD.Print("PHYSTEST FAIL drift: body colliders are displacing the rig at rest");
 
         // ── response to motion ────────────────────────────────────────────────────────────
-        // Walk the avatar sideways at 2 m/s for half a second and see whether the rig notices.
+        // Move at the game's real speeds, not a token one: LocalPlayer walks at 4 m/s and
+        // sprints at 7. Testing at 2 understates how hard the rig is actually driven.
+        int deadChains = 0;
         var before = Snapshot(spring);
-        float peak = 0f;
-        for (int i = 0; i < 30; i++)
+        float peak = 0f, walkAngle = 0f;
+        string worstJoint = "(none)";
+        for (int i = 0; i < 45; i++)
         {
-            avatar.Position += new Vector3(2f / 60f, 0, 0);
+            avatar.Position += new Vector3(WalkSpeed / 60f, 0, 0);
             avatar.ForceUpdateTransform();
             spring.DebugStep(1f / 60f);
             peak = Mathf.Max(peak, MaxDisplacement(before, Snapshot(spring), avatar.Position));
+            if (i < 30) continue;
+            var (deg, bone) = spring.DebugMaxAngleDegrees();
+            if (deg > walkAngle) { walkAngle = deg; worstJoint = bone; }
         }
-        GD.Print($"PHYSTEST RESPONSE peak displacement from rest = {peak:F4}m");
+        GD.Print($"PHYSTEST RESPONSE walk {WalkSpeed}m/s: peak displacement={peak:F4}m " +
+                 $"steady max deflection={walkAngle:F1}deg at {worstJoint}");
 
-        // A rig that moves less than a centimetre under a 2 m/s sidestep is not simulating in
-        // any way a person would notice.
+        // A rig that barely moves isn't simulating in any way a person would notice; one pinned
+        // near its cone limit is being thrown flat, which reads as gale-force wind rather than
+        // motion. Both are failures, in opposite directions.
         bool responseOk = peak > 0.01f;
         if (!responseOk) GD.Print("PHYSTEST FAIL response: rig is effectively static");
+        if (walkAngle > 68f)
+            GD.Print($"PHYSTEST WARN deflection {walkAngle:F1}deg at walking pace — chains are " +
+                     "saturating against their limit, secondary motion will look wind-blown");
+
+        // Per-chain motion. An avatar-wide peak hides a whole subsystem being frozen: Suisei's
+        // 36 coat-skirt chains can be completely dead while her 9 hair chains carry the number.
+        {
+            var origin = avatar.Position;
+            var start = spring.DebugChainTails().Select(c => c.Tails.ToArray()).ToList();
+            var moved = new float[start.Count];
+            for (int i = 0; i < 45; i++)
+            {
+                avatar.Position += new Vector3(WalkSpeed / 60f, 0, 0);
+                avatar.ForceUpdateTransform();
+                spring.DebugStep(1f / 60f);
+                Vector3 body = avatar.Position - origin;
+                var now = spring.DebugChainTails();
+                for (int c = 0; c < now.Count && c < start.Count; c++)
+                    for (int j = 0; j < now[c].Tails.Length; j++)
+                        moved[c] = Mathf.Max(moved[c], (now[c].Tails[j] - body - start[c][j]).Length());
+            }
+
+            var chains = spring.DebugChainTails();
+            int dead = moved.Count(m => m < 0.005f);
+            var byName = chains.Select((c, i) => (c.Chain, moved[i]))
+                               .OrderBy(t => t.Item2).ToList();
+            GD.Print($"PHYSTEST CHAINS {chains.Count} total, {dead} moved <5mm at walking pace; " +
+                     $"quietest={byName[0].Chain}@{byName[0].Item2:F4}m " +
+                     $"liveliest={byName[^1].Chain}@{byName[^1].Item2:F4}m");
+            if (dead > 0)
+                GD.Print($"PHYSTEST FAIL dead chains: {dead} of {chains.Count} do not move");
+            deadChains = dead;
+
+            for (int i = 0; i < 120; i++) spring.DebugStep(1f / 60f);
+        }
 
         // Penetration must also hold *during* motion, not just at rest — that is the case that
         // actually put a skirt through a leg while walking.
@@ -169,7 +251,7 @@ public static class PhysDiagnostic
         bool liveOk = solved > 0;
         if (!liveOk) GD.Print("PHYSTEST FAIL live: the solver never ran from the engine's own loop");
 
-        bool ok = penetrationOk && responseOk && movingOk && settleOk && skinOk && liveOk;
+        bool ok = penetrationOk && responseOk && movingOk && settleOk && skinOk && liveOk && driftOk && deadChains == 0;
         GD.Print($"PHYSTEST {(ok ? "PASS" : "FAIL")}");
         host.GetTree().Quit(ok ? 0 : 1);
     }
@@ -248,6 +330,26 @@ public static class PhysDiagnostic
         GD.Print($"PHYSTEST SKIN surfaces={surfaces} verts={verts} " +
                  $"badWeightSum={badWeight} badBoneIndex={badIndex}");
 
+        // First-person head culling depends on `IsHeadMesh` resolving each skin bind to a real
+        // bone. Godot's glTF importer uses *named* binds, so this silently classified nothing at
+        // all when it read the bind index directly. Report the split so a regression is visible as
+        // numbers rather than as "my own hair is in my face".
+        int headMeshes = 0, namedBinds = 0, unresolvedBinds = 0;
+        foreach (var mi in meshes)
+        {
+            if (mi.Skin == null) continue;
+            for (int i = 0; i < mi.Skin.GetBindCount(); i++)
+            {
+                if (mi.Skin.GetBindBone(i) >= 0) continue;
+                var bn = mi.Skin.GetBindName(i);
+                if (!bn.IsEmpty && avatar.Skeleton?.FindBone(bn) >= 0) namedBinds++;
+                else unresolvedBinds++;
+            }
+            if (avatar.IsHeadMesh(mi)) headMeshes++;
+        }
+        GD.Print($"PHYSTEST HEADMESH meshes={meshes.Count} classifiedHead={headMeshes} " +
+                 $"namedBinds={namedBinds} unresolvedBinds={unresolvedBinds}");
+
         if (badWeight > 0 || badIndex > 0)
         {
             GD.Print("PHYSTEST FAIL skin: re-skinning corrupted the mesh");
@@ -275,7 +377,7 @@ public static class PhysDiagnostic
         float peak = 0f;
         for (int i = 0; i < 30; i++)
         {
-            avatar.Position += new Vector3(2f / 60f, 0, 0);
+            avatar.Position += new Vector3(WalkSpeed / 60f, 0, 0);
             avatar.ForceUpdateTransform();
             spring.DebugStep(1f / 60f);
             peak = Mathf.Max(peak, MaxDisplacement(start, Sample(), avatar.Position - origin));
