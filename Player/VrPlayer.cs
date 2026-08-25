@@ -37,6 +37,9 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const float SnapTurnCooldown = 0.28f;
     private const float GrabRadius = 0.18f;
     private const float MaxTeleportRange = 12f;
+    private const float DefaultPlayerEyeHeight = 1.65f; // average standing eye height
+    private const float MaxPredictOffset = 0.06f; // clamp prediction to prevent wild jumps
+    private const float BodyYawLerpRate = 8f; // how fast the body catches up to head yaw
 
     // Head tracking smoothing — one-tap latency reduction for standalone headsets.
     // The headset pose arrives at the start of _PhysicsProcess; we predict where it
@@ -44,6 +47,18 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private Vector3 _headVel;
     private Vector3 _headAngVel;
     private const float HeadPredictTime = 0.020f; // ~1 frame at 72Hz
+
+    // Auto-calibration: record the headset's floor distance on the first valid tracking
+    // frame, then use it to scale the avatar mount so the camera sits at eye level.
+    private float _measuredEyeHeight;
+    private bool _heightCalibrated;
+    private float _bodyYaw; // smoothed body yaw to avoid snapping
+    private float _holdHapticTimer; // cooldown for continuous hold rumble
+    private float _walkHapticPhase; // phase accumulator for walk-cycle rumble
+
+    // Full Body Tracking nodes.
+    private readonly System.Collections.Generic.Dictionary<string, XRNode3D> _fbtNodes = new();
+    private readonly string[] _fbtTrackerNames = { "hip", "left_foot", "right_foot" };
 
     public float MouseSensitivity { get; set; } = 0.003f; // unused in VR; satisfies IPlayer
 
@@ -169,18 +184,50 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         BuildLaser();
 
         ApplyHeightOffset();
+        _bodyYaw = GlobalRotation.Y;
     }
 
     // ---------------------------------------------------------------- rig construction
 
+    /// Controller hand visual: a capsule oriented along the controller's grip axis, so it
+    /// rotates with the controller instead of floating as an axis-aligned box.
     private void AddHandVisual(Node3D parent, Color color)
     {
+        // Capsule along Z (the grip/aim axis) looks like a stylised controller body.
         var mesh = new MeshInstance3D
         {
-            Mesh = new BoxMesh { Size = new Vector3(0.045f, 0.045f, 0.09f) },
+            Name = "HandVisual",
+            Mesh = new CapsuleMesh { Height = 0.10f, Radius = 0.022f },
+            // Rotate the capsule to lie along the controller's Z axis (aim direction).
+            Rotation = new Vector3(Mathf.DegToRad(90), 0, 0),
+            Position = new Vector3(0, -0.01f, 0.02f), // offset slightly forward/down for grip realism
         };
-        mesh.MaterialOverride = new StandardMaterial3D { AlbedoColor = color, Roughness = 0.5f };
+        var mat = new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            Roughness = 0.35f,
+            Metallic = 0.15f,
+            EmissionEnabled = true,
+            Emission = color * 0.15f, // subtle glow for visibility in dark worlds
+        };
+        mesh.MaterialOverride = mat;
         parent.AddChild(mesh);
+
+        // A small sphere at the tip to mark the "front" of the controller.
+        var tip = new MeshInstance3D
+        {
+            Name = "HandTip",
+            Mesh = new SphereMesh { Radius = 0.012f, Height = 0.024f },
+            Position = new Vector3(0, 0, -0.05f),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        tip.MaterialOverride = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            AlbedoColor = new Color(1, 1, 1, 0.6f),
+        };
+        parent.AddChild(tip);
     }
 
     /// Tunnelling vignette: a black quad parented to the camera whose centre aperture closes
@@ -317,12 +364,17 @@ void fragment() {
         {
             _bodyMesh.Visible = true;
             _nameTag.Position = new Vector3(0, 1.95f, 0);
+            ScaleCollider(1.6f);
             return;
         }
 
         _bodyMesh.Visible = false;
         _avatarMount.AddChild(avatar);
         _nameTag.Position = new Vector3(0, avatar.Height + 0.3f, 0);
+
+        // Scale the collider to the avatar so a 1.2m chibi doesn't have a capsule floating
+        // above its head and a 2m giant doesn't have its feet inside the floor.
+        ScaleCollider(avatar.Height);
 
         _ik = new VrAvatarIk(avatar);
         if (!_ik.Valid)
@@ -335,6 +387,26 @@ void fragment() {
 
         HideOwnHead(avatar);
         ApplyHeightOffset();
+    }
+
+    /// Resize the collider capsule to match the avatar's height.
+    private void ScaleCollider(float height)
+    {
+        if (_collider?.Shape is CapsuleShape3D cap)
+        {
+            cap.Height = Mathf.Max(0.5f, height * 0.9f);
+            cap.Radius = Mathf.Clamp(height * 0.15f, 0.15f, 0.35f);
+            _collider.Position = new Vector3(0, cap.Height * 0.5f, 0);
+        }
+        if (_bodyMesh != null)
+        {
+            if (_bodyMesh.Mesh is CapsuleMesh bm)
+            {
+                bm.Height = Mathf.Max(0.5f, height * 0.9f);
+                bm.Radius = Mathf.Clamp(height * 0.15f, 0.15f, 0.35f);
+            }
+            _bodyMesh.Position = _collider?.Position ?? new Vector3(0, height * 0.45f, 0);
+        }
     }
 
     // Same visual layers the desktop rig uses, so mirrors — which render every layer — keep
@@ -356,11 +428,37 @@ void fragment() {
 
     /// Raise or lower the play space so the avatar's eyes line up with the headset. Without
     /// this a tall avatar on a short player floats, and the hands never reach the IK targets.
+    ///
+    /// Now uses the avatar's actual eye height and the measured headset floor distance to
+    /// auto-calibrate, so equipping a 1.2 m chibi shrinks the world and a 2 m giant expands it.
     private void ApplyHeightOffset()
     {
         if (_origin == null) return;
-        float y = UI.DeviceProfile.Settings.VrHeightOffset;
+
+        float manualOffset = UI.DeviceProfile.Settings.VrHeightOffset;
+        float avatarEyeHeight = _avatar != null ? _avatar.Height * 0.93f : DefaultPlayerEyeHeight;
+        float eyeRef = _heightCalibrated ? _measuredEyeHeight : DefaultPlayerEyeHeight;
+
+        // Offset = how far to shift the play space so the avatar's eyes sit where the headset is.
+        // A positive value lifts the origin (making the player shorter in-world).
+        float autoOffset = avatarEyeHeight - eyeRef;
+        float y = manualOffset + autoOffset;
         _origin.Position = new Vector3(_origin.Position.X, y, _origin.Position.Z);
+    }
+
+    /// Record the headset's floor distance on the first frame with valid tracking. Called
+    /// from _PhysicsProcess before anything else reads the camera position.
+    private void TryAutoCalibrate()
+    {
+        if (_heightCalibrated) return;
+        if (XRServer.GetTracker("head") is not XRPositionalTracker headTracker || !headTracker.HasPose("default")) return;
+        // The camera's local Y in the XROrigin is the floor-to-headset distance.
+        float camY = _camera.Position.Y;
+        if (camY < 0.3f || camY > 2.5f) return; // sanity: sitting or standing, not glitched
+        _measuredEyeHeight = camY;
+        _heightCalibrated = true;
+        GD.Print($"VR: auto-calibrated eye height = {camY:0.00}m");
+        ApplyHeightOffset();
     }
 
     /// Toggle a built-in emote, matching `LocalPlayer.PlayEmote`. While an emote is playing the
@@ -395,6 +493,9 @@ void fragment() {
     {
         float dt = (float)delta;
 
+        TryAutoCalibrate();
+        UpdateFbtTrackers();
+
         // The headset keeps tracking even while a menu is up; only *input* is suspended.
         UpdateHeadVelocity(dt);
         SyncBodyToHead();
@@ -413,6 +514,8 @@ void fragment() {
 
         UpdateVignette(dt, planarSpeed);
         UpdateAvatar(dt, planarSpeed);
+        UpdateHoldHaptics(dt);
+        UpdateWalkHaptics(dt, planarSpeed);
     }
 
     /// Physically walking in the guardian moves the camera inside the play space. Carry that
@@ -421,13 +524,16 @@ void fragment() {
     ///
     /// Also applies predictive head tracking: extrapolates the headset pose forward by ~1 frame
     /// to compensate for render pipeline latency on standalone headsets (Quest 2/3 at 72Hz).
+    /// Prediction is clamped to `MaxPredictOffset` to prevent wild jumps from momentary jitter.
     private void SyncBodyToHead()
     {
-        // Predictive head offset: extrapolate from last known velocity.
+        // Use actual HMD local position (no velocity prediction), preventing the camera
+        // and world from sliding or swimming when the head rotates or accelerates.
         var camLocal = _camera.Position;
-        var predictedLocal = camLocal + _headVel * HeadPredictTime;
-        var flat = new Vector3(predictedLocal.X, 0, predictedLocal.Z);
-        if (flat.LengthSquared() < 1e-6f) return;
+        var flat = new Vector3(camLocal.X, 0, camLocal.Z);
+        // Saccadic deadzone (1.5cm) to ignore micro HMD tracking jitter so the player
+        // body does not jitter or slide down slopes when standing completely still.
+        if (flat.Length() < 0.015f) return;
 
         var worldDelta = GlobalTransform.Basis * flat;
         GlobalPosition += worldDelta;
@@ -470,19 +576,33 @@ void fragment() {
     private Quaternion _prevHeadRot;
     private bool _hasPrevHeadRot;
 
+    /// Check if optical hand tracking (Quest/Pico bare hands) is currently active instead of physical controllers.
+    private bool IsOpticalHandTrackingActive()
+    {
+        var leftTracker = XRServer.GetTracker("left_hand");
+        var rightTracker = XRServer.GetTracker("right_hand");
+        bool hasHandTracker = leftTracker != null || rightTracker != null;
+        bool controllerStickActive = _leftHand.GetVector2(ActStick).LengthSquared() > 0.01f || _rightHand.GetVector2(ActStick).LengthSquared() > 0.01f;
+
+        return hasHandTracker && !controllerStickActive;
+    }
+
     /// Returns planar speed so the caller can drive both the vignette and the walk cycle.
     private float HandleLocomotion(float dt)
     {
         var v = Velocity;
         if (!IsOnFloor()) v.Y -= _gravity * dt;
 
-        var stick = ControlsEnabled ? _leftHand.GetVector2(ActStick) : Vector2.Zero;
+        // When optical hand tracking is active (bare hands), stick locomotion is disabled
+        // so movement is strictly room-scale physical walking within the real room.
+        bool handTrackingOnly = IsOpticalHandTrackingActive() && _leftHand.GetVector2(ActStick).LengthSquared() < 0.01f;
+        var stick = (ControlsEnabled && !handTrackingOnly) ? _leftHand.GetVector2(ActStick) : Vector2.Zero;
         bool teleportMode = UI.DeviceProfile.Settings.VrTeleport;
 
         if (teleportMode)
         {
             v.X = 0; v.Z = 0;
-            UpdateTeleport(stick);
+            if (!handTrackingOnly) UpdateTeleport(stick);
         }
         else
         {
@@ -530,6 +650,9 @@ void fragment() {
     /// Snap turning is the default because continuous rotation is the biggest sickness trigger.
     private void HandleTurn(float dt)
     {
+        bool handTrackingOnly = IsOpticalHandTrackingActive() && _rightHand.GetVector2(ActStick).LengthSquared() < 0.01f;
+        if (handTrackingOnly) return; // Optical hand tracking: room-scale turning only
+
         float x = _rightHand.GetVector2(ActStick).X;
 
         if (UI.DeviceProfile.Settings.VrSnapTurn)
@@ -880,11 +1003,16 @@ void fragment() {
     {
         if (_avatar == null) return;
 
-        // Keep the avatar facing the way the headset faces, and standing where we stand.
+        // Smooth body yaw: instead of snapping the avatar to the head forward every frame,
+        // lerp the body yaw so turning the head doesn't whip the whole body around.
         var (fwd, _) = HeadBasis();
+        float targetYaw = Mathf.Atan2(fwd.X, fwd.Z);
+        _bodyYaw = Mathf.LerpAngle(_bodyYaw, targetYaw, 1f - Mathf.Exp(-BodyYawLerpRate * dt));
+        var bodyFwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
+
         var flatCam = _camera.GlobalPosition with { Y = GlobalPosition.Y };
         _avatarMount.GlobalPosition = flatCam;
-        _avatarMount.GlobalBasis = Basis.LookingAt(fwd, Vector3.Up);
+        _avatarMount.GlobalBasis = Basis.LookingAt(bodyFwd, Vector3.Up);
 
         // Procedural locomotion first, then IK overrides the head and arms on top of it.
         _avatar.Animate(dt, speed, IsOnFloor());
@@ -895,27 +1023,116 @@ void fragment() {
 
         // Use predicted head transform for IK — the camera pose is one frame stale by the time
         // the avatar renders, so extrapolating the head position/rotation closes the gap.
+        // Prediction is clamped to prevent wild jumps.
         var headTransform = _camera.GlobalTransform;
         if (_headVel.LengthSquared() > 1e-8f || _headAngVel.LengthSquared() > 1e-8f)
         {
-            var predictedPos = headTransform.Origin + _headVel * HeadPredictTime;
+            var posPredict = _headVel * HeadPredictTime;
+            if (posPredict.LengthSquared() > MaxPredictOffset * MaxPredictOffset)
+                posPredict = posPredict.Normalized() * MaxPredictOffset;
+            var predictedPos = headTransform.Origin + posPredict;
             var predictedRot = headTransform.Basis.GetRotationQuaternion();
             // Small-angle rotational prediction: apply angular velocity as a swing.
             if (_headAngVel.LengthSquared() > 1e-8f)
             {
                 var angAxis = _headAngVel.Normalized();
-                float angMag = _headAngVel.Length() * HeadPredictTime;
+                float angMag = Mathf.Clamp(_headAngVel.Length() * HeadPredictTime, 0f, 0.15f);
                 predictedRot = new Quaternion(angAxis, angMag) * predictedRot;
             }
             headTransform = new Transform3D(new Basis(predictedRot), predictedPos);
         }
-        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition);
+
+        // Query active Full Body Tracking (FBT) trackers.
+        Vector3? hipPos = null;
+        Vector3? leftFootPos = null;
+        Vector3? rightFootPos = null;
+
+        if (_fbtNodes.TryGetValue("hip", out var hipNode) && hipNode.GetHasTrackingData())
+            hipPos = hipNode.GlobalPosition;
+        if (_fbtNodes.TryGetValue("left_foot", out var lfNode) && lfNode.GetHasTrackingData())
+            leftFootPos = lfNode.GlobalPosition;
+        if (_fbtNodes.TryGetValue("right_foot", out var rfNode) && rfNode.GetHasTrackingData())
+            rightFootPos = rfNode.GlobalPosition;
+
+        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition, hipPos, leftFootPos, rightFootPos);
+    }
+
+    /// Dynamically discover and update Full Body Tracking (FBT) trackers.
+    private void UpdateFbtTrackers()
+    {
+        var trackers = XRServer.GetTrackers((int)XRServer.TrackerType.Any);
+        foreach (var name in _fbtTrackerNames)
+        {
+            bool hasTracker = trackers.ContainsKey(name);
+            if (hasTracker)
+            {
+                if (!_fbtNodes.TryGetValue(name, out var node) || !GodotObject.IsInstanceValid(node))
+                {
+                    node = new XRNode3D
+                    {
+                        Name = $"Fbt_{name}",
+                        Tracker = name,
+                        ShowWhenTracked = true
+                    };
+                    _origin.AddChild(node);
+                    _fbtNodes[name] = node;
+                    GD.Print($"VR: Full Body Tracker found and registered: {name}");
+                }
+            }
+            else
+            {
+                if (_fbtNodes.TryGetValue(name, out var node) && GodotObject.IsInstanceValid(node))
+                {
+                    node.QueueFree();
+                    _fbtNodes.Remove(name);
+                    GD.Print($"VR: Full Body Tracker lost: {name}");
+                }
+            }
+        }
     }
 
     private static void Pulse(XRController3D hand, float amplitude, float seconds)
     {
         if (!UI.DeviceProfile.Settings.VrHaptics) return;
         hand?.TriggerHapticPulse(ActHaptic, 0, amplitude, seconds, 0);
+    }
+
+    /// Continuous light vibration while holding a prop — provides tactile awareness that
+    /// something is in hand without being annoying.
+    private void UpdateHoldHaptics(float dt)
+    {
+        if (!UI.DeviceProfile.Settings.VrHaptics) return;
+        _holdHapticTimer -= dt;
+        if (_holdHapticTimer > 0f) return;
+        _holdHapticTimer = 0.25f; // 4 Hz pulse train
+
+        for (int i = 0; i < 2; i++)
+        {
+            if (_heldProp[i] == null) continue;
+            var hand = i == 0 ? _leftHand : _rightHand;
+            hand?.TriggerHapticPulse(ActHaptic, 0, 0.04f, 0.012f, 0); // barely perceptible
+        }
+    }
+
+    /// Very subtle haptic ticks synced to the walk cycle so locomotion has presence.
+    private void UpdateWalkHaptics(float dt, float planarSpeed)
+    {
+        if (!UI.DeviceProfile.Settings.VrHaptics) return;
+        if (!ControlsEnabled) return;
+        if (planarSpeed < 0.3f) { _walkHapticPhase = 0f; return; }
+
+        // Walk cadence: ~2 steps/sec at walk speed, ~3 at sprint.
+        float cadence = Mathf.Lerp(2f, 3.5f, Mathf.Clamp(planarSpeed / SprintSpeed, 0f, 1f));
+        float prev = _walkHapticPhase;
+        _walkHapticPhase += cadence * dt;
+
+        // Fire on each full cycle (one "step").
+        if (Mathf.Floor(_walkHapticPhase) > Mathf.Floor(prev))
+        {
+            float amp = Mathf.Lerp(0.015f, 0.04f, Mathf.Clamp(planarSpeed / SprintSpeed, 0f, 1f));
+            _leftHand?.TriggerHapticPulse(ActHaptic, 0, amp, 0.015f, 0);
+            _rightHand?.TriggerHapticPulse(ActHaptic, 0, amp, 0.015f, 0);
+        }
     }
 
     // ---------------------------------------------------------------- networking

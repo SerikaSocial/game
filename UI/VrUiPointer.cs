@@ -48,6 +48,8 @@ public partial class VrUiPointer : Node3D
         {
             AlbedoColor = Brand.Accent,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            NoDepthTest = true,
+            RenderPriority = 101,
         };
         _hand.AddChild(_laser);
 
@@ -62,6 +64,8 @@ public partial class VrUiPointer : Node3D
         {
             AlbedoColor = Brand.PrimaryHi,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            NoDepthTest = true,
+            RenderPriority = 102,
         };
         _dot.TopLevel = true;
         AddChild(_dot);

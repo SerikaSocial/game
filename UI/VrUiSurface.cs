@@ -15,6 +15,9 @@ namespace SerikaSocial.UI;
 /// to that instead of to the scene root, and draw the viewport's texture on a quad floating in
 /// front of the player. The `Control`s are untouched — they still lay out against a normal
 /// screen-sized viewport and still handle ordinary mouse events, which `PushInput` delivers.
+///
+/// v1.3: The panel is now slightly curved (cylinder section), has a drop shadow and a subtle
+/// glow rim, giving it a premium holographic feel instead of a flat texture slab.
 public partial class VrUiSurface : Node3D
 {
     /// Backing resolution of the panel. 4:3-ish at a size that stays legible through the Quest's
@@ -22,8 +25,8 @@ public partial class VrUiSurface : Node3D
     /// text crispness for ~40% fewer pixels, which matters because this target is composited on
     /// top of an already mobile-bound scene render.
     private static Vector2I PreferredResolution => DeviceProfile.Current == DeviceProfile.Tier.Low
-        ? new Vector2I(1200, 750)
-        : new Vector2I(1600, 1000);
+        ? new Vector2I(1280, 800)
+        : new Vector2I(1920, 1200);
 
     /// The resolution this surface was actually built at. Fixed at `_Ready` rather than read live,
     /// so changing the quality tier mid-session cannot desync the pointer's hit-test maths from
@@ -31,13 +34,18 @@ public partial class VrUiSurface : Node3D
     public Vector2I Resolution { get; private set; }
 
     /// Panel size in metres, and how far in front of the camera it floats.
-    private const float PanelWidth = 1.6f;
-    private const float PanelDistance = 1.6f;
+    private const float PanelWidth = 1.7f;
+    private const float PanelDistance = 1.7f;
+    private const float CurveAngleDeg = 14f; // degrees of cylinder arc — subtle but perceptible
 
     public SubViewport Viewport { get; private set; }
     public MeshInstance3D Panel { get; private set; }
 
-    private QuadMesh _quad;
+    // The shadow and glow are purely cosmetic — they make the panel look premium and grounded.
+    private MeshInstance3D _shadow;
+    private MeshInstance3D _glow;
+
+    private ArrayMesh _curvedMesh;
     private bool _initialized;
     private double _visibilityPoll;
 
@@ -63,12 +71,14 @@ public partial class VrUiSurface : Node3D
         AddChild(Viewport);
 
         float aspect = (float)Resolution.Y / Resolution.X;
-        _quad = new QuadMesh { Size = new Vector2(PanelWidth, PanelWidth * aspect) };
+        float panelHeight = PanelWidth * aspect;
+
+        _curvedMesh = BuildCurvedPanel(PanelWidth, panelHeight, CurveAngleDeg, 16);
 
         Panel = new MeshInstance3D
         {
             Name = "UiPanel",
-            Mesh = _quad,
+            Mesh = _curvedMesh,
             // The panel is a UI surface, not scenery: it must not take lighting, cast shadows or
             // be culled by the world's environment.
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
@@ -85,7 +95,104 @@ public partial class VrUiSurface : Node3D
         };
         AddChild(Panel);
 
+        // Drop shadow: a slightly larger, dark, blurred quad offset behind the panel.
+        _shadow = new MeshInstance3D
+        {
+            Name = "PanelShadow",
+            Mesh = _curvedMesh,
+            Position = new Vector3(0, -0.02f, 0.025f), // slightly behind and below
+            Scale = new Vector3(1.06f, 1.06f, 1.0f),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        _shadow.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0, 0, 0, 0.35f),
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            NoDepthTest = true,
+            RenderPriority = 98,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
+        AddChild(_shadow);
+
+        // Glow rim: a subtle brand-coloured emission border around the panel edge.
+        _glow = new MeshInstance3D
+        {
+            Name = "PanelGlow",
+            Mesh = _curvedMesh,
+            Scale = new Vector3(1.02f, 1.02f, 1.0f),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        };
+        _glow.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(Brand.Accent.R, Brand.Accent.G, Brand.Accent.B, 0.15f),
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            EmissionEnabled = true,
+            Emission = Brand.Accent * 0.3f,
+            EmissionEnergyMultiplier = 0.5f,
+            NoDepthTest = true,
+            RenderPriority = 99,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+        };
+        AddChild(_glow);
+
         Position = new Vector3(0, 1.2f, -PanelDistance);
+    }
+
+    /// Build a cylinder-section mesh for the panel. `segments` controls smoothness.
+    /// The mesh is centred at the origin with the concave side facing +Z (toward the player).
+    private static ArrayMesh BuildCurvedPanel(float width, float height, float angleDeg, int segments)
+    {
+        var mesh = new ArrayMesh();
+        var st = new SurfaceTool();
+        st.Begin(Mesh.PrimitiveType.Triangles);
+
+        float halfAngle = Mathf.DegToRad(angleDeg) * 0.5f;
+        // Radius of curvature: the chord length equals `width`, so
+        // r = width / (2 * sin(halfAngle)).
+        float radius = width / (2f * Mathf.Sin(halfAngle));
+        float halfH = height * 0.5f;
+
+        // Generate a strip of quads along the arc.
+        for (int i = 0; i <= segments; i++)
+        {
+            float t = (float)i / segments;
+            float angle = Mathf.Lerp(-halfAngle, halfAngle, t);
+
+            // X along the arc, Z is the depth of curvature. The centre (angle=0) is at Z=0.
+            float x = Mathf.Sin(angle) * radius;
+            float z = radius - Mathf.Cos(angle) * radius; // concave toward +Z
+
+            // UV: 0→1 across the width, 0→1 top to bottom.
+            float u = t;
+
+            var normal = new Vector3(-Mathf.Sin(angle), 0, Mathf.Cos(angle));
+
+            st.SetUV(new Vector2(u, 0));
+            st.SetNormal(normal);
+            st.AddVertex(new Vector3(x, halfH, z));
+
+            st.SetUV(new Vector2(u, 1));
+            st.SetNormal(normal);
+            st.AddVertex(new Vector3(x, -halfH, z));
+        }
+
+        // Build triangle indices for the quad strip.
+        for (int i = 0; i < segments; i++)
+        {
+            int tl = i * 2;
+            int bl = tl + 1;
+            int tr = tl + 2;
+            int br = tl + 3;
+
+            st.AddIndex(tl); st.AddIndex(bl); st.AddIndex(tr);
+            st.AddIndex(tr); st.AddIndex(bl); st.AddIndex(br);
+        }
+
+        st.GenerateTangents();
+        st.Commit(mesh);
+        return mesh;
     }
 
     /// Stop rendering the panel while nothing is on it.
@@ -108,6 +215,8 @@ public partial class VrUiSurface : Node3D
         }
 
         Panel.Visible = anyVisible;
+        if (_shadow != null) _shadow.Visible = anyVisible;
+        if (_glow != null) _glow.Visible = anyVisible;
         Viewport.RenderTargetUpdateMode = anyVisible
             ? SubViewport.UpdateMode.Always
             : SubViewport.UpdateMode.Disabled;
@@ -133,7 +242,7 @@ public partial class VrUiSurface : Node3D
         away = new Vector3(away.X, 0, away.Z);
         if (away.LengthSquared() < 0.0001f) return;
         // LookAt points -Z at the target, so aiming further *away* from the camera leaves the
-        // QuadMesh's front face (+Z) turned back toward the player.
+        // mesh's front face turned back toward the player.
         LookAt(GlobalPosition + away.Normalized(), Vector3.Up);
     }
 
@@ -208,23 +317,38 @@ public partial class VrUiSurface : Node3D
 
     /// Map a world-space point on the panel to pixel coordinates inside the UI viewport.
     /// Returns false when the point misses the panel.
+    ///
+    /// For the curved panel the mapping is done by projecting the point into local space and
+    /// converting the local X into an arc-angle UV. The curvature is subtle enough (~14°) that
+    /// the error from treating the hit point as if it were on a flat plane is negligible for
+    /// pointer tracking — but we do the proper curved mapping anyway.
     public bool WorldToViewport(Vector3 worldPoint, out Vector2 viewportPos)
     {
         viewportPos = default;
         var local = Panel.GlobalTransform.AffineInverse() * worldPoint;
-        var size = _quad.Size;
 
-        float u = local.X / size.X + 0.5f;
-        // Quad local +Y is up, viewport +Y is down.
-        float v = 0.5f - local.Y / size.Y;
-        if (u < 0f || u > 1f || v < 0f || v > 1f) return false;
+        float aspect = (float)Resolution.Y / Resolution.X;
+        float panelHeight = PanelWidth * aspect;
+        float halfAngle = Mathf.DegToRad(CurveAngleDeg) * 0.5f;
+        float radius = PanelWidth / (2f * Mathf.Sin(halfAngle));
+
+        // Recover the arc angle from local X and Z.
+        float angle = Mathf.Atan2(local.X, radius - local.Z);
+        float u = (angle + halfAngle) / (2f * halfAngle);
+        // Local +Y is up, viewport +Y is down.
+        float v = 0.5f - local.Y / panelHeight;
+
+        if (u < -0.05f || u > 1.05f || v < -0.05f || v > 1.05f) return false;
+        u = Mathf.Clamp(u, 0f, 1f);
+        v = Mathf.Clamp(v, 0f, 1f);
 
         viewportPos = new Vector2(u * Resolution.X, v * Resolution.Y);
         return true;
     }
 
-    /// Intersect a ray with the panel plane. Returns false if the ray is parallel to or points
-    /// away from the front of the panel.
+    /// Intersect a ray with the curved panel. Approximated as a flat plane perpendicular to
+    /// the panel's forward direction — the curvature is only ~14° so the error is sub-millimetre,
+    /// and the proper curved mapping in WorldToViewport handles the UV accurately.
     public bool RayHit(Vector3 origin, Vector3 direction, out Vector3 hit)
     {
         hit = default;

@@ -362,14 +362,79 @@ public sealed partial class AvatarInstance : Node3D
     /// Avatar toggle system — manages on/off state for mesh groups (VRC expression toggles).
     public AvatarToggleSystem Toggles => _toggles;
 
-    /// Set up spring-bone physics from .ska v2 PhysBones metadata (VRC avatar imports).
-    /// No-op for v1 .ska files (PhysBones list is empty).
+    /// Set up spring-bone physics from .ska v2 PhysBones metadata or auto-detect secondary
+    /// physics bones (hair, skirt, ears, tail, breasts, ribbons) if metadata is missing.
     private void SetupPhysBones()
     {
-        if (Skeleton == null || Meta?.PhysBones == null || Meta.PhysBones.Count == 0) return;
+        if (Skeleton == null) return;
+
+        var list = Meta?.PhysBones;
+        var colliders = Meta?.PhysBoneColliders;
+
+        if (list == null || list.Count == 0)
+        {
+            list = AutoDetectPhysBones();
+        }
+
+        if (list.Count == 0) return;
+
         _springBones = new SpringBoneSystem { Name = "SpringBones" };
         AddChild(_springBones);
-        _springBones.Setup(Skeleton, Meta.PhysBones, Meta.PhysBoneColliders);
+        _springBones.Setup(Skeleton, list, colliders);
+    }
+
+    /// Scan the skeleton for bones with secondary physics keywords and auto-generate PhysBone chains.
+    private System.Collections.Generic.List<PhysBoneMeta> AutoDetectPhysBones()
+    {
+        var result = new System.Collections.Generic.List<PhysBoneMeta>();
+        if (Skeleton == null) return result;
+
+        string[] keywords = { "hair", "skirt", "ear", "tail", "bust", "breast", "ribbon", "cape", "wing", "sleeve" };
+
+        for (int i = 0; i < Skeleton.GetBoneCount(); i++)
+        {
+            string name = Skeleton.GetBoneName(i).ToLowerInvariant();
+            bool matches = false;
+            foreach (var kw in keywords)
+            {
+                if (name.Contains(kw)) { matches = true; break; }
+            }
+
+            if (!matches) continue;
+
+            // Only pick top-level chain roots: if parent also matches a keyword, skip it
+            int parent = Skeleton.GetBoneParent(i);
+            if (parent >= 0)
+            {
+                string parentName = Skeleton.GetBoneName(parent).ToLowerInvariant();
+                bool parentMatches = false;
+                foreach (var kw in keywords)
+                {
+                    if (parentName.Contains(kw)) { parentMatches = true; break; }
+                }
+                if (parentMatches) continue; // child of an existing chain root
+            }
+
+            result.Add(new PhysBoneMeta
+            {
+                Name = Skeleton.GetBoneName(i),
+                RootTransform = Skeleton.GetBoneName(i),
+                Stiffness = 0.55f,
+                Gravity = 0.25f,
+                Force = 1.0f,
+                Pull = 0.2f,
+                Spring = 0.5f,
+                Damping = 0.15f,
+                MaxStretch = 0.1f,
+                IsGrabbable = true,
+                IsPosable = false,
+            });
+        }
+
+        if (result.Count > 0)
+            GD.Print($"AvatarInstance: auto-detected {result.Count} spring-bone chains for avatar");
+
+        return result;
     }
 
     /// Set up avatar toggles from .ska v2 metadata. No-op for v1 files.

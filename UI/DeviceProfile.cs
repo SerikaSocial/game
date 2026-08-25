@@ -34,15 +34,35 @@ public static class DeviceProfile
     {
         if (IsStandaloneXr)
         {
-            // Mobile-class GPU driving two eyes: everything conservative.
-            Current = Tier.Low;
-            RenderScale = 0.85f;
-            Shadows = false;
-            MsaaLevel = 1;            // 2x MSAA is cheap on tile GPUs and worth it in VR
-            MaxFps = 72;             // Quest display cadence
-            VSync = true;
-            MirrorRange = 6f;
-            BloomEnabled = false;
+            // Quest 3 has ~2× the GPU of Quest 2; treat it as Medium so it gets better visuals.
+            bool isQuest3 = OS.GetModelName().Contains("Quest 3") || OS.GetModelName().Contains("Quest3");
+            if (isQuest3)
+            {
+                Current = Tier.Medium;
+                RenderScale = 0.92f;
+                Shadows = true;
+                MsaaLevel = 1;
+                MaxFps = 90;     // Quest 3 supports 90/120 Hz
+                VSync = true;
+                MirrorRange = 8f;
+                BloomEnabled = true;
+            }
+            else
+            {
+                // Quest 2 / Quest Pro / unknown standalone — everything conservative.
+                Current = Tier.Low;
+                RenderScale = 0.72f;  // was 0.85 — lower to give more headroom
+                Shadows = false;
+                MsaaLevel = 1;            // 2x MSAA is cheap on tile GPUs and worth it in VR
+                MaxFps = 72;             // Quest 2 display cadence
+                VSync = true;
+                MirrorRange = 6f;
+                BloomEnabled = false;
+            }
+
+            // Lower physics tick rate on standalone to save CPU. The default 60 Hz is overkill
+            // for a social app where collision precision doesn't matter much.
+            Engine.PhysicsTicksPerSecond = isQuest3 ? 50 : 45;
         }
         else if (DisplayServer.IsTouchscreenAvailable())
         {
@@ -70,6 +90,11 @@ public static class DeviceProfile
 
         Settings.Load();  // let a saved profile override the auto-detected one
         Apply();
+
+        // Enable occlusion culling on standalone — the software rasteriser is essentially
+        // free and saves significant draw calls in enclosed worlds.
+        if (IsStandaloneXr)
+            SerikaSocial.World.WorldLod.EnableOcclusionCulling();
     }
 
     /// Adopt a whole tier's presets (the settings menu's tier dropdown). Individual knobs can

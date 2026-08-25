@@ -208,6 +208,10 @@ public static class WorldLoader
         // Stamp the device profile over them, or a Quest ends up rendering a desktop-tier world.
         UI.DeviceProfile.ApplyToScene(root);
 
+        // Distance-based LOD: on Quest, tag meshes with visibility ranges so far-off detail
+        // fades out instead of drowning the GPU. This is a load-time pass — zero per-frame cost.
+        WorldLod.Apply(instance);
+
         // Spawn precedence: manifest → SPAWN marker → an in-scene node named *spawn* →
         // the geometry's own floor-centre → the origin. The AABB fallback keeps model worlds
         // (which are rarely modelled around the origin) from spawning the player in a wall or
