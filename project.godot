@@ -11,20 +11,16 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.2.3"
+config/version="1.2.4"
 run/main_scene="res://Main.tscn"
-config/icon="res://icon.svg"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
 boot_splash/stretch_mode=0
 boot_splash/image="res://Assets/splash.png"
+config/icon="res://icon.svg"
 
 [autoload]
 
-; Dialogue Manager registers this singleton from its EditorPlugin (plugin.gd `_enter_tree`),
-; but EditorPlugins do not run in an exported build — so without this explicit entry the
-; `DialogueManager` singleton simply does not exist at runtime and every call into the C#
-; wrapper throws NullReferenceException. Keep this in sync with plugin.gd.
 DialogueManager="*res://addons/dialogue_manager/dialogue_manager.gd"
 
 [dialogue_manager]
@@ -100,26 +96,11 @@ locale/translations_pot_files=PackedStringArray("res://Dialogue/tutorial_vr.dial
 
 [rendering]
 
-; Quest/Android must use the `mobile` renderer. This was set to "forward_plus", which is a
-; desktop-only renderer — Godot hard-fails the Android export on it, and it is why the Quest
-; build could never ship an XR-capable APK.
-; Godot 4.7.1 cannot do OpenXR + Vulkan on Android: PR #114922 introduced a global Vulkan
-; context that breaks the XR VulkanHooks path (`xrCreateVulkanDeviceKHR` ->
-; XR_ERROR_VALIDATION_FAILURE). The fix (PR #116226) landed on master only and is NOT in
-; 4.7.1. `gl_compatibility` bypasses Vulkan entirely and is the supported workaround until
-; we move to a Godot build containing that fix.
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
 
 [xr]
 
-; No `openxr/default_action_map` here on purpose. That setting loads an *OpenXRActionMap
-; resource*; it used to point at `xr_actions.json`, which can never deserialise into one, so
-; OpenXR fell back to `create_default_action_sets()` every run. With the setting absent that
-; fallback is now the deliberate choice: Godot's built-in map covers Touch, Index and the
-; simple controller, and `VrPlayer` reads those built-in action names directly.
-; Without this the OpenXR module never builds a loader/instance, so
-; `XRServer.FindInterface("OpenXR").Initialize()` returns false on every platform.
 openxr/enabled=true
 openxr/form_factor="head_mounted"
 openxr/reference_space="local"

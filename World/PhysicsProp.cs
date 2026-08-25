@@ -31,8 +31,8 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
     public Vector3 FocusPoint => GlobalPosition + new Vector3(0, 0.3f, 0);
     public bool CanInteract => !_held || _heldByLocal;
 
-    private bool _held;
-    private bool _heldByLocal;
+    protected bool _held;
+    protected bool _heldByLocal;
     private uint _holderPeerId;
     private float _returnTimer;
     private Vector3 _restPosition;
@@ -166,7 +166,7 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         GlobalPosition = handPos;
     }
 
-    private void Release()
+    protected void Release()
     {
         _held = false;
         _heldByLocal = false;

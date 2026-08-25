@@ -745,6 +745,144 @@ public static partial class Worlds
 
         return new Vector3(0, 1f, 0);
     }
+
+    /// Test world for usable items and interaction parity: marker pens on tables, physics props
+    /// to grab/throw, seats, a large drawing wall, and a reference height post.
+    public static Vector3 BuildTestItems(Node3D root)
+    {
+        const float w = 24f, d = 24f, h = 6f;
+
+        root.AddChild(new WorldEnvironment
+        {
+            Environment = new Godot.Environment
+            {
+                BackgroundMode = Godot.Environment.BGMode.Sky,
+                Sky = new Sky { SkyMaterial = new ShaderMaterial { Shader = SkyShader } },
+                AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+                AmbientLightColor = new Color(0.5f, 0.5f, 0.55f),
+                AmbientLightEnergy = 0.5f,
+            },
+        });
+
+        root.AddChild(new DirectionalLight3D { ShadowEnabled = true, LightEnergy = 0.8f, RotationDegrees = new Vector3(-50, -30, 0) });
+
+        // Floor
+        var floor = new StaticBody3D { Name = "Floor" };
+        var floorMesh = new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(w, d) } };
+        floorMesh.MaterialOverride = Mat(new Color(0.22f, 0.24f, 0.28f), 0.9f);
+        floor.AddChild(floorMesh);
+        floor.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+        root.AddChild(floor);
+
+        // Walls
+        var wallMat = Mat(new Color(0.3f, 0.3f, 0.33f), 0.9f);
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, -d / 2), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(-w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(0.2f, h, d), new Vector3(w / 2, h / 2, 0), wallMat));
+        root.AddChild(CollidableBox(new Vector3(w, h, 0.2f), new Vector3(0, h / 2, d / 2), wallMat));
+
+        // Grid floor overlay
+        var gridMat = Mat(new Color(0.4f, 0.4f, 0.45f), 0.8f);
+        for (int i = -8; i <= 8; i++)
+        {
+            root.AddChild(Box(new Vector3(w, 0.011f, 0.05f), new Vector3(0, 0.005f, i * 2f), gridMat));
+            root.AddChild(Box(new Vector3(0.05f, 0.011f, d), new Vector3(i * 2f, 0.005f, 0), gridMat));
+        }
+
+        // Central platform — a raised circular stage for the drawing wall
+        root.AddChild(CollidableCylinder(4f, 0.1f, new Vector3(0, 0.05f, 0), Mat(new Color(0.18f, 0.20f, 0.24f), 0.7f)));
+
+        // Drawing wall — a large flat surface on the north side, tinted white for visibility
+        var drawWallMat = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.88f, 0.88f, 0.90f),
+            Roughness = 0.95f,
+        };
+        root.AddChild(CollidableBox(new Vector3(8f, 4f, 0.1f), new Vector3(0, 2f, -d / 2 + 0.5f), drawWallMat));
+
+        // Tables to hold marker pens — placed around the room
+        var tableMat = Mat(new Color(0.35f, 0.25f, 0.20f), 0.8f);
+        var tablePositions = new[]
+        {
+            new Vector3(-6, 0, -4),
+            new Vector3(6, 0, -4),
+            new Vector3(-6, 0, 4),
+            new Vector3(6, 0, 4),
+        };
+        foreach (var tp in tablePositions)
+        {
+            // Table top
+            root.AddChild(CollidableBox(new Vector3(1.5f, 0.08f, 1.0f), tp + new Vector3(0, 0.9f, 0), tableMat));
+            // Legs
+            root.AddChild(CollidableBox(new Vector3(0.08f, 0.9f, 0.08f), tp + new Vector3(-0.65f, 0.45f, -0.4f), tableMat));
+            root.AddChild(CollidableBox(new Vector3(0.08f, 0.9f, 0.08f), tp + new Vector3(0.65f, 0.45f, -0.4f), tableMat));
+            root.AddChild(CollidableBox(new Vector3(0.08f, 0.9f, 0.08f), tp + new Vector3(-0.65f, 0.45f, 0.4f), tableMat));
+            root.AddChild(CollidableBox(new Vector3(0.08f, 0.9f, 0.08f), tp + new Vector3(0.65f, 0.45f, 0.4f), tableMat));
+        }
+
+        // Scattered physics props — boxes and spheres to grab and throw
+        var propMat = Mat(new Color(0.5f, 0.45f, 0.55f), 0.6f, 0.2f);
+        var propMat2 = Mat(new Color(0.45f, 0.55f, 0.50f), 0.6f, 0.2f);
+        for (int i = 0; i < 6; i++)
+        {
+            float x = (i % 3 - 1) * 4f;
+            float z = 6f + (i / 3) * 2f;
+            var prop = new PhysicsProp
+            {
+                Name = $"TestProp_{i}",
+                NetId = (ushort)(200 + i),
+                Position = new Vector3(x, 1f, z),
+                Networked = true,
+            };
+            var col = new CollisionShape3D
+            {
+                Shape = new BoxShape3D { Size = new Vector3(0.4f, 0.4f, 0.4f) },
+            };
+            prop.AddChild(col);
+            var mesh = new MeshInstance3D
+            {
+                Mesh = new BoxMesh { Size = new Vector3(0.4f, 0.4f, 0.4f) },
+                MaterialOverride = i % 2 == 0 ? propMat : propMat2,
+            };
+            prop.AddChild(mesh);
+            root.AddChild(prop);
+        }
+
+        // Reference height post — 1.8m yellow cylinder
+        root.AddChild(CollidableCylinder(0.05f, 1.8f, new Vector3(-8, 0.9f, -8),
+            new StandardMaterial3D { AlbedoColor = new Color(1f, 0.9f, 0.2f), Roughness = 0.4f }));
+
+        // Ceiling lights
+        for (int i = 0; i < 4; i++)
+        {
+            float lx = (i % 2 - 0.5f) * 8f;
+            float lz = (i / 2 - 0.5f) * 8f;
+            root.AddChild(new OmniLight3D
+            {
+                Position = new Vector3(lx, h - 0.3f, lz),
+                LightColor = new Color(0.9f, 0.88f, 0.75f),
+                LightEnergy = 0.8f,
+                OmniRange = 10f,
+                ShadowEnabled = true,
+            });
+        }
+
+        // Label sign
+        root.AddChild(new MeshInstance3D
+        {
+            Mesh = new BoxMesh { Size = new Vector3(4f, 0.6f, 0.05f) },
+            Position = new Vector3(0, 4.5f, -d / 2 + 0.3f),
+            MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(0.35f, 0.25f, 0.55f),
+                Emission = new Color(0.3f, 0.2f, 0.5f),
+                EmissionEnergyMultiplier = 0.5f,
+                Roughness = 0.7f,
+            },
+        });
+
+        return new Vector3(0, 1f, 8f);
+    }
 }
 
 // The old YouTubeScreen (a still-thumbnail painter) has been replaced by the live playback

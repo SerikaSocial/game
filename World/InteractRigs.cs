@@ -33,6 +33,9 @@ public interface IInteractRig
 
     InteractionContext MakeContext();
 
+    /// Which input source this rig represents — desktop, touch, or a specific VR hand.
+    InteractSource Source { get; }
+
     /// True once the underlying player node has been freed, so `Interactor` can stop.
     bool Valid { get; }
 }
@@ -67,6 +70,7 @@ public sealed class DesktopInteractRig : IInteractRig
     public IOccupiable Occupying => _player.Occupying;
     public void StandUp() => _player.StandUp();
     public bool Valid => GodotObject.IsInstanceValid(_player);
+    public InteractSource Source => _source;
 
     public InteractionContext MakeContext()
     {
@@ -112,6 +116,7 @@ public sealed class VrHandInteractRig : IInteractRig
     public IOccupiable Occupying => null;
     public void StandUp() { }
     public bool Valid => GodotObject.IsInstanceValid(_player) && GodotObject.IsInstanceValid(_hand);
+    public InteractSource Source => _source;
 
     public InteractionContext MakeContext()
     {

@@ -35,8 +35,15 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const float StickDeadzone = 0.18f;
     private const float TurnDeadzone = 0.65f;
     private const float SnapTurnCooldown = 0.28f;
-    private const float GrabRadius = 0.14f;
+    private const float GrabRadius = 0.18f;
     private const float MaxTeleportRange = 12f;
+
+    // Head tracking smoothing — one-tap latency reduction for standalone headsets.
+    // The headset pose arrives at the start of _PhysicsProcess; we predict where it
+    // will be at the next display frame by extrapolating the last known velocity.
+    private Vector3 _headVel;
+    private Vector3 _headAngVel;
+    private const float HeadPredictTime = 0.020f; // ~1 frame at 72Hz
 
     public float MouseSensitivity { get; set; } = 0.003f; // unused in VR; satisfies IPlayer
 
@@ -100,6 +107,18 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     /// The controllers, so `Main` can build a per-hand interaction rig against them.
     public XRController3D LeftHand => _leftHand;
     public XRController3D RightHand => _rightHand;
+
+    /// The prop currently held in hand `i` (0 = left, 1 = right), or null. Read by
+    /// `HeldItemController` to discover whether the held item is usable without scanning.
+    public SerikaSocial.World.PhysicsProp GetHeldProp(int i) => i >= 0 && i < 2 ? _heldProp[i] : null;
+
+    /// Trigger float (0–1) for hand `i`, so `HeldItemController` can poll use input without
+    /// knowing the OpenXR action name.
+    public float GetTriggerValue(int i)
+    {
+        var hand = i == 0 ? _leftHand : _rightHand;
+        return GodotObject.IsInstanceValid(hand) ? hand.GetFloat(ActTrigger) : 0f;
+    }
 
     public bool ControlsEnabled { get; set; } = true;
 
@@ -373,6 +392,7 @@ void fragment() {
         float dt = (float)delta;
 
         // The headset keeps tracking even while a menu is up; only *input* is suspended.
+        UpdateHeadVelocity(dt);
         SyncBodyToHead();
 
         if (ControlsEnabled)
@@ -394,16 +414,57 @@ void fragment() {
     /// Physically walking in the guardian moves the camera inside the play space. Carry that
     /// offset onto the `CharacterBody3D` and cancel it out of the origin, so the collider stays
     /// under the headset and the world stays put.
+    ///
+    /// Also applies predictive head tracking: extrapolates the headset pose forward by ~1 frame
+    /// to compensate for render pipeline latency on standalone headsets (Quest 2/3 at 72Hz).
     private void SyncBodyToHead()
     {
+        // Predictive head offset: extrapolate from last known velocity.
         var camLocal = _camera.Position;
-        var flat = new Vector3(camLocal.X, 0, camLocal.Z);
+        var predictedLocal = camLocal + _headVel * HeadPredictTime;
+        var flat = new Vector3(predictedLocal.X, 0, predictedLocal.Z);
         if (flat.LengthSquared() < 1e-6f) return;
 
         var worldDelta = GlobalTransform.Basis * flat;
         GlobalPosition += worldDelta;
         _origin.Position -= flat;
     }
+
+    /// Track head velocity for predictive tracking. Called from _PhysicsProcess before
+    /// SyncBodyToHead so the prediction uses the freshest pose data.
+    private void UpdateHeadVelocity(float dt)
+    {
+        if (dt <= 0f) return;
+        var camLocal = _camera.Position;
+        var camBasis = _camera.Transform.Basis;
+        var rot = camBasis.GetRotationQuaternion();
+
+        // Exponential smoothing — raw OpenXR poses have jitter that amplifies through
+        // differentiation, so a light low-pass keeps the prediction stable.
+        var rawVel = (camLocal - _prevHeadLocal) / dt;
+        _headVel = _headVel.Lerp(rawVel, 0.35f);
+
+        if (_hasPrevHeadRot)
+        {
+            var delta = rot * _prevHeadRot.Inverse();
+            var axis = new Vector3(delta.X, delta.Y, delta.Z);
+            float angle = 2f * Mathf.Asin(Mathf.Clamp(axis.Length(), -1f, 1f));
+            if (angle > 1e-5f)
+            {
+                axis = axis.Normalized();
+                var rawAng = axis * (angle / dt);
+                _headAngVel = _headAngVel.Lerp(rawAng, 0.3f);
+            }
+        }
+
+        _prevHeadLocal = camLocal;
+        _prevHeadRot = rot;
+        _hasPrevHeadRot = true;
+    }
+
+    private Vector3 _prevHeadLocal;
+    private Quaternion _prevHeadRot;
+    private bool _hasPrevHeadRot;
 
     /// Returns planar speed so the caller can drive both the vignette and the walk cycle.
     private float HandleLocomotion(float dt)
@@ -633,14 +694,14 @@ void fragment() {
             if (prop != null && prop.GrabAt(pos))
             {
                 _heldProp[i] = prop;
-                Pulse(hand, 0.6f, 0.06f);
+                Pulse(hand, 0.7f, 0.08f);
             }
         }
         else if (!gripped && _heldProp[i] != null)
         {
             _heldProp[i].ReleaseWithVelocity(_handVelocity[i]);
             _heldProp[i] = null;
-            Pulse(hand, 0.25f, 0.03f);
+            Pulse(hand, 0.3f, 0.04f);
         }
 
         _gripLatch[i] = gripped;
@@ -658,7 +719,7 @@ void fragment() {
             // A held item claims the trigger first: while you are holding a marker pen, pulling
             // the trigger has to mean "draw", not "sit on the nearest chair".
             if (_heldProp[i] is SerikaSocial.World.IUsable) { /* handled by HeldItemController */ }
-            else if (InteractPressed?.Invoke(i) == true) Pulse(hand, 0.4f, 0.03f);
+            else if (InteractPressed?.Invoke(i) == true) Pulse(hand, 0.5f, 0.05f);
         }
         _triggerLatch[i] = trigger;
 
@@ -723,7 +784,7 @@ void fragment() {
                 var camFlat = GlobalTransform.Basis * new Vector3(_camera.Position.X, 0, _camera.Position.Z);
                 GlobalPosition = _teleportTarget - camFlat;
                 Velocity = Vector3.Zero;
-                Pulse(_leftHand, 0.5f, 0.06f);
+                Pulse(_leftHand, 0.6f, 0.08f);
             }
         }
     }
@@ -828,7 +889,23 @@ void fragment() {
         // reduce a wave or a dance to a twitch.
         if (_avatar.CurrentEmote != AvatarInstance.Emote.None) return;
 
-        _ik?.Solve(_camera.GlobalTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition);
+        // Use predicted head transform for IK — the camera pose is one frame stale by the time
+        // the avatar renders, so extrapolating the head position/rotation closes the gap.
+        var headTransform = _camera.GlobalTransform;
+        if (_headVel.LengthSquared() > 1e-8f || _headAngVel.LengthSquared() > 1e-8f)
+        {
+            var predictedPos = headTransform.Origin + _headVel * HeadPredictTime;
+            var predictedRot = headTransform.Basis.GetRotationQuaternion();
+            // Small-angle rotational prediction: apply angular velocity as a swing.
+            if (_headAngVel.LengthSquared() > 1e-8f)
+            {
+                var angAxis = _headAngVel.Normalized();
+                float angMag = _headAngVel.Length() * HeadPredictTime;
+                predictedRot = new Quaternion(angAxis, angMag) * predictedRot;
+            }
+            headTransform = new Transform3D(new Basis(predictedRot), predictedPos);
+        }
+        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition);
     }
 
     private static void Pulse(XRController3D hand, float amplitude, float seconds)

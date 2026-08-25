@@ -86,6 +86,8 @@ public partial class Main : Node3D
     private VoiceManager _voice;
     private bool _micActive;
     private Updater _updater;
+    private StrokeCanvas _strokeCanvas;
+    private readonly List<HeldItemController> _heldItemControllers = new();
 
     public override void _Ready()
     {
@@ -339,6 +341,18 @@ public partial class Main : Node3D
         float x, float y, float z, float qx, float qy, float qz, float qw,
         float lvx, float lvy, float lvz)
     {
+        // Stroke segments alias the upper NetId range — route them to the canvas, not to props.
+        if (NetIds.IsStroke(objId))
+        {
+            if (_strokeCanvas != null && StrokeNetwork.TryUnpack(
+                    x, y, z, qx, qy, qz, qw, lvx, lvy, lvz,
+                    out var strokeId, out var idx, out var pos, out var hue, out var radius, out var flag))
+            {
+                _strokeCanvas.ApplyNetworkPoint(new StrokePoint(strokeId, idx, pos, hue, radius, flag));
+            }
+            return;
+        }
+
         if (_props.TryGetValue(objId, out var prop))
             prop.ApplyNetworkSync(x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
     }
@@ -395,6 +409,8 @@ public partial class Main : Node3D
     private void SwapWorld(System.Action<Node3D> build)
     {
         _audio?.StopAllAmbient();
+        _strokeCanvas?.QueueFree();
+        _strokeCanvas = null;
         _worldRoot?.QueueFree();
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
@@ -402,6 +418,10 @@ public partial class Main : Node3D
         // A freshly built world's lights and environment come up at full quality no matter what
         // tier the device is on, so the profile has to be re-stamped onto every new world root.
         UI.DeviceProfile.ApplyToScene(_worldRoot);
+        // Stroke canvas lives in every world — Home is single-player so strokes are local-only,
+        // but The Commons and other multiplayer worlds broadcast them over ObjectSync.
+        _strokeCanvas = new StrokeCanvas();
+        _worldRoot.AddChild(_strokeCanvas);
         SetupVideoForWorld();
     }
 
@@ -543,6 +563,61 @@ public partial class Main : Node3D
             i >= 0 && i < _vrInteractors.Count && (_vrInteractors[i]?.TryInteract() ?? false);
     }
 
+    /// Create one HeldItemController per interaction slot: desktop gets one (left-click = use),
+    /// VR gets two (one per hand, trigger = use). Each controller polls the held prop for an
+    /// IUsable and drives UseBegin/Tick/End while the button is held.
+    private void SetupHeldItemControllers()
+    {
+        if (_localVr != null)
+        {
+            var vr = _localVr;
+            var hands = new[] { (hand: vr.LeftHand, isLeft: true), (hand: vr.RightHand, isLeft: false) };
+            for (int i = 0; i < hands.Length; i++)
+            {
+                var (hand, isLeft) = hands[i];
+                if (hand == null) continue;
+                int handIndex = i; // capture
+                var rig = new SerikaSocial.World.VrHandInteractRig(vr, hand, isLeft);
+                var ctrl = HeldItemController.Create(
+                    rig,
+                    getHeldUsable: () => vr.GetHeldProp(handIndex) as IUsable,
+                    getUseDown: () => vr.GetTriggerValue(handIndex) > 0.6f,
+                    getHoldTransform: () => GodotObject.IsInstanceValid(hand) ? hand.GlobalTransform : Transform3D.Identity,
+                    name: isLeft ? "HeldItemLeft" : "HeldItemRight");
+                AddChild(ctrl);
+                _heldItemControllers.Add(ctrl);
+            }
+        }
+        else if (_localDesktop != null)
+        {
+            var desktop = _localDesktop;
+            bool touch = DisplayServer.IsTouchscreenAvailable();
+            var rig = new SerikaSocial.World.DesktopInteractRig(desktop,
+                touch ? SerikaSocial.World.InteractSource.Touch : SerikaSocial.World.InteractSource.Desktop);
+            var ctrl = HeldItemController.Create(
+                rig,
+                getHeldUsable: () =>
+                {
+                    // Desktop only holds one item at a time via the Interactor; find it by
+                    // scanning the props registry for one that is held by local and is IUsable.
+                    foreach (var prop in _props.Values)
+                        if (prop.HeldByLocal && prop is IUsable u) return u;
+                    return null;
+                },
+                getUseDown: () => Input.IsMouseButtonPressed(MouseButton.Left),
+                getHoldTransform: () =>
+                {
+                    var eye = desktop.EyePosition;
+                    var aim = desktop.AimForward;
+                    var hand = eye + aim * 0.6f - new Vector3(0, 0.3f, 0);
+                    return new Transform3D(Basis.LookingAt(aim, Vector3.Up), hand);
+                },
+                name: "HeldItemDesktop");
+            AddChild(ctrl);
+            _heldItemControllers.Add(ctrl);
+        }
+    }
+
     private void SpawnLocalPlayer()
     {
         // A previous player rig (e.g. Home's, when joining a world) must not survive — it
@@ -561,6 +636,8 @@ public partial class Main : Node3D
         _interactor = null;
         foreach (var vrInteractor in _vrInteractors) vrInteractor?.QueueFree();
         _vrInteractors.Clear();
+        foreach (var hic in _heldItemControllers) hic?.QueueFree();
+        _heldItemControllers.Clear();
         _interactPrompt?.Clear();
 
         void FreeBootXrRig()
@@ -636,6 +713,11 @@ public partial class Main : Node3D
             _ = ApplyLocalIdentity();
             GD.Print("Desktop mode");
         }
+
+        // HeldItemController: translates use input (mouse/trigger/touch) into IUsable calls.
+        // One for desktop (left-click = use), two for VR (one per hand, trigger = use).
+        SetupHeldItemControllers();
+
         _local.SetUsername(_username);
     }
 
@@ -1451,6 +1533,34 @@ public partial class Main : Node3D
 
     private Vector3 _worldSpawn = new(0, 1, 8);
 
+    /// Spawn a few marker pens on the benches in The Commons so players can pick them up and
+    /// draw on the floor/walls. Each pen gets a deterministic NetId in the prop range.
+    private void SpawnMarkerPens()
+    {
+        if (_worldRoot == null) return;
+
+        // Only spawn pens in worlds that have surfaces to draw on.
+        if (_currentWorldId != Worlds.IdCommons && _currentWorldId != Worlds.IdTestItems) return;
+
+        ushort penNetId = 100; // deterministic start in the prop range
+        var hues = new[] { 0.78f, 0.05f, 0.33f, 0.55f, 0.12f };
+        for (int i = 0; i < hues.Length; i++)
+        {
+            float a = i * Mathf.Tau / hues.Length;
+            var pos = new Vector3(Mathf.Cos(a) * 5, 0.5f, Mathf.Sin(a) * 5);
+            var pen = new MarkerPen
+            {
+                Name = $"MarkerPen_{i}",
+                NetId = (ushort)(penNetId + i),
+                DrawHue = hues[i],
+                Position = pos,
+            };
+            _worldRoot.AddChild(pen);
+            RegisterPhysicsProp(pen);
+            if (_strokeCanvas != null) pen.SetCanvas(_strokeCanvas);
+        }
+    }
+
     private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
     {
         GD.Print($"OnJoinReady worldId={_currentWorldId} name={worldName}");
@@ -1460,6 +1570,7 @@ public partial class Main : Node3D
         SwapWorld(root => _worldSpawn = Worlds.BuildWorldForId(_currentWorldId, root));
         SpawnLocalPlayer();
         MoveLocalTo(_worldSpawn);
+        SpawnMarkerPens();
         ConnectTo(endpoint, ticket);
     }
 
@@ -1481,6 +1592,11 @@ public partial class Main : Node3D
         // Wire the static bridge so PhysicsProp can send sync updates
         WorldNetwork.Send = (objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz) =>
             _transport?.SendObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
+
+        // Wire the stroke canvas to the same channel — stroke points are aliased ObjectSync packets.
+        if (_strokeCanvas != null)
+            _strokeCanvas.SendStrokePoint = (objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz) =>
+                _transport?.SendObjectSync(objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz);
     }
 
     /// The relay rejected us, or a live session went silent. Clean up remotes/transport,

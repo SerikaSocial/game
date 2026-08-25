@@ -477,6 +477,7 @@ public static partial class Worlds
     public const string IdTestRamp   = "00000000-0000-0000-0000-0000000000e6";
     public const string IdTestColor  = "00000000-0000-0000-0000-0000000000e7";
     public const string IdTestSphere = "00000000-0000-0000-0000-0000000000e8";
+    public const string IdTestItems  = "00000000-0000-0000-0000-0000000000ec";
     public const string IdBackrooms  = "00000000-0000-0000-0000-0000000000e9";
     public const string IdGryffindor = "00000000-0000-0000-0000-0000000000ea";
 
@@ -510,6 +511,7 @@ public static partial class Worlds
             IdTestRamp   => BuildTestRamps(root),
             IdTestColor  => BuildTestColors(root),
             IdTestSphere => BuildTestSpheres(root),
+            IdTestItems  => BuildTestItems(root),
             _ => Vector3.Zero,
         };
     }
