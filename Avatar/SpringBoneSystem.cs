@@ -126,11 +126,7 @@ public sealed partial class SpringBoneSystem : Node
             {
                 var p = chain.Particles[i];
 
-                // Get world position of this bone
-                var boneGlobal = _skeleton.GlobalTransform * _skeleton.GetBoneGlobalPose(p.BoneIdx);
-                var worldPos = boneGlobal.Origin;
-
-                // Parent bone world position (for constraint)
+                // Parent particle world position (for constraint)
                 int parentIdx = _skeleton.GetBoneParent(p.BoneIdx);
                 Vector3 parentWorld = parentIdx >= 0
                     ? (_skeleton.GlobalTransform * _skeleton.GetBoneGlobalPose(parentIdx)).Origin
@@ -172,26 +168,42 @@ public sealed partial class SpringBoneSystem : Node
                     }
                 }
 
-                // Distance constraint: maintain bone length
-                if (i > 0)
+                // Maintain fixed bone length distance constraint (prevent stretching)
+                var dirWorld = (p.CurrentPos - parentWorld);
+                float restLen = p.RestLocalPos.Length();
+                if (restLen > 1e-4f)
                 {
-                    var prevP = chain.Particles[i - 1];
-                    var diff = p.CurrentPos - prevP.CurrentPos;
-                    float restLen = p.RestLocalPos.Length();
-                    if (restLen > 0f && diff.Length() > restLen * (1f + chain.MaxStretch))
-                    {
-                        p.CurrentPos = prevP.CurrentPos + diff.Normalized() * restLen * (1f + chain.MaxStretch);
-                    }
+                    p.CurrentPos = parentWorld + dirWorld.Normalized() * restLen;
                 }
 
-                // Write back: convert world position to local and set bone pose
-                var localPos = _skeleton.GlobalTransform.AffineInverse() * p.CurrentPos;
-                // Get the parent's global pose to compute relative position
-                if (parentIdx >= 0)
+                // Write back ROTATION ONLY — never mutate bone position translation!
+                // Setting bone position stretches mesh geometry; rotation swings the joint naturally.
+                if (restLen > 1e-4f)
                 {
-                    var parentGlobal = _skeleton.GetBoneGlobalPose(parentIdx);
-                    var relative = parentGlobal.AffineInverse() * localPos;
-                    _skeleton.SetBonePosePosition(p.BoneIdx, relative);
+                    var skelBasis = _skeleton.GlobalTransform.Basis;
+                    var desiredSkelDir = (skelBasis.Inverse() * dirWorld).Normalized();
+                    var restSkelDir = p.RestLocalPos.Normalized();
+
+                    float dot = restSkelDir.Dot(desiredSkelDir);
+                    Quaternion rotQuat;
+                    if (dot > 0.9999f) rotQuat = Quaternion.Identity;
+                    else if (dot < -0.9999f) rotQuat = new Quaternion(Vector3.Up, Mathf.Pi);
+                    else
+                    {
+                        var axis = restSkelDir.Cross(desiredSkelDir);
+                        if (axis.LengthSquared() < 1e-6f) axis = Vector3.Up;
+                        rotQuat = new Quaternion(axis.Normalized(), Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)));
+                    }
+
+                    int pBone = p.BoneIdx;
+                    int parentBone = _skeleton.GetBoneParent(pBone);
+                    var parentGlobalRot = parentBone >= 0
+                        ? _skeleton.GetBoneGlobalPose(parentBone).Basis.GetRotationQuaternion()
+                        : Quaternion.Identity;
+
+                    var restRot = _skeleton.GetBoneRest(pBone).Basis.GetRotationQuaternion();
+                    var localRot = (parentGlobalRot.Inverse() * rotQuat * restRot).Normalized();
+                    _skeleton.SetBonePoseRotation(pBone, localRot);
                 }
             }
         }

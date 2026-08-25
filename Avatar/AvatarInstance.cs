@@ -216,57 +216,76 @@ public sealed partial class AvatarInstance : Node3D
         return true;
     }
 
-    /// Hide the head (and its children: face, hair) so first-person view isn't blocked by the
-    /// inside of the skull. Implemented by collapsing the head bone's local pose scale — cheap,
-    /// reversible, and doesn't touch the mesh or materials.
+    /// Hide the head, face, hair, and head accessories in first-person view so they don't block the camera.
     public void SetHeadVisible(bool visible)
     {
         if (Skeleton == null) return;
-        int head = BoneOf("head");
-        if (head < 0) return;
-        Skeleton.SetBonePoseScale(head, visible ? Vector3.One : new Vector3(1e-3f, 1e-3f, 1e-3f));
+        var headBones = GetHeadBoneSet();
+        var scale = visible ? Vector3.One : new Vector3(1e-3f, 1e-3f, 1e-3f);
+        foreach (int bone in headBones)
+        {
+            Skeleton.SetBonePoseScale(bone, scale);
+        }
     }
 
-    /// Returns the set of bones that are the head or descendants of the head.
+    /// Returns the set of bones that are head, face, hair, or head accessory bones.
     public System.Collections.Generic.HashSet<int> GetHeadBoneSet()
     {
         var result = new System.Collections.Generic.HashSet<int>();
         if (Skeleton == null) return result;
         int head = BoneOf("head");
-        if (head < 0) return result;
-        result.Add(head);
-        // Collect all descendants of the head bone.
+        if (head >= 0) result.Add(head);
+
+        string[] headKeywords = { "hair", "head", "face", "bang", "eye", "ear", "halo", "horn", "glasses", "cap", "hat", "ribbon", "頭", "髪", "顔", "目", "耳" };
+
         for (int i = 0; i < Skeleton.GetBoneCount(); i++)
         {
+            if (i == head) continue;
+            // Check if descendant of head
             int p = Skeleton.GetBoneParent(i);
+            bool isDescendant = false;
             while (p >= 0)
             {
-                if (p == head) { result.Add(i); break; }
+                if (p == head) { isDescendant = true; break; }
                 p = Skeleton.GetBoneParent(p);
+            }
+
+            if (isDescendant)
+            {
+                result.Add(i);
+                continue;
+            }
+
+            // Also check bone name for head/hair/face keywords
+            string name = Skeleton.GetBoneName(i).ToLowerInvariant();
+            foreach (var kw in headKeywords)
+            {
+                if (name.Contains(kw)) { result.Add(i); break; }
             }
         }
         return result;
     }
 
-    /// Returns true if a MeshInstance3D is skinned primarily to the head bone hierarchy.
-    /// Used to separate head meshes (culled in first-person) from body meshes (visible).
+    /// Returns true if a MeshInstance3D is skinned primarily to head/hair bones or has hair/face in its name.
+    /// Used to separate head & hair meshes (culled in first-person) from body meshes (visible).
     public bool IsHeadMesh(MeshInstance3D mesh)
     {
+        if (mesh == null) return false;
+
+        string meshName = mesh.Name.ToString().ToLowerInvariant();
+        string[] meshHeadKeywords = { "hair", "face", "head", "eye", "halo", "bangs", "front_hair", "back_hair", "頭", "髪", "顔" };
+        foreach (var kw in meshHeadKeywords)
+        {
+            if (meshName.Contains(kw)) return true;
+        }
+
         if (Skeleton == null) return false;
         var headBones = GetHeadBoneSet();
         if (headBones.Count == 0) return false;
 
-        // Check the mesh's skinning data — if the majority of bone weights reference head bones,
-        // it's a head mesh.
         var skin = mesh.Skin;
-        if (skin == null)
-        {
-            // Non-skinned mesh: check if it's a child of a head-bone attachment.
-            // For glTF imports, non-skinned meshes are rare on avatars.
-            return false;
-        }
+        if (skin == null) return false;
 
-        // Count bone weights referencing head bones vs total.
         int headCount = 0, totalCount = 0;
         for (int i = 0; i < skin.GetBindCount(); i++)
         {
@@ -275,8 +294,7 @@ public sealed partial class AvatarInstance : Node3D
             if (headBones.Contains(boneIdx)) headCount++;
         }
 
-        // If more than half the bound bones are head bones, classify as head mesh.
-        return totalCount > 0 && headCount * 2 >= totalCount;
+        return totalCount > 0 && headCount * 10 >= totalCount * 3;
     }
 
     private static Skeleton3D FindSkeleton(Node node)
