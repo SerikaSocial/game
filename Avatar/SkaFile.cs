@@ -38,6 +38,19 @@ public sealed class SkaMeta
     public List<MaterialMeta> Materials { get; set; } = new();
 }
 
+/// One spring-bone chain.
+///
+/// `SpringBoneSystem` implements the VRM/UniVRM spring model, so `stiffness`, `gravity` and
+/// `damping` carry VRM's meanings: stiffness is the pull back toward rest in metres per second,
+/// gravity the same in the gravity direction, damping the per-step drag in 0..1.
+///
+/// KNOWN GAP: `tools/ska/vrc2ska.py` fills these from VRChat PhysBone components, whose
+/// parameters are *not* the same quantities — VRChat splits restoring force across `pull`,
+/// `stiffness` and `spring`, all normalized 0..1, and has no direct drag term. A VRC-converted
+/// avatar will therefore read as under-damped and floppy. Translating between the two models
+/// needs a real VRC avatar to calibrate against; guessing a mapping here would just move the
+/// error somewhere harder to see. `force`, `pull`, `spring` and `maxStretch` below are the
+/// VRChat-derived fields and are currently unread by the solver.
 public sealed class PhysBoneMeta
 {
     [JsonPropertyName("name")] public string Name { get; set; } = "";
@@ -52,6 +65,25 @@ public sealed class PhysBoneMeta
     [JsonPropertyName("isGrabbable")] public bool IsGrabbable { get; set; } = false;
     [JsonPropertyName("isPosable")] public bool IsPosable { get; set; } = false;
     [JsonPropertyName("allowCollision")] public bool AllowCollision { get; set; } = true;
+
+    /// Per-particle collision radius (VRM `hitRadius`). The chain's tail points are treated as
+    /// spheres of this radius, so a skirt panel is pushed off a leg collider by the *sum* of the
+    /// two radii — without it the bone origin can sit exactly on the leg surface and the mesh
+    /// skinned around it still clips through.
+    [JsonPropertyName("radius")] public float Radius { get; set; } = 0.02f;
+
+    /// Gravity direction in avatar space. VRM authors use this to make skirts hang slightly
+    /// back or hair fall forward; defaults to straight down.
+    [JsonPropertyName("gravityDir")] public float[] GravityDir { get; set; } = null;
+
+    /// Names of the `physBoneColliders` entries this chain collides with. Empty/null means
+    /// "collide with every collider", which is what auto-detected chains want.
+    [JsonPropertyName("colliders")] public List<string> Colliders { get; set; } = new();
+
+    /// Maximum bend away from the bone's rest direction, in degrees. 0 or >=180 means no limit —
+    /// the correct default once real colliders exist, since a hard clamp is what made the old
+    /// system look frozen. Auto-synthesized chains set a tight limit deliberately.
+    [JsonPropertyName("maxAngleDegrees")] public float MaxAngleDegrees { get; set; } = 0f;
 }
 
 public sealed class PhysBoneColliderMeta
@@ -60,7 +92,18 @@ public sealed class PhysBoneColliderMeta
     [JsonPropertyName("rootTransform")] public string RootTransform { get; set; } = "";
     [JsonPropertyName("radius")] public float Radius { get; set; } = 0f;
     [JsonPropertyName("height")] public float Height { get; set; } = 0f;
+
+    /// 0 = sphere, 1 = capsule (needs `tail`), 2 = inside-sphere (keeps particles *within* the
+    /// sphere rather than outside it — VRM 1.0's `ColliderShape.sphere.inside`).
     [JsonPropertyName("shapeType")] public int ShapeType { get; set; } = 0;
+
+    /// Centre offset in the owning bone's local space. VRM leg colliders are a ladder of spheres
+    /// at increasing negative Y offsets down the thigh; dropping the offset collapses them all
+    /// onto the hip joint, which is why skirts fell straight through the legs.
+    [JsonPropertyName("offset")] public float[] Offset { get; set; } = null;
+
+    /// Capsule far end, in the owning bone's local space. Only read when `shapeType` is 1.
+    [JsonPropertyName("tail")] public float[] Tail { get; set; } = null;
 }
 
 public sealed class ToggleMeta

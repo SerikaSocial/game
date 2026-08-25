@@ -911,6 +911,9 @@ void fragment() {
                 var camFlat = GlobalTransform.Basis * new Vector3(_camera.Position.X, 0, _camera.Position.Z);
                 GlobalPosition = _teleportTarget - camFlat;
                 Velocity = Vector3.Zero;
+                // Up to 12 m in one frame: without this the avatar arrives with its hair and
+                // skirt streaming out behind it, which in VR reads as a glitch, not as motion.
+                _avatar?.ResetPhysics();
                 Pulse(_leftHand, 0.6f, 0.08f);
             }
         }
@@ -1156,6 +1159,9 @@ void fragment() {
             _heldProp[i] = null;
             _handVelocity[i] = Vector3.Zero;
         }
+        // Same reason as the desktop rig — and it matters more here, because teleport locomotion
+        // moves the body several metres between frames as a matter of routine.
+        _avatar?.ResetPhysics();
     }
 
     // ---------------------------------------------------------------- lifecycle

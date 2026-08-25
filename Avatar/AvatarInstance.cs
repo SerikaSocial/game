@@ -52,7 +52,9 @@ public sealed partial class AvatarInstance : Node3D
         if (inst.Skeleton != null) inst.ResolveHumanoid();
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
         inst.SetupAnimation();
-        inst.SetupPhysBones();
+        // The glTF state is passed through so the avatar's own VRM spring rig can be read out of
+        // it — the author's chains and, crucially, their collider ladder.
+        inst.SetupPhysBones(state);
         inst.SetupToggles();
 
         return inst;
@@ -365,62 +367,158 @@ public sealed partial class AvatarInstance : Node3D
     private float _walkPhase;
     private float _moveBlend; // 0 = idle, 1 = walking, >1 = sprinting
     private SpringBoneSystem _springBones;
+
+    /// The avatar's secondary-motion solver, or null if this rig has no physics bones.
+    /// Exposed for the headless physics diagnostic.
+    public SpringBoneSystem SpringBones => _springBones;
     private AvatarToggleSystem _toggles;
 
     /// Avatar toggle system — manages on/off state for mesh groups (VRC expression toggles).
     public AvatarToggleSystem Toggles => _toggles;
 
-    /// Set up spring-bone physics from .ska v2 PhysBones metadata or auto-detect secondary
-    /// physics bones (hair, skirt, ears, tail, breasts, ribbons) if metadata is missing.
-    /// Character creators who supply their own PhysBones metadata override auto-detection,
-    /// and creators can also set disableAutoPhysBones=true to disable physics entirely.
-    private void SetupPhysBones()
+    /// Build the avatar's secondary physics. Sources are tried in order of how much the author
+    /// knew about their own model:
+    ///
+    ///   1. `.ska` `physBones` metadata — an explicit, offline-authored rig.
+    ///   2. The VRM's own spring rig, read straight out of the embedded GLB. Nearly every VRM
+    ///      has one, hand-tuned, and it carries the collider ladder that keeps a skirt off the
+    ///      legs. Serika discarded this for its whole life, which is exactly why skirts clipped.
+    ///   3. Keyword auto-detection over bone names — the last resort, for rigs with neither.
+    ///
+    /// Chest physics is then synthesized on top if the rig has no bones for it, since no amount
+    /// of detection can find bones that were never authored.
+    ///
+    /// `disableAutoPhysBones` opts an avatar out of everything except its own explicit metadata.
+    private void SetupPhysBones(GltfState state)
     {
         if (Skeleton == null) return;
 
         var list = Meta?.PhysBones;
         var colliders = Meta?.PhysBoneColliders;
+        bool autoAllowed = Meta?.DisableAutoPhysBones != true;
 
-        // If creator authored custom PhysBones (list.Count > 0), their custom setup is used!
-        // If list is empty/null, run auto-detection UNLESS creator set disableAutoPhysBones=true.
-        if ((list == null || list.Count == 0) && Meta?.DisableAutoPhysBones != true)
+        if ((list == null || list.Count == 0) && state != null)
         {
+            var vrm = VrmSpringImport.Extract(state, Skeleton);
+            if (vrm.Any)
+            {
+                list = vrm.Chains;
+                if (colliders == null || colliders.Count == 0) colliders = vrm.Colliders;
+                GD.Print($"AvatarInstance: using the avatar's own VRM spring rig " +
+                         $"({vrm.Chains.Count} chains, {vrm.Colliders.Count} colliders)");
+            }
+        }
+
+        if ((list == null || list.Count == 0) && autoAllowed)
             list = AutoDetectPhysBones();
-        }
 
-        if (list == null || list.Count == 0) return;
+        // Copy before appending. `list` may still be the caller's `Meta.PhysBones`, and appending
+        // the synthesized chest chains to that would write them back into the avatar's metadata —
+        // which then accumulates a fresh pair on every re-instantiation of the same `.ska`.
+        list = list == null
+            ? new System.Collections.Generic.List<PhysBoneMeta>()
+            : new System.Collections.Generic.List<PhysBoneMeta>(list);
 
-        // Auto-generate torso/head/shoulder colliders if none were provided so springbones bounce off the avatar's body
-        if (colliders == null || colliders.Count == 0)
+        // Chest physics: only ever synthesized, never detected, because the bones don't exist.
+        if (autoAllowed)
         {
-            colliders = AutoDetectColliders();
+            var breasts = BreastRig.Build(_model, Skeleton, _roleToBone);
+            if (breasts.Added) list.AddRange(breasts.Chains);
         }
+
+        if (list.Count == 0) return;
+
+        if (colliders == null || colliders.Count == 0)
+            colliders = AutoDetectColliders();
 
         _springBones = new SpringBoneSystem { Name = "SpringBones" };
         AddChild(_springBones);
         _springBones.Setup(Skeleton, list, colliders);
     }
 
-    /// Auto-detect torso, chest, spine, head, and shoulder colliders so secondary physics bounce off body.
+    /// Reset secondary physics to rest. Call after teleporting or respawning, or every chain
+    /// reads the jump as a metres-per-frame acceleration and the avatar's hair goes horizontal.
+    public void ResetPhysics() => _springBones?.NotifyTeleport();
+
+    /// Body colliders for rigs that ship none of their own.
+    ///
+    /// The old set was seven spheres on the torso, head and shoulders — and nothing at all below
+    /// the hips. A skirt has no torso to bounce off; the thing it needs to not pass through is
+    /// the legs, so it fell straight through them. This builds capsules along the limbs and
+    /// torso instead, sized from the rig's own proportions rather than constants tuned to one
+    /// model's height.
     private System.Collections.Generic.List<PhysBoneColliderMeta> AutoDetectColliders()
     {
         var result = new System.Collections.Generic.List<PhysBoneColliderMeta>();
         if (Skeleton == null) return result;
 
-        string[] colliderBones = { "chest", "upperChest", "spine", "head", "neck", "leftShoulder", "rightShoulder" };
-        foreach (var bName in colliderBones)
+        // Scale everything off the rig's actual shoulder span, so this works on a 1.2 m chibi
+        // and a 2 m tall avatar without either getting a collider the size of its torso.
+        int leftArm = BoneOf("leftUpperArm");
+        int rightArm = BoneOf("rightUpperArm");
+        float span = leftArm >= 0 && rightArm >= 0
+            ? Skeleton.GetBoneGlobalRest(leftArm).Origin.DistanceTo(Skeleton.GetBoneGlobalRest(rightArm).Origin)
+            : 0.3f;
+        if (span < 1e-3f) span = 0.3f;
+
+        // A capsule spanning a bone to its child — the right shape for a limb, and the reason a
+        // skirt now slides down a thigh instead of through it.
+        void AddLimb(string role, string childRole, float radiusFactor)
         {
-            int idx = BoneOf(bName);
-            if (idx >= 0)
+            int idx = BoneOf(role);
+            int childIdx = BoneOf(childRole);
+            if (idx < 0 || childIdx < 0) return;
+
+            // Tail must be in the parent bone's local space; if the child isn't a direct
+            // descendant the delta of the global rests still gives the right direction.
+            Vector3 tail = Skeleton.GetBoneParent(childIdx) == idx
+                ? Skeleton.GetBoneRest(childIdx).Origin
+                : Skeleton.GetBoneGlobalRest(idx).AffineInverse() * Skeleton.GetBoneGlobalRest(childIdx).Origin;
+
+            result.Add(new PhysBoneColliderMeta
             {
-                result.Add(new PhysBoneColliderMeta
-                {
-                    Name = bName,
-                    RootTransform = Skeleton.GetBoneName(idx),
-                    Radius = bName.Contains("chest") || bName.Contains("spine") ? 0.18f : 0.12f,
-                });
-            }
+                Name = role,
+                RootTransform = Skeleton.GetBoneName(idx),
+                Radius = span * radiusFactor,
+                ShapeType = 1,
+                Offset = new[] { 0f, 0f, 0f },
+                Tail = new[] { tail.X, tail.Y, tail.Z },
+            });
         }
+
+        void AddSphere(string role, float radiusFactor, Vector3 offset)
+        {
+            int idx = BoneOf(role);
+            if (idx < 0) return;
+            result.Add(new PhysBoneColliderMeta
+            {
+                Name = role,
+                RootTransform = Skeleton.GetBoneName(idx),
+                Radius = span * radiusFactor,
+                ShapeType = 0,
+                Offset = new[] { offset.X, offset.Y, offset.Z },
+            });
+        }
+
+        // Legs — the ones that were missing, and the whole reason skirts clipped.
+        AddLimb("leftUpperLeg", "leftLowerLeg", 0.30f);
+        AddLimb("rightUpperLeg", "rightLowerLeg", 0.30f);
+        AddLimb("leftLowerLeg", "leftFoot", 0.22f);
+        AddLimb("rightLowerLeg", "rightFoot", 0.22f);
+
+        // Torso, as one capsule from the hips to the neck rather than a stack of spheres.
+        AddLimb("spine", "neck", 0.42f);
+        AddLimb("hips", "spine", 0.44f);
+
+        // Arms, so hair and capes don't pass through them.
+        AddLimb("leftUpperArm", "leftLowerArm", 0.16f);
+        AddLimb("rightUpperArm", "rightLowerArm", 0.16f);
+        AddLimb("leftLowerArm", "leftHand", 0.13f);
+        AddLimb("rightLowerArm", "rightHand", 0.13f);
+
+        // Head, nudged up so the sphere covers the skull rather than the jaw.
+        AddSphere("head", 0.36f, new Vector3(0, span * 0.28f, 0));
+
         return result;
     }
 
@@ -430,56 +528,67 @@ public sealed partial class AvatarInstance : Node3D
         var result = new System.Collections.Generic.List<PhysBoneMeta>();
         if (Skeleton == null) return result;
 
+        // Matched against name *tokens*, prefix-wise — see MatchesSecondaryKeyword. "hem" and
+        // "skrt" are here because they are what rigs that don't spell out "skirt" tend to use.
         string[] keywords = {
-            "hair", "skirt", "ear", "tail", "bust", "breast", "titty", "mune", "oppai", "boob",
-            "cleavage", "ribbon", "cape", "wing", "sleeve", "胸", "乳", "髪", "耳", "尾", "スカート", "リボン", "袖"
+            "hair", "kami", "skirt", "skrt", "hem", "ear", "tail", "bust", "breast", "titty",
+            "mune", "oppai", "boob", "cleavage", "ribbon", "cape", "coat", "wing", "sleeve",
+            "scarf", "muffler", "tie", "chain", "strap", "cloth",
+            "胸", "乳", "髪", "耳", "尾", "スカート", "リボン", "袖", "マフラー",
         };
 
         string[] breastKeywords = { "bust", "breast", "titty", "mune", "oppai", "boob", "cleavage", "胸", "乳" };
 
+        // Things that hang below the waist and should be tested against the legs, not the head.
+        string[] lowerBodyKeywords = { "skirt", "skrt", "hem", "tail", "coat", "尾", "スカート" };
+
+        // Restricting each chain to the colliders in its own region is both cheaper and more
+        // correct: testing hair against the shins costs the same as testing it against the skull
+        // and can only ever produce a wrong answer. Roles that a rig doesn't have simply fail to
+        // resolve later and drop out.
+        var lowerColliders = new System.Collections.Generic.List<string>
+            { "hips", "spine", "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg" };
+        var upperColliders = new System.Collections.Generic.List<string>
+            { "head", "spine", "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm" };
+
+        // Bones the humanoid map already claims are body, not secondary motion, whatever they
+        // happen to be called. This is the hard guard; the tokenizer below is the soft one.
+        var humanoid = new System.Collections.Generic.HashSet<int>(_roleToBone.Values);
+
         for (int i = 0; i < Skeleton.GetBoneCount(); i++)
         {
-            string name = Skeleton.GetBoneName(i).ToLowerInvariant();
-            bool matches = false;
-            foreach (var kw in keywords)
-            {
-                if (name.Contains(kw)) { matches = true; break; }
-            }
+            if (humanoid.Contains(i)) continue;
+            if (!MatchesSecondaryKeyword(Skeleton.GetBoneName(i), keywords)) continue;
 
-            if (!matches) continue;
-
-            // Only pick top-level chain roots: if parent also matches a keyword, skip it
+            // Only pick top-level chain roots: if the parent also matches, this is mid-chain.
             int parent = Skeleton.GetBoneParent(i);
-            if (parent >= 0)
-            {
-                string parentName = Skeleton.GetBoneName(parent).ToLowerInvariant();
-                bool parentMatches = false;
-                foreach (var kw in keywords)
-                {
-                    if (parentName.Contains(kw)) { parentMatches = true; break; }
-                }
-                if (parentMatches) continue; // child of an existing chain root
-            }
+            if (parent >= 0 && MatchesSecondaryKeyword(Skeleton.GetBoneName(parent), keywords))
+                continue;
 
-            bool isBreast = false;
-            foreach (var bkw in breastKeywords)
-            {
-                if (name.Contains(bkw)) { isBreast = true; break; }
-            }
+            string bone = Skeleton.GetBoneName(i);
+            bool isBreast = MatchesSecondaryKeyword(bone, breastKeywords);
+            bool isLower = MatchesSecondaryKeyword(bone, lowerBodyKeywords);
 
+            // Values are in the VRM spring model the solver implements: `stiffness` is the pull
+            // back toward rest in metres per second, `damping` is per-step drag, `gravity` is a
+            // downward pull in the same units as stiffness. Chest tissue is stiff, low-travel and
+            // angle-limited; hair and skirts are softer and free to swing, because with real
+            // colliders in place a tight clamp is what makes a rig look dead.
             result.Add(new PhysBoneMeta
             {
-                Name = Skeleton.GetBoneName(i),
-                RootTransform = Skeleton.GetBoneName(i),
-                Stiffness = isBreast ? 0.45f : 0.70f,
-                Gravity = isBreast ? 0.10f : 0.08f,
-                Force = isBreast ? 1.10f : 0.65f,
-                Pull = isBreast ? 0.40f : 0.35f,
-                Spring = isBreast ? 0.80f : 0.70f,
-                Damping = isBreast ? 0.12f : 0.22f,
-                MaxStretch = 0.01f,
-                IsGrabbable = true,
+                Name = bone,
+                RootTransform = bone,
+                Stiffness = isBreast ? 1.60f : 0.90f,
+                Gravity = isBreast ? 0.12f : 0.20f,
+                GravityDir = new[] { 0f, -1f, 0f },
+                Damping = isBreast ? 0.35f : 0.40f,
+                Radius = isBreast ? 0.03f : 0.02f,
+                MaxAngleDegrees = isBreast ? 22f : 0f,
+                IsGrabbable = !isBreast,
                 IsPosable = false,
+                AllowCollision = !isBreast,
+                Colliders = isBreast ? new System.Collections.Generic.List<string>()
+                          : isLower ? lowerColliders : upperColliders,
             });
         }
 
@@ -487,6 +596,61 @@ public sealed partial class AvatarInstance : Node3D
             GD.Print($"AvatarInstance: auto-detected {result.Count} spring-bone chains for avatar");
 
         return result;
+    }
+
+    /// Does a bone name name a secondary-motion part?
+    ///
+    /// Matching on raw substrings is not safe here, and the failure is not theoretical: "ear"
+    /// is a substring of "for<b>ear</b>m_stretch.l", a bone real rigs ship, and treating a
+    /// forearm as a spring chain leaves the avatar's arms swinging like rope. So the name is
+    /// split into tokens on separators, digits and camelCase humps, and a keyword has to start
+    /// a token. That still catches the shapes rigs actually use — `Hair_01`, `hair.back.001.L`,
+    /// `J_Sec_Hair1_01`, `SkirtFront` — and still lets "earring" through, which should jiggle,
+    /// while "forearm" tokenizes to "forearm" and is correctly left alone.
+    ///
+    /// CJK keywords are matched as substrings: they don't tokenize and are unambiguous anyway.
+    private static bool MatchesSecondaryKeyword(string boneName, string[] keywords)
+    {
+        if (string.IsNullOrEmpty(boneName)) return false;
+        string lower = boneName.ToLowerInvariant();
+
+        // Non-ASCII keywords (胸, 髪, スカート…) have no token structure and are unambiguous.
+        foreach (var kw in keywords)
+            if (kw.Length > 0 && kw[0] > 127 && lower.Contains(kw)) return true;
+
+        foreach (string token in TokenizeBoneName(boneName))
+            foreach (var kw in keywords)
+                if (kw.Length > 0 && kw[0] <= 127 && token.StartsWith(kw, StringComparison.Ordinal))
+                    return true;
+
+        return false;
+    }
+
+    /// Split a bone name into lowercase word tokens, breaking on anything that isn't a letter
+    /// and on camelCase humps: `J_Sec_Hair1_01` → j, sec, hair; `SkirtFront` → skirt, front.
+    private static System.Collections.Generic.List<string> TokenizeBoneName(string name)
+    {
+        var tokens = new System.Collections.Generic.List<string>();
+        var current = new System.Text.StringBuilder();
+
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            if (!char.IsLetter(c))
+            {
+                if (current.Length > 0) { tokens.Add(current.ToString().ToLowerInvariant()); current.Clear(); }
+                continue;
+            }
+            if (current.Length > 0 && char.IsUpper(c) && !char.IsUpper(name[i - 1]))
+            {
+                tokens.Add(current.ToString().ToLowerInvariant());
+                current.Clear();
+            }
+            current.Append(c);
+        }
+        if (current.Length > 0) tokens.Add(current.ToString().ToLowerInvariant());
+
+        return tokens;
     }
 
     /// Set up avatar toggles from .ska v2 metadata. No-op for v1 files.

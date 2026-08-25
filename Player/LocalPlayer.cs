@@ -283,6 +283,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         StandUp();
         Velocity = Vector3.Zero;
         PlayEmote(AvatarInstance.Emote.None);
+        // Secondary physics runs in world space, so a respawn across the map reads to the solver
+        // as a several-metre-per-frame acceleration and throws hair and skirt horizontal.
+        _avatar?.ResetPhysics();
     }
 
     // ── Sitting / lying ──────────────────────────────────────────────────────────────

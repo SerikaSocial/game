@@ -139,6 +139,11 @@ public partial class Main : Node3D
                 args.GetValueOrDefault("ska", null));
             return;
         }
+        if (args.ContainsKey("serika-phystest"))
+        {
+            Avatar.PhysDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
+            return;
+        }
         if (args.ContainsKey("serika-worldtest"))
         {
             WorldDiagnostic.Run(this, _worldRoot, args.GetValueOrDefault("world", null),
