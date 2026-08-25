@@ -195,8 +195,8 @@ public sealed partial class SpringBoneSystem : Node
                     float dot = restDirInParentSpace.Dot(targetDirInParentSpace);
                     float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f));
 
-                    // Clamp max bend angle to 60 degrees to prevent hair/breast from bending backwards or inside the mesh
-                    float maxAngle = 60f * (Mathf.Pi / 180f);
+                    // Clamp max bend angle to 25 degrees to prevent secondary physics from clipping into body geometry
+                    float maxAngle = 25f * (Mathf.Pi / 180f);
                     if (angle > maxAngle)
                     {
                         float t = maxAngle / angle;
