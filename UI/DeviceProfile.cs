@@ -104,6 +104,18 @@ public static class DeviceProfile
                 2 => Viewport.Msaa.Msaa4X,
                 _ => Viewport.Msaa.Msaa8X,
             };
+
+            // Shadow atlas. The default 4096 map is a big, always-resident render target and a
+            // sizeable share of a tile GPU's bandwidth budget; a Low tier that has shadows on at
+            // all does not need more than 1024.
+            vp.PositionalShadowAtlasSize = Current switch
+            {
+                Tier.Low => 1024,
+                Tier.Medium => 2048,
+                _ => 4096,
+            };
+
+            ApplyFoveation();
         }
 
         if (DisplayServer.GetName() != "headless")
@@ -112,7 +124,70 @@ public static class DeviceProfile
                 VSync ? DisplayServer.VSyncMode.Enabled : DisplayServer.VSyncMode.Disabled);
         }
 
+        // Shadows and glow live on scene nodes, not on the engine, so they only take effect if
+        // something walks the tree. Without this the Quest detected `Shadows = false` at boot and
+        // then rendered every shadow anyway — the setting was saved and never enforced.
+        if (vp != null) ApplyToScene(vp);
+
         Settings.Save();
+    }
+
+    /// Enforce the node-level graphics settings across a subtree. Call after building or loading a
+    /// world: freshly spawned lights and environments default to full quality regardless of tier.
+    public static void ApplyToScene(Node root)
+    {
+        if (root == null) return;
+
+        foreach (var node in root.FindChildren("*", "Light3D", true, false))
+        {
+            if (node is not Light3D light) continue;
+            light.ShadowEnabled = Shadows;
+            // Directional shadows are the expensive ones. Pulling the split distance in is a much
+            // bigger win on a tile GPU than lowering resolution, and barely visible in a social
+            // space where the interesting geometry is all within a few metres.
+            if (light is DirectionalLight3D dir)
+            {
+                dir.DirectionalShadowMaxDistance = Current switch
+                {
+                    Tier.Low => 25f,
+                    Tier.Medium => 50f,
+                    _ => 100f,
+                };
+                dir.DirectionalShadowMode = Current == Tier.Low
+                    ? DirectionalLight3D.ShadowMode.Orthogonal        // one split, one shadow pass
+                    : DirectionalLight3D.ShadowMode.Parallel4Splits;
+            }
+        }
+
+        foreach (var node in root.FindChildren("*", "WorldEnvironment", true, false))
+        {
+            if (node is not WorldEnvironment we || we.Environment is not { } env) continue;
+            env.GlowEnabled = BloomEnabled;
+            // Screen-space effects are full-resolution passes per eye; nothing survives Low tier.
+            if (Current == Tier.Low)
+            {
+                env.SsaoEnabled = false;
+                env.SsilEnabled = false;
+                env.SsrEnabled = false;
+                env.VolumetricFogEnabled = false;
+            }
+        }
+    }
+
+    /// Turn on OpenXR fixed foveated rendering. The periphery of each eye buffer is shaded at a
+    /// fraction of the centre's rate, which is the single cheapest large win on a standalone
+    /// headset and is invisible through the lenses at their edge resolution.
+    private static void ApplyFoveation()
+    {
+        if (XRServer.FindInterface("OpenXR") is not OpenXRInterface xr || !xr.IsInitialized()) return;
+        xr.FoveationLevel = Current switch
+        {
+            Tier.Low => 3,     // high
+            Tier.Medium => 2,  // medium
+            _ => 1,            // low
+        };
+        // Follow the gaze where the runtime supports it; a static pattern otherwise.
+        xr.FoveationDynamic = true;
     }
 
     /// Persistence for the graphics + audio + control settings, in `user://settings.cfg`.

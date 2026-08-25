@@ -120,10 +120,12 @@ public partial class Main : Node3D
         Worlds.BuildLoginBackdrop(_worldRoot); // neutral backdrop behind the login screen
         if (_vrMode)
         {
-            SpawnBootXrRig();
-            // Must exist before any UI is constructed below, since AddUi() routes into it.
+            // The panel must exist *before* the boot rig, because the rig's laser pointer is
+            // handed the surface it aims at, and before any UI is constructed below, since
+            // AddUi() routes layers into it.
             _vrUi = new UI.VrUiSurface { Name = "VrUi" };
             AddChild(_vrUi);
+            SpawnBootXrRig();
         }
 
         var args = ParseArgs();
@@ -395,6 +397,9 @@ public partial class Main : Node3D
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
         build(_worldRoot);
+        // A freshly built world's lights and environment come up at full quality no matter what
+        // tier the device is on, so the profile has to be re-stamped onto every new world root.
+        UI.DeviceProfile.ApplyToScene(_worldRoot);
         SetupVideoForWorld();
     }
 

@@ -18,8 +18,17 @@ namespace SerikaSocial.UI;
 public partial class VrUiSurface : Node3D
 {
     /// Backing resolution of the panel. 4:3-ish at a size that stays legible through the Quest's
-    /// lenses without costing a full extra 1080p render target per eye.
-    public static readonly Vector2I Resolution = new(1600, 1000);
+    /// lenses without costing a full extra 1080p render target per eye. The Low tier trades some
+    /// text crispness for ~40% fewer pixels, which matters because this target is composited on
+    /// top of an already mobile-bound scene render.
+    private static Vector2I PreferredResolution => DeviceProfile.Current == DeviceProfile.Tier.Low
+        ? new Vector2I(1200, 750)
+        : new Vector2I(1600, 1000);
+
+    /// The resolution this surface was actually built at. Fixed at `_Ready` rather than read live,
+    /// so changing the quality tier mid-session cannot desync the pointer's hit-test maths from
+    /// the size of the render target the UI is really drawn on.
+    public Vector2I Resolution { get; private set; }
 
     /// Panel size in metres, and how far in front of the camera it floats.
     private const float PanelWidth = 1.6f;
@@ -30,9 +39,11 @@ public partial class VrUiSurface : Node3D
 
     private QuadMesh _quad;
     private bool _initialized;
+    private double _visibilityPoll;
 
     public override void _Ready()
     {
+        Resolution = PreferredResolution;
         Viewport = new SubViewport
         {
             Name = "UiViewport",
@@ -75,6 +86,31 @@ public partial class VrUiSurface : Node3D
         AddChild(Panel);
 
         Position = new Vector3(0, 1.2f, -PanelDistance);
+    }
+
+    /// Stop rendering the panel while nothing is on it.
+    ///
+    /// `UpdateMode.Always` re-rendered a 1600×1000 target and composited a transparent quad every
+    /// single frame for the whole session, menu open or not — a fixed tax on the exact device that
+    /// can least afford it. The panel only has to be live while some layer is visible.
+    public override void _Process(double delta)
+    {
+        // Polled a few times a second rather than every frame: walking the child list allocates a
+        // Godot Array and boxes each entry into a Variant, and this runs for the whole session.
+        _visibilityPoll -= delta;
+        if (_visibilityPoll > 0) return;
+        _visibilityPoll = 0.2;
+
+        bool anyVisible = false;
+        for (int i = 0, n = Viewport.GetChildCount(); i < n; i++)
+        {
+            if (Viewport.GetChild(i) is CanvasLayer { Visible: true }) { anyVisible = true; break; }
+        }
+
+        Panel.Visible = anyVisible;
+        Viewport.RenderTargetUpdateMode = anyVisible
+            ? SubViewport.UpdateMode.Always
+            : SubViewport.UpdateMode.Disabled;
     }
 
     /// Snap the panel a fixed distance directly in front of `camera`, upright and facing the player.
@@ -147,6 +183,9 @@ public partial class VrUiSurface : Node3D
     public bool RayHit(Vector3 origin, Vector3 direction, out Vector3 hit)
     {
         hit = default;
+        // An idle panel is not drawn, so it must not be clickable either — otherwise the ray
+        // still lands on an invisible slab and pushes events at hidden layers.
+        if (Panel == null || !Panel.Visible) return false;
         var xform = Panel.GlobalTransform;
         var normal = xform.Basis.Z.Normalized();
         float denom = normal.Dot(direction);

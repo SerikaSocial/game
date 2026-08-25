@@ -204,6 +204,10 @@ public static class WorldLoader
         // Environment tuned to the world: a dark cinema, a bright studio, a baked interior, …
         SetupEnvironment(root, lighting);
 
+        // Cloud worlds bring their own lights and environment, all authored at full quality.
+        // Stamp the device profile over them, or a Quest ends up rendering a desktop-tier world.
+        UI.DeviceProfile.ApplyToScene(root);
+
         // Spawn precedence: manifest → SPAWN marker → an in-scene node named *spawn* →
         // the geometry's own floor-centre → the origin. The AABB fallback keeps model worlds
         // (which are rarely modelled around the origin) from spawning the player in a wall or
