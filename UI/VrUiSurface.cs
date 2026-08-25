@@ -113,52 +113,97 @@ public partial class VrUiSurface : Node3D
             : SubViewport.UpdateMode.Disabled;
     }
 
+    // Follow behaviour. The panel parks in place and only chases the player when it has drifted
+    // far enough out of view to be a nuisance — then it settles again and stops moving.
+    private const float ReAnchorAngle = 45f;   // degrees off-centre before the panel starts moving
+    private const float SettledAngle = 6f;     // ...and how close it must get before it stops
+    private const float ReAnchorDistance = 0.7f; // metres of range error before it starts moving
+    private const float SettledDistance = 0.05f;
+    private bool _following;
+
+    /// Point the panel at the camera, upright. Always billboards off the camera→panel vector.
+    ///
+    /// This used to aim with the camera's *forward* vector instead, which is only equivalent when
+    /// the panel is exactly dead ahead. Any time the panel was off to one side — which is most of
+    /// a lazy follow — it yawed to align with your gaze axis rather than turning to face you, so
+    /// the UI visibly skewed sideways as it moved.
+    private void OrientTo(Vector3 camPos)
+    {
+        var away = GlobalPosition - camPos;
+        away = new Vector3(away.X, 0, away.Z);
+        if (away.LengthSquared() < 0.0001f) return;
+        // LookAt points -Z at the target, so aiming further *away* from the camera leaves the
+        // QuadMesh's front face (+Z) turned back toward the player.
+        LookAt(GlobalPosition + away.Normalized(), Vector3.Up);
+    }
+
     /// Snap the panel a fixed distance directly in front of `camera`, upright and facing the player.
     public void FaceCamera(Camera3D camera)
     {
         if (camera == null) return;
+        if (!TryAnchor(camera, out var target)) return;
 
-        var camPos = camera.GlobalPosition;
-        var forward = -camera.GlobalTransform.Basis.Z;
-        var flat = new Vector3(forward.X, 0, forward.Z);
-        if (flat.LengthSquared() < 0.0001f) return;
-        flat = flat.Normalized();
-
-        GlobalPosition = camPos + flat * PanelDistance;
-        // QuadMesh front face (+Z) turns toward player when LookAt target is along +flat away from player.
-        LookAt(GlobalPosition + flat, Vector3.Up);
+        GlobalPosition = target;
+        OrientTo(camera.GlobalPosition);
         _initialized = true;
+        _following = false;
     }
 
-    /// Smoothly updates panel position only if the camera has moved significantly away or rotated > 50 degrees away.
+    /// Where the panel wants to sit: `PanelDistance` ahead of the camera's horizontal gaze, at eye
+    /// height. Returns false when the player is looking straight up or down, where "ahead" has no
+    /// meaningful horizontal direction and re-anchoring would fling the panel somewhere arbitrary.
+    private bool TryAnchor(Camera3D camera, out Vector3 target)
+    {
+        target = default;
+        var forward = -camera.GlobalTransform.Basis.Z;
+        var flat = new Vector3(forward.X, 0, forward.Z);
+        if (flat.LengthSquared() < 0.02f) return false;
+        target = camera.GlobalPosition + flat.Normalized() * PanelDistance;
+        return true;
+    }
+
+    /// Keep the panel roughly in front of the player without it sliding around underfoot.
+    ///
+    /// The previous version re-evaluated its target every frame while the error was over
+    /// threshold, so once you started walking or turning the panel chased you continuously and
+    /// never came to rest. This uses hysteresis instead: nothing moves until the panel is well
+    /// out of view, then it travels to a fixed anchor and *stops* once it arrives.
     public void LazyFollow(Camera3D camera, float dt)
     {
         if (camera == null) return;
-        if (!_initialized)
-        {
-            FaceCamera(camera);
-            return;
-        }
+        if (!_initialized) { FaceCamera(camera); return; }
 
         var camPos = camera.GlobalPosition;
-        var forward = -camera.GlobalTransform.Basis.Z;
-        var flat = new Vector3(forward.X, 0, forward.Z);
-        if (flat.LengthSquared() < 0.0001f) return;
-        flat = flat.Normalized();
-
-        var toPanel = (GlobalPosition - camPos);
+        var toPanel = GlobalPosition - camPos;
         var toPanelFlat = new Vector3(toPanel.X, 0, toPanel.Z);
         float dist = toPanelFlat.Length();
+        if (dist < 0.001f) { FaceCamera(camera); return; }
 
-        float angle = Mathf.RadToDeg(Mathf.Acos(Mathf.Clamp(flat.Dot(toPanelFlat / Mathf.Max(dist, 0.001f)), -1f, 1f)));
+        var forward = -camera.GlobalTransform.Basis.Z;
+        var flat = new Vector3(forward.X, 0, forward.Z);
+        float angle = flat.LengthSquared() < 0.02f
+            ? 0f // looking straight up/down: no meaningful yaw error, so don't trigger a chase
+            : Mathf.RadToDeg(Mathf.Acos(
+                Mathf.Clamp(flat.Normalized().Dot(toPanelFlat / dist), -1f, 1f)));
+        float rangeError = Mathf.Abs(dist - PanelDistance);
 
-        // If the player walked far away or turned away from the UI, smoothly bring it back into view.
-        if (Mathf.Abs(dist - PanelDistance) > 0.8f || angle > 50f)
+        if (!_following && (angle > ReAnchorAngle || rangeError > ReAnchorDistance))
+            _following = true;
+
+        if (_following)
         {
-            var targetPos = camPos + flat * PanelDistance;
-            GlobalPosition = GlobalPosition.Lerp(targetPos, Mathf.Min(1f, dt * 4f));
-            LookAt(GlobalPosition + flat, Vector3.Up);
+            if (!TryAnchor(camera, out var target)) return;
+            // Exponential smoothing that is independent of frame rate — a raw `dt * k` lerp moves
+            // further per second at 120 Hz than at 72 Hz, so the panel felt different in-headset
+            // than on desktop.
+            GlobalPosition = GlobalPosition.Lerp(target, 1f - Mathf.Exp(-6f * dt));
+
+            if (angle < SettledAngle && rangeError < SettledDistance) _following = false;
         }
+
+        // Billboard every frame regardless: it is cheap, and it means the panel always squarely
+        // faces the player even while parked and walked around.
+        OrientTo(camPos);
     }
 
     /// Map a world-space point on the panel to pixel coordinates inside the UI viewport.
