@@ -176,34 +176,50 @@ public sealed partial class SpringBoneSystem : Node
                     p.CurrentPos = parentWorld + dirWorld.Normalized() * restLen;
                 }
 
-                // Write back ROTATION ONLY — never mutate bone position translation!
-                // Setting bone position stretches mesh geometry; rotation swings the joint naturally.
+                // Write back ROTATION ONLY in Parent-Space — never mutate bone position translation!
                 if (restLen > 1e-4f)
                 {
-                    var skelBasis = _skeleton.GlobalTransform.Basis;
-                    var desiredSkelDir = (skelBasis.Inverse() * dirWorld).Normalized();
-                    var restSkelDir = p.RestLocalPos.Normalized();
-
-                    float dot = restSkelDir.Dot(desiredSkelDir);
-                    Quaternion rotQuat;
-                    if (dot > 0.9999f) rotQuat = Quaternion.Identity;
-                    else if (dot < -0.9999f) rotQuat = new Quaternion(Vector3.Up, Mathf.Pi);
-                    else
-                    {
-                        var axis = restSkelDir.Cross(desiredSkelDir);
-                        if (axis.LengthSquared() < 1e-6f) axis = Vector3.Up;
-                        rotQuat = new Quaternion(axis.Normalized(), Mathf.Acos(Mathf.Clamp(dot, -1f, 1f)));
-                    }
-
                     int pBone = p.BoneIdx;
                     int parentBone = _skeleton.GetBoneParent(pBone);
-                    var parentGlobalRot = parentBone >= 0
-                        ? _skeleton.GetBoneGlobalPose(parentBone).Basis.GetRotationQuaternion()
-                        : Quaternion.Identity;
+
+                    var parentGlobalXform = parentBone >= 0
+                        ? _skeleton.GlobalTransform * _skeleton.GetBoneGlobalPose(parentBone)
+                        : _skeleton.GlobalTransform;
+
+                    var parentWorldRot = parentGlobalXform.Basis.GetRotationQuaternion();
+
+                    // Convert current particle direction and rest direction into Parent Bone Local Space
+                    var targetDirInParentSpace = (parentWorldRot.Inverse() * dirWorld.Normalized()).Normalized();
+                    var restDirInParentSpace = p.RestLocalPos.Normalized();
+
+                    float dot = restDirInParentSpace.Dot(targetDirInParentSpace);
+                    float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f));
+
+                    // Clamp max bend angle to 60 degrees to prevent hair/breast from bending backwards or inside the mesh
+                    float maxAngle = 60f * (Mathf.Pi / 180f);
+                    if (angle > maxAngle)
+                    {
+                        float t = maxAngle / angle;
+                        targetDirInParentSpace = restDirInParentSpace.Slerp(targetDirInParentSpace, t).Normalized();
+                        dot = restDirInParentSpace.Dot(targetDirInParentSpace);
+                        angle = maxAngle;
+                    }
+
+                    Quaternion deltaRot;
+                    if (dot > 0.9999f)
+                    {
+                        deltaRot = Quaternion.Identity;
+                    }
+                    else
+                    {
+                        var axis = restDirInParentSpace.Cross(targetDirInParentSpace);
+                        if (axis.LengthSquared() < 1e-6f) axis = Vector3.Up;
+                        deltaRot = new Quaternion(axis.Normalized(), angle);
+                    }
 
                     var restRot = _skeleton.GetBoneRest(pBone).Basis.GetRotationQuaternion();
-                    var localRot = (parentGlobalRot.Inverse() * rotQuat * restRot).Normalized();
-                    _skeleton.SetBonePoseRotation(pBone, localRot);
+                    var localPoseRot = (deltaRot * restRot).Normalized();
+                    _skeleton.SetBonePoseRotation(pBone, localPoseRot);
                 }
             }
         }
