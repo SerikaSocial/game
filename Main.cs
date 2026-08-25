@@ -1393,8 +1393,17 @@ public partial class Main : Node3D
             return;
         }
 
-        DialogueManagerRuntime.DialogueManager.DialogueEnded += OnTutorialEnded;
-        DialogueManagerRuntime.DialogueManager.ShowExampleDialogueBalloon(dialogueRes, "tutorial_start");
+        try
+        {
+            DialogueManagerRuntime.DialogueManager.DialogueEnded += OnTutorialEnded;
+            DialogueManagerRuntime.DialogueManager.ShowExampleDialogueBalloon(dialogueRes, "tutorial_start");
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"tutorial balloon failed: {e.Message}");
+            DialogueManagerRuntime.DialogueManager.DialogueEnded -= OnTutorialEnded;
+            UI.InputMode.Release(UI.InputMode.Tutorial);
+        }
     }
 
     private void OnTutorialEnded(Resource _)

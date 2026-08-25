@@ -236,6 +236,8 @@ void fragment() {
         {
             AlbedoColor = Brand.Accent,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            NoDepthTest = true,
+            RenderPriority = 101,
         };
         _rightHand.AddChild(_laser);
 
@@ -250,6 +252,8 @@ void fragment() {
         {
             AlbedoColor = Brand.PrimaryHi,
             ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            NoDepthTest = true,
+            RenderPriority = 102,
         };
         _laserDot.TopLevel = true;
         AddChild(_laserDot);

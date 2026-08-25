@@ -23,7 +23,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.2.4";
+    public const string ClientVersion = "1.2.5";
 
     private ColorRect _scrim;
     private Control _loginScreen;
