@@ -364,6 +364,8 @@ public sealed partial class AvatarInstance : Node3D
 
     /// Set up spring-bone physics from .ska v2 PhysBones metadata or auto-detect secondary
     /// physics bones (hair, skirt, ears, tail, breasts, ribbons) if metadata is missing.
+    /// Character creators who supply their own PhysBones metadata override auto-detection,
+    /// and creators can also set disableAutoPhysBones=true to disable physics entirely.
     private void SetupPhysBones()
     {
         if (Skeleton == null) return;
@@ -371,12 +373,14 @@ public sealed partial class AvatarInstance : Node3D
         var list = Meta?.PhysBones;
         var colliders = Meta?.PhysBoneColliders;
 
-        if (list == null || list.Count == 0)
+        // If creator authored custom PhysBones (list.Count > 0), their custom setup is used!
+        // If list is empty/null, run auto-detection UNLESS creator set disableAutoPhysBones=true.
+        if ((list == null || list.Count == 0) && Meta?.DisableAutoPhysBones != true)
         {
             list = AutoDetectPhysBones();
         }
 
-        if (list.Count == 0) return;
+        if (list == null || list.Count == 0) return;
 
         _springBones = new SpringBoneSystem { Name = "SpringBones" };
         AddChild(_springBones);
@@ -389,7 +393,12 @@ public sealed partial class AvatarInstance : Node3D
         var result = new System.Collections.Generic.List<PhysBoneMeta>();
         if (Skeleton == null) return result;
 
-        string[] keywords = { "hair", "skirt", "ear", "tail", "bust", "breast", "ribbon", "cape", "wing", "sleeve" };
+        string[] keywords = {
+            "hair", "skirt", "ear", "tail", "bust", "breast", "titty", "mune", "oppai", "boob",
+            "cleavage", "ribbon", "cape", "wing", "sleeve", "胸", "乳", "髪", "耳", "尾", "スカート", "リボン", "袖"
+        };
+
+        string[] breastKeywords = { "bust", "breast", "titty", "mune", "oppai", "boob", "cleavage", "胸", "乳" };
 
         for (int i = 0; i < Skeleton.GetBoneCount(); i++)
         {
@@ -415,16 +424,22 @@ public sealed partial class AvatarInstance : Node3D
                 if (parentMatches) continue; // child of an existing chain root
             }
 
+            bool isBreast = false;
+            foreach (var bkw in breastKeywords)
+            {
+                if (name.Contains(bkw)) { isBreast = true; break; }
+            }
+
             result.Add(new PhysBoneMeta
             {
                 Name = Skeleton.GetBoneName(i),
                 RootTransform = Skeleton.GetBoneName(i),
-                Stiffness = 0.55f,
-                Gravity = 0.25f,
-                Force = 1.0f,
-                Pull = 0.2f,
-                Spring = 0.5f,
-                Damping = 0.15f,
+                Stiffness = isBreast ? 0.35f : 0.55f,
+                Gravity = isBreast ? 0.15f : 0.25f,
+                Force = isBreast ? 1.25f : 1.0f,
+                Pull = isBreast ? 0.35f : 0.2f,
+                Spring = isBreast ? 0.75f : 0.5f,
+                Damping = isBreast ? 0.08f : 0.15f,
                 MaxStretch = 0.1f,
                 IsGrabbable = true,
                 IsPosable = false,

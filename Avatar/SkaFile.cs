@@ -17,7 +17,9 @@ public sealed class SkaMeta
     [JsonPropertyName("eyeHeightMeters")] public float EyeHeightMeters { get; set; } = 1.6f;
     [JsonPropertyName("humanoid")] public Dictionary<string, string> Humanoid { get; set; } = new();
 
-    // ── v2 extended fields (VRC avatar imports) ──
+    /// Option for creators to disable auto-detected physbone generation for their model.
+    [JsonPropertyName("disableAutoPhysBones")]
+    public bool DisableAutoPhysBones { get; set; } = false;
 
     /// PhysBone spring bone chains. Each entry describes a bone root and its physics params.
     [JsonPropertyName("physBones")]
