@@ -281,7 +281,7 @@ public static partial class Worlds
         root.AddChild(mirror);
 
         // Portal to the world browser, in the front doorway.
-        var portal = Portal.Create("Worlds", new Color(0.4f, 0.6f, 1f), new Vector3(2.6f, 0.05f, d / 2 - 0.6f), 180f);
+        var portal = Portal.Create("Worlds", new Color(0.49f, 0.23f, 0.93f), new Vector3(2.6f, 0.05f, d / 2 - 0.6f), 180f);
         root.AddChild(portal);
 
         return new Home(new Vector3(0, 1f, 1.2f), portal, mirror);

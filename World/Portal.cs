@@ -74,18 +74,24 @@ public partial class Portal : Area3D
 
     private void Build(string label, Color tint)
     {
-        // Portal surface: a double-sided plane showing a swirling portal effect.
+        // Portal surface: a flat, opaque, double-sided rectangle that looks like a PNG on both
+        // sides. Using Orientation.Z so the plane faces the player without any rotation —
+        // rotating a horizontal PlaneMesh 90° around X caused it to render as an oval.
+        var plane = new PlaneMesh
+        {
+            Size = new Vector2(PortalWidth, PortalHeight),
+            Orientation = PlaneMesh.OrientationEnum.Z,
+        };
         _surface = new MeshInstance3D
         {
-            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth, PortalHeight) },
+            Mesh = plane,
             Position = new Vector3(0, PortalHeight * 0.5f, 0),
-            RotationDegrees = new Vector3(90, 0, 0),
         };
         var surfMat = new StandardMaterial3D
         {
-            AlbedoColor = new Color(tint.R * 0.3f, tint.G * 0.3f, tint.B * 0.5f, 0.35f),
-            Emission = tint * 0.8f,
-            EmissionEnergyMultiplier = 1.5f,
+            AlbedoColor = new Color(tint.R * 0.15f, tint.G * 0.1f, tint.B * 0.3f, 0.92f),
+            Emission = tint * 0.6f,
+            EmissionEnergyMultiplier = 1.2f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
             NoDepthTest = true,
             CullMode = BaseMaterial3D.CullModeEnum.Disabled,
@@ -94,18 +100,22 @@ public partial class Portal : Area3D
         _surface.MaterialOverride = surfMat;
         AddChild(_surface);
 
-        // Purple glow frame: a slightly larger plane behind the surface, emissive purple,
-        // visible only as a rim around the portal edges.
+        // Purple glow border: a slightly larger plane behind the surface, emissive purple,
+        // visible only as a rim around the portal edges. RenderPriority -1 so the surface
+        // draws on top of it.
         _frameGlow = new MeshInstance3D
         {
-            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth + 0.15f, PortalHeight + 0.15f) },
-            Position = new Vector3(0, PortalHeight * 0.5f, 0.02f),
-            RotationDegrees = new Vector3(90, 0, 0),
+            Mesh = new PlaneMesh
+            {
+                Size = new Vector2(PortalWidth + 0.12f, PortalHeight + 0.12f),
+                Orientation = PlaneMesh.OrientationEnum.Z,
+            },
+            Position = new Vector3(0, PortalHeight * 0.5f, 0.01f),
         };
         _frameGlow.MaterialOverride = new StandardMaterial3D
         {
-            AlbedoColor = new Color(tint.R, tint.G, tint.B, 0.9f),
-            Emission = tint * 1.5f,
+            AlbedoColor = new Color(tint.R, tint.G, tint.B, 1f),
+            Emission = tint * 2.0f,
             EmissionEnergyMultiplier = 2.5f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
             NoDepthTest = true,
@@ -115,17 +125,20 @@ public partial class Portal : Area3D
         };
         AddChild(_frameGlow);
 
-        // A second glow plane on the back side for symmetry.
+        // Second glow plane on the back side for symmetry.
         var backGlow = new MeshInstance3D
         {
-            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth + 0.15f, PortalHeight + 0.15f) },
-            Position = new Vector3(0, PortalHeight * 0.5f, -0.02f),
-            RotationDegrees = new Vector3(90, 180, 0),
+            Mesh = new PlaneMesh
+            {
+                Size = new Vector2(PortalWidth + 0.12f, PortalHeight + 0.12f),
+                Orientation = PlaneMesh.OrientationEnum.Z,
+            },
+            Position = new Vector3(0, PortalHeight * 0.5f, -0.01f),
         };
         backGlow.MaterialOverride = new StandardMaterial3D
         {
-            AlbedoColor = new Color(tint.R, tint.G, tint.B, 0.9f),
-            Emission = tint * 1.5f,
+            AlbedoColor = new Color(tint.R, tint.G, tint.B, 1f),
+            Emission = tint * 2.0f,
             EmissionEnergyMultiplier = 2.5f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
             NoDepthTest = true,
