@@ -77,6 +77,7 @@ public partial class Main : Node3D
     private ChatOverlay _chat;
     private LoadingScreen _loading;
     private TouchControls _touch; // non-null on touchscreen (mobile) devices
+    private UI.VrKeyboard _vrKeyboard; // non-null in VR mode
     private readonly Dictionary<uint, string> _peerNames = new();
     private DeepLink.Intent _pendingIntent = DeepLink.Intent.None;
     private bool _inHome;
@@ -300,6 +301,15 @@ public partial class Main : Node3D
         AddUi(_chat);
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
+
+        // VR virtual keyboard: in VR, the OS keyboard never appears inside the SubViewport,
+        // so we provide our own. It auto-shows when a LineEdit gains focus.
+        if (_vrMode)
+        {
+            _vrKeyboard = new UI.VrKeyboard { Name = "VrKeyboard" };
+            AddUi(_vrKeyboard);
+            GD.Print("VR: virtual keyboard enabled");
+        }
 
         if (_uiShotMode)
             StartUiShots(args.GetValueOrDefault("out", null), args.GetValueOrDefault("screens", null),
@@ -864,6 +874,10 @@ public partial class Main : Node3D
 
             SaveSession(_api.SessionToken);
 
+            // Start rich presence (Discord IPC + Serika RPC).
+            RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+            RpcPresence.UpdateState("Home", 1);
+
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
@@ -895,6 +909,10 @@ public partial class Main : Node3D
             GD.Print($"logged in as {_username} (email)");
 
             SaveSession(_api.SessionToken);
+
+            // Start rich presence (Discord IPC + Serika RPC).
+            RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+            RpcPresence.UpdateState("Home", 1);
 
             SetLoadingStatus("Loading your avatar…");
             await FetchCurrentAvatar();
@@ -1004,6 +1022,10 @@ public partial class Main : Node3D
                 _localPfpUrl = ReadAvatarUrl(user);
                 _localTrust = ReadTrust(user);
                 GD.Print($"session restored as {_username}");
+
+                // Start rich presence (Discord IPC + Serika RPC).
+                RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+                RpcPresence.UpdateState("Home", 1);
 
                 SetLoadingStatus("Loading your avatar…");
                 await FetchCurrentAvatar();
@@ -1168,6 +1190,7 @@ public partial class Main : Node3D
         _hud?.HideAll();
         _inWorldHud?.SetWorld("Home");
         _inWorldHud?.SetPlayerCount(1);
+        RpcPresence.UpdateState("Home", 1);
         UI.InputMode.ReleaseAll();
         UI.InputMode.SetPlayable(true);
         _inWorldHud?.Toast("Welcome home · walk into the portal to travel · T to chat · Esc for menu", 6);
@@ -1682,6 +1705,7 @@ public partial class Main : Node3D
         UI.InputMode.SetPlayable(true);
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
+        RpcPresence.UpdateState(_worldName, 1 + others);
         _chat.AddSystem($"Welcome to {_worldName}.");
     }
 
@@ -1692,6 +1716,7 @@ public partial class Main : Node3D
         if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
         _peerNames[p.PeerId] = p.Name;
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
+        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count);
         _chat.AddSystem($"{p.Name} joined the world");
     }
 
@@ -1702,6 +1727,7 @@ public partial class Main : Node3D
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
         _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
+        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count);
         _chat.AddSystem($"{name} left the world");
     }
 
@@ -2030,6 +2056,9 @@ public partial class Main : Node3D
         if (_vrUi != null)
             _vrUi.LazyFollow(_localVr?.HeadCamera
                 ?? _bootXrOrigin?.GetNodeOrNull<XRCamera3D>("BootXrCamera"), (float)delta);
+
+        // Re-push rich presence on an interval.
+        RpcPresence.Poll(delta);
     }
 
     public override void _PhysicsProcess(double delta)
