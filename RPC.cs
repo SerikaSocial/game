@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -11,14 +12,15 @@ namespace SerikaSocial;
 /// Rich presence manager: pushes activity to both Discord and SerikaCord so the user's status
 /// shows what world they're in and how full the lobby is.
 ///
-/// Discord RPC uses the official IPC pipe (named socket on Linux/macOS, \\.\pipe on Windows).
-/// Serika RPC uses the REST endpoint PUT /api/v1/users/@me/rich-presence with a bearer token.
+/// Discord RPC uses the official IPC pipe (Unix domain socket on Linux/macOS, \\\.\pipe on Windows).
+/// Serika RPC uses the REST endpoint PUT /api/v1/users/@me/rich-presence on api.serika.chat.
 ///
 /// Both are fire-and-forget: failures log a warning and the next heartbeat retries. The presence
 /// expires ~60s after the last push on Serika's side, so we re-push every 30s while active.
 public static class RpcPresence
 {
-    private static string _serikaApiUrl;
+    // SerikaCord API is a separate service from the game API.
+    private const string SerikaApiBaseUrl = "https://api.serika.chat";
     private static string _sessionToken;
     private static string _worldName = "Home";
     private static int _playerCount = 1;
@@ -27,7 +29,7 @@ public static class RpcPresence
     private static double _lastPush;
     private static double _pushInterval = 30.0;
     private static bool _active;
-    private static bool _connected;
+    private static bool _discordConnected;
 
     private static readonly System.Net.Http.HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
@@ -35,10 +37,10 @@ public static class RpcPresence
     private const string DiscordClientId = "1542129033683279955";
     private static DiscordIpc _discord;
 
-    /// Initialise with the Serika API URL and session token for Serika RPC.
+    /// Initialise with the game API URL (unused for Serika RPC — that hits api.serika.chat
+    /// directly) and session token for Serika RPC.
     public static void Init(string apiBaseUrl, string sessionToken)
     {
-        _serikaApiUrl = apiBaseUrl?.TrimEnd('/');
         _sessionToken = sessionToken;
         _active = true;
 
@@ -47,14 +49,14 @@ public static class RpcPresence
         {
             _discord = new DiscordIpc(DiscordClientId);
             _discord.Connect();
-            _connected = _discord.IsConnected;
-            if (_connected) GD.Print("RPC: Discord IPC connected");
+            _discordConnected = _discord.IsConnected;
+            if (_discordConnected) GD.Print("RPC: Discord IPC connected");
             else GD.Print("RPC: Discord IPC not available (Discord not running?)");
         }
         catch (Exception e)
         {
             GD.Print($"RPC: Discord IPC init failed: {e.Message}");
-            _connected = false;
+            _discordConnected = false;
         }
     }
 
@@ -86,7 +88,7 @@ public static class RpcPresence
         _active = false;
         _discord?.Disconnect();
         _discord = null;
-        _connected = false;
+        _discordConnected = false;
     }
 
     private static void PushNow()
@@ -95,7 +97,7 @@ public static class RpcPresence
         string state = $"{_playerCount}/{_maxPlayers} players";
 
         // Discord
-        if (_connected && _discord != null)
+        if (_discordConnected && _discord != null)
         {
             try
             {
@@ -104,12 +106,29 @@ public static class RpcPresence
             catch (Exception e)
             {
                 GD.Print($"RPC: Discord push failed: {e.Message}");
-                _connected = false;
+                _discordConnected = false;
             }
         }
+        else if (_discord == null || !_discord.IsConnected)
+        {
+            // Retry connection periodically — Discord may have started after the game.
+            try
+            {
+                _discord?.Disconnect();
+                _discord = new DiscordIpc(DiscordClientId);
+                _discord.Connect();
+                _discordConnected = _discord.IsConnected;
+                if (_discordConnected)
+                {
+                    GD.Print("RPC: Discord IPC reconnected");
+                    _discord.UpdatePresence(_worldName, details, state, _playerCount, _maxPlayers);
+                }
+            }
+            catch { }
+        }
 
-        // Serika
-        if (!string.IsNullOrEmpty(_serikaApiUrl) && !string.IsNullOrEmpty(_sessionToken))
+        // Serika — hits api.serika.chat, not the game API
+        if (!string.IsNullOrEmpty(_sessionToken))
         {
             _ = PushSerikaAsync(details, state);
         }
@@ -139,7 +158,7 @@ public static class RpcPresence
 
             var json = JsonSerializer.Serialize(payload);
             var req = new HttpRequestMessage(HttpMethod.Put,
-                $"{_serikaApiUrl}/api/v1/users/@me/rich-presence")
+                $"{SerikaApiBaseUrl}/api/v1/users/@me/rich-presence")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             };
@@ -150,6 +169,10 @@ public static class RpcPresence
             {
                 var body = await res.Content.ReadAsStringAsync();
                 GD.Print($"RPC: Serika push failed ({res.StatusCode}): {body}");
+            }
+            else
+            {
+                GD.Print($"RPC: Serika presence pushed ({_worldName}, {_playerCount}/{_maxPlayers})");
             }
         }
         catch (Exception e)
@@ -165,7 +188,8 @@ public static class RpcPresence
 internal sealed class DiscordIpc : IDisposable
 {
     private readonly string _clientId;
-    private System.IO.FileStream _pipeStream;
+    private Socket _socket;
+    private System.IO.Pipes.NamedPipeClientStream _winPipe;
     private bool _connected;
     private int _nonce;
 
@@ -178,11 +202,9 @@ internal sealed class DiscordIpc : IDisposable
 
     public void Connect()
     {
-        // Try pipe paths: discord-ipc-0 through discord-ipc-9
         for (int i = 0; i < 10; i++)
         {
-            string path = GetPipePath(i);
-            if (TryOpenPipe(path))
+            if (TryConnect(i))
             {
                 _connected = true;
                 Handshake();
@@ -192,47 +214,54 @@ internal sealed class DiscordIpc : IDisposable
         _connected = false;
     }
 
-    private static string GetPipePath(int i)
+    private bool TryConnect(int i)
     {
         if (OS.GetName() == "Windows")
-            return $"\\\\.\\pipe\\discord-ipc-{i}";
-        // Linux / macOS: XDG runtime dir or /tmp
-        string env = System.Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") ?? "/tmp";
-        return $"{env}/discord-ipc-{i}";
-    }
-
-    private bool TryOpenPipe(string path)
-    {
-        try
         {
-            // Godot's FileAccess can open named pipes on some platforms, but for cross-platform
-            // reliability we use a raw socket approach. Since Godot doesn't expose AF_UNIX directly,
-            // we fall back to checking if the file exists and using a .NET approach.
-            if (!System.IO.File.Exists(path) && OS.GetName() != "Windows")
-                return false;
-
-            // Use System.IO for named pipe on Linux/macOS
-            // On Windows, named pipes are \\.\pipe\ and can be opened with .NET
-            _pipeStream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite);
-            return true;
+            try
+            {
+                _winPipe = new System.IO.Pipes.NamedPipeClientStream(".",
+                    $"discord-ipc-{i}", System.IO.Pipes.PipeDirection.InOut,
+                    System.IO.Pipes.PipeOptions.None);
+                _winPipe.Connect(2000);
+                return true;
+            }
+            catch { _winPipe = null; return false; }
         }
-        catch
+        else
         {
-            return false;
+            string env = System.Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") ?? "/tmp";
+            string path = $"{env}/discord-ipc-{i}";
+            // Resolve symlinks (flatpak/vencord proxies the socket)
+            try { path = System.IO.Path.GetFullPath(path); } catch { }
+            if (!System.IO.File.Exists(path)) return false;
+            try
+            {
+                _socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                _socket.ReceiveTimeout = 5000;
+                _socket.SendTimeout = 5000;
+                _socket.Connect(new UnixDomainSocketEndPoint(path));
+                return true;
+            }
+            catch
+            {
+                try { _socket?.Dispose(); } catch { }
+                _socket = null;
+                return false;
+            }
         }
     }
 
     private void Handshake()
     {
         var payload = JsonSerializer.Serialize(new { v = 1, client_id = _clientId });
-        Send(0, payload); // opcode 0 = HANDSHAKE
-        ReadFrame(); // read the READY response (we don't parse it, just consume)
+        Send(0, payload);
+        ReadFrame();
     }
 
     public void UpdatePresence(string worldName, string details, string state, int playerCount, int maxPlayers)
     {
-        if (!_connected || _pipeStream == null) return;
-
+        if (!_connected) return;
         _nonce++;
         var payload = JsonSerializer.Serialize(new
         {
@@ -256,33 +285,41 @@ internal sealed class DiscordIpc : IDisposable
             },
             nonce = _nonce.ToString(),
         });
-        Send(1, payload); // opcode 1 = FRAME
-        ReadFrame(); // consume response
+        Send(1, payload);
+        ReadFrame();
     }
 
     private void Send(int opcode, string payload)
     {
-        if (_pipeStream == null) return;
         var body = Encoding.UTF8.GetBytes(payload);
         var header = new byte[8];
-        // Little-endian: opcode (4 bytes) + length (4 bytes)
-        BitConverter.GetBytes(opcode).CopyTo(header, 0);
-        BitConverter.GetBytes(body.Length).CopyTo(header, 4);
-        _pipeStream.Write(header, 0, 8);
-        _pipeStream.Write(body, 0, body.Length);
-        _pipeStream.Flush();
+        BitConverter.TryWriteBytes(header.AsSpan(0, 4), opcode);
+        BitConverter.TryWriteBytes(header.AsSpan(4, 4), body.Length);
+        if (_socket != null)
+        {
+            _socket.Send(header);
+            _socket.Send(body);
+        }
+        else if (_winPipe != null)
+        {
+            _winPipe.Write(header, 0, 8);
+            _winPipe.Write(body, 0, body.Length);
+            _winPipe.Flush();
+        }
     }
 
     private void ReadFrame()
     {
-        if (_pipeStream == null) return;
         try
         {
             var header = new byte[8];
             int read = 0;
             while (read < 8)
             {
-                int n = _pipeStream.Read(header, read, 8 - read);
+                int n;
+                if (_socket != null) n = _socket.Receive(header, read, 8 - read, SocketFlags.None);
+                else if (_winPipe != null) n = _winPipe.Read(header, read, 8 - read);
+                else return;
                 if (n <= 0) break;
                 read += n;
             }
@@ -293,26 +330,25 @@ internal sealed class DiscordIpc : IDisposable
             read = 0;
             while (read < len)
             {
-                int n = _pipeStream.Read(body, read, len - read);
+                int n;
+                if (_socket != null) n = _socket.Receive(body, read, len - read, SocketFlags.None);
+                else if (_winPipe != null) n = _winPipe.Read(body, read, len - read);
+                else return;
                 if (n <= 0) break;
                 read += n;
             }
         }
-        catch
-        {
-            _connected = false;
-        }
+        catch { _connected = false; }
     }
 
     public void Disconnect()
     {
-        try { _pipeStream?.Dispose(); } catch { }
-        _pipeStream = null;
+        try { _socket?.Dispose(); } catch { }
+        try { _winPipe?.Dispose(); } catch { }
+        _socket = null;
+        _winPipe = null;
         _connected = false;
     }
 
-    public void Dispose()
-    {
-        Disconnect();
-    }
+    public void Dispose() => Disconnect();
 }

@@ -43,6 +43,7 @@ public partial class Portal : Area3D
     private double _cooldown;
     private MeshInstance3D _surface;
     private MeshInstance3D _frameGlow;
+    private ShaderMaterial _portalShader;
     private double _t;
 
     private const float PortalWidth = 1.6f;
@@ -72,11 +73,40 @@ public partial class Portal : Area3D
         return p;
     }
 
+    /// Load a world thumbnail image onto the portal surface so it displays like a framed picture.
+    public void SetWorldThumbnail(byte[] pngOrWebpBytes)
+    {
+        if (_surface == null) return;
+        var img = new Image();
+        Error err = img.LoadPngFromBuffer(pngOrWebpBytes);
+        if (err != Error.Ok)
+        {
+            err = img.LoadWebpFromBuffer(pngOrWebpBytes);
+            if (err != Error.Ok) return;
+        }
+        var tex = ImageTexture.CreateFromImage(img);
+        if (_portalShader != null)
+        {
+            // Switch from shader to textured material when we have a real image.
+            var mat = new StandardMaterial3D
+            {
+                AlbedoTexture = tex,
+                AlbedoColor = Colors.White,
+                Emission = new Color(0.49f, 0.23f, 0.93f) * 0.3f,
+                EmissionEnergyMultiplier = 0.5f,
+                Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+                NoDepthTest = true,
+                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            };
+            _surface.MaterialOverride = mat;
+        }
+    }
+
     private void Build(string label, Color tint)
     {
-        // Portal surface: a flat, opaque, double-sided rectangle that looks like a PNG on both
-        // sides. Using Orientation.Z so the plane faces the player without any rotation —
-        // rotating a horizontal PlaneMesh 90° around X caused it to render as an oval.
+        // Portal surface: a flat, double-sided plane with an animated swirling vortex shader.
+        // Using Orientation.Z so the plane faces the player without rotation.
         var plane = new PlaneMesh
         {
             Size = new Vector2(PortalWidth, PortalHeight),
@@ -87,22 +117,15 @@ public partial class Portal : Area3D
             Mesh = plane,
             Position = new Vector3(0, PortalHeight * 0.5f, 0),
         };
-        var surfMat = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(tint.R * 0.15f, tint.G * 0.1f, tint.B * 0.3f, 0.92f),
-            Emission = tint * 0.6f,
-            EmissionEnergyMultiplier = 1.2f,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            NoDepthTest = true,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-        };
-        _surface.MaterialOverride = surfMat;
+        var shader = GD.Load<Shader>("res://Shaders/portal.gdshader");
+        _portalShader = new ShaderMaterial { Shader = shader };
+        _portalShader.SetShaderParameter("portal_color", tint);
+        _portalShader.SetShaderParameter("glow_color", tint.Lightened(0.3f));
+        _surface.MaterialOverride = _portalShader;
         AddChild(_surface);
 
         // Purple glow border: a slightly larger plane behind the surface, emissive purple,
-        // visible only as a rim around the portal edges. RenderPriority -1 so the surface
-        // draws on top of it.
+        // visible only as a rim around the portal edges.
         _frameGlow = new MeshInstance3D
         {
             Mesh = new PlaneMesh
@@ -189,10 +212,11 @@ public partial class Portal : Area3D
     public override void _Process(double delta)
     {
         if (_cooldown > 0) _cooldown -= delta;
-        // Subtle pulsing on the glow frame for life.
         _t += delta;
         float pulse = 0.85f + Mathf.Sin((float)_t * 2.0f) * 0.15f;
         if (_frameGlow.MaterialOverride is StandardMaterial3D mat)
             mat.EmissionEnergyMultiplier = 2.0f * pulse;
+        if (_portalShader != null)
+            _portalShader.SetShaderParameter("time_scale", 0.8f + pulse * 0.4f);
     }
 }
