@@ -25,6 +25,12 @@ public static class DeviceProfile
     public static float MirrorRange = 12f;    // how close before a mirror re-renders
     public static bool BloomEnabled = true;
 
+    /// Cel/toon shading for avatars and worlds. The banded look is core to Serika's style, so
+    /// it stays on across tiers; only the outline (a second draw of every avatar surface, which
+    /// matters on a tile GPU) drops on the Quest-Low tier.
+    public static bool ToonShading = true;
+    public static bool AvatarOutline = true;
+
     /// True on the Quest / any Android build — the tightest budget.
     public static bool IsStandaloneXr => OS.HasFeature("android");
 
@@ -58,6 +64,7 @@ public static class DeviceProfile
                 VSync = true;
                 MirrorRange = 6f;
                 BloomEnabled = false;
+                AvatarOutline = false;   // the outline's extra draw pass isn't worth it here
             }
 
             // Lower physics tick rate on standalone to save CPU. The default 60 Hz is overkill

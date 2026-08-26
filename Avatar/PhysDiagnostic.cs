@@ -145,7 +145,11 @@ public static class PhysDiagnostic
 
         // Per-chain motion. An avatar-wide peak hides a whole subsystem being frozen: Suisei's
         // 36 coat-skirt chains can be completely dead while her 9 hair chains carry the number.
+        // Settle to rest first, capture that as the baseline, then start from a standstill — a
+        // baseline taken mid-deflection would show near-zero *additional* motion at steady lag
+        // and call every chain dead, which is a bug in the measurement, not the rig.
         {
+            for (int i = 0; i < 150; i++) spring.DebugStep(1f / 60f);
             var origin = avatar.Position;
             var start = spring.DebugChainTails().Select(c => c.Tails.ToArray()).ToList();
             var moved = new float[start.Count];

@@ -375,31 +375,39 @@ public sealed partial class SpringBoneSystem : Node
         _accumulator = Mathf.Min(_accumulator + (float)delta, FixedStep * MaxSubSteps);
 
         _halfRatePhase = !_halfRatePhase;
-        if (lod == Lod.Half && _halfRatePhase) return;   // solve on alternate frames only
+        bool halfSkip = lod == Lod.Half && _halfRatePhase;
 
-        if (_accumulator < FixedStep) return;
-
-        PrepareFrame(out bool teleported);
-        if (teleported)
+        // Step only when a full 60 Hz interval has banked, but interpolate and write *every*
+        // frame regardless — that constant re-write at render rate is the whole point.
+        if (_accumulator >= FixedStep && !halfSkip)
         {
-            // Push the rest pose out the same frame. Deferring it to the next one would leave
-            // the rig holding its pre-teleport shape for a frame at the new location.
-            ResetToRest();
-            WriteBack();
-            _accumulator = 0f;
-            return;
+            PrepareFrame(out bool teleported);
+            if (teleported)
+            {
+                // Push the rest pose out the same frame. Deferring it would leave the rig holding
+                // its pre-teleport shape for a frame at the new location.
+                ResetToRest();
+                WriteBack(1f);
+                _accumulator = 0f;
+                return;
+            }
+
+            int steps = 0;
+            while (_accumulator >= FixedStep && steps < MaxSubSteps)
+            {
+                Step(FixedStep);
+                _accumulator -= FixedStep;
+                steps++;
+            }
+            if (steps > 0) SolvedFrames++;
         }
 
-        int steps = 0;
-        while (_accumulator >= FixedStep && steps < MaxSubSteps)
-        {
-            Step(FixedStep);
-            _accumulator -= FixedStep;
-            steps++;
-        }
-
-        WriteBack();
-        SolvedFrames++;
+        // Render the pose interpolated between the last two solved states, by how far into the
+        // next step we already are. Without this the bones hold one 60 Hz pose for every render
+        // frame until the next step lands and then snap to it — which at 90–144 fps is exactly
+        // the "hair stuttering" the solver looked fine in numbers but janky on screen. Writing an
+        // interpolated pose every frame, step or not, makes it smooth at any refresh rate.
+        WriteBack(_accumulator / FixedStep);
     }
 
     private enum Lod { Full, Half, Off }
@@ -542,6 +550,10 @@ public sealed partial class SpringBoneSystem : Node
             {
                 var j = joints[ji];
 
+                // Remember where this joint was before this substep, so the render frame can
+                // interpolate from it toward the new solved orientation.
+                j.WorldRotPrev = j.WorldRot;
+
                 // Where this joint's head is, and how its parent is oriented, both follow from
                 // the parent joint solved earlier in this same pass — DFS order guarantees it.
                 Quaternion parentRot;
@@ -673,10 +685,18 @@ public sealed partial class SpringBoneSystem : Node
         }
     }
 
-    /// Push the skeleton once per frame, after all substeps — writing per substep would be
-    /// three or four redundant pose invalidations for a pose nothing reads in between.
-    private void WriteBack()
+    /// Push the skeleton every render frame. `alpha` is how far into the next 60 Hz step this
+    /// frame sits (0 = just stepped, →1 = about to step again); each joint is rendered at the
+    /// slerp between its previous and current solved orientation, so the motion is smooth at any
+    /// refresh rate rather than snapping once per fixed step.
+    ///
+    /// Joints are in DFS order, so a child's interpolated parent orientation (`RenderRot`) is
+    /// always computed before the child needs it — the interpolation stays consistent down the
+    /// chain instead of mixing an interpolated child with a non-interpolated parent.
+    private void WriteBack(float alpha)
     {
+        alpha = Mathf.Clamp(alpha, 0f, 1f);
+
         foreach (var chain in _chains)
         {
             if (!chain.Awake) continue;   // its bones already hold the pose it settled into
@@ -685,10 +705,12 @@ public sealed partial class SpringBoneSystem : Node
             for (int ji = 0; ji < joints.Count; ji++)
             {
                 var j = joints[ji];
-                Quaternion parentRot = j.ParentJoint < 0 ? chain.AnchorRot : joints[j.ParentJoint].WorldRot;
+                j.RenderRot = j.WorldRotPrev.Slerp(j.WorldRot, alpha);
+
+                Quaternion parentRot = j.ParentJoint < 0 ? chain.AnchorRot : joints[j.ParentJoint].RenderRot;
                 // Divide out the skipped ancestors' rotation: the pose Godot wants is relative
                 // to this bone's real parent, not to the last bone the solver simulated.
-                var local = ((parentRot * j.CarryRot).Inverse() * j.WorldRot).Normalized();
+                var local = ((parentRot * j.CarryRot).Inverse() * j.RenderRot).Normalized();
                 _skeleton.SetBonePoseRotation(j.BoneIdx, local);
             }
         }
@@ -721,6 +743,10 @@ public sealed partial class SpringBoneSystem : Node
                 Quaternion restWorldRot = parentRot * j.RestLocalRot;
                 j.Head = head;
                 j.WorldRot = restWorldRot;
+                // No history to interpolate from on a reset — snap both so the first rendered
+                // frame is the rest pose exactly, not a slerp toward it from stale data.
+                j.WorldRotPrev = restWorldRot;
+                j.RenderRot = restWorldRot;
                 j.Tail = head + (restWorldRot * j.BoneAxis).Normalized() * (j.Length * chain.Scale);
                 j.PrevTail = j.Tail;
             }
@@ -914,7 +940,9 @@ public sealed partial class SpringBoneSystem : Node
             _accumulator -= FixedStep;
             steps++;
         }
-        WriteBack();
+        // The diagnostic reads solved tails, not rendered ones, so it wants the full current
+        // state, not an interpolated fraction.
+        WriteBack(1f);
     }
 
     /// Signed geometric clearance from every simulated joint tail to the nearest body collider
@@ -1121,6 +1149,8 @@ public sealed partial class SpringBoneSystem : Node
         public Vector3 Tail;
         public Vector3 PrevTail;
         public Quaternion WorldRot = Quaternion.Identity;
+        public Quaternion WorldRotPrev = Quaternion.Identity; // orientation one step ago
+        public Quaternion RenderRot = Quaternion.Identity;    // interpolated, written to the bone
     }
 
     private sealed class Collider

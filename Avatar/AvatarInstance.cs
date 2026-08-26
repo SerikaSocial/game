@@ -57,6 +57,10 @@ public sealed partial class AvatarInstance : Node3D
         inst.SetupPhysBones(state);
         inst.SetupToggles();
 
+        // Cel-shade the flat PBR the VRM/PMX imported as. Done last so it sees the final mesh,
+        // including any chest geometry BreastRig re-skinned.
+        ToonShading.ApplyToAvatar(model);
+
         return inst;
     }
 

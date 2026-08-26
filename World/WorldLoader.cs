@@ -193,6 +193,12 @@ public static class WorldLoader
         // the set to a sane range, preserving the author's relative intensities.
         NormalizeWorldLights(instance);
 
+        // Cel-shade the world's imported PBR materials so a downloaded GLB world matches the
+        // stylised look of the avatars and the procedural worlds. Before marker resolution, so it
+        // only touches the authored geometry and not the runtime mirror/video/seat nodes that
+        // ResolveMarkers spawns (those manage their own materials). No outline on worlds.
+        SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
+
         // Swap authoring markers for the live nodes they stand for (mirrors, seats, video).
         var spawnMarker = ResolveMarkers(instance);
 
