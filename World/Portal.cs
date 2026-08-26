@@ -42,9 +42,7 @@ public partial class Portal : Area3D
 
     private double _cooldown;
     private MeshInstance3D _surface;
-    private MeshInstance3D _frameGlow;
     private ShaderMaterial _portalShader;
-    private double _t;
 
     private const float PortalWidth = 1.6f;
     private const float PortalHeight = 2.2f;
@@ -124,53 +122,6 @@ public partial class Portal : Area3D
         _surface.MaterialOverride = _portalShader;
         AddChild(_surface);
 
-        // Purple glow border: a slightly larger plane behind the surface, emissive purple,
-        // visible only as a rim around the portal edges.
-        _frameGlow = new MeshInstance3D
-        {
-            Mesh = new PlaneMesh
-            {
-                Size = new Vector2(PortalWidth + 0.12f, PortalHeight + 0.12f),
-                Orientation = PlaneMesh.OrientationEnum.Z,
-            },
-            Position = new Vector3(0, PortalHeight * 0.5f, 0.01f),
-        };
-        _frameGlow.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(tint.R, tint.G, tint.B, 1f),
-            Emission = tint * 2.0f,
-            EmissionEnergyMultiplier = 2.5f,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            NoDepthTest = true,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            RenderPriority = -1,
-        };
-        AddChild(_frameGlow);
-
-        // Second glow plane on the back side for symmetry.
-        var backGlow = new MeshInstance3D
-        {
-            Mesh = new PlaneMesh
-            {
-                Size = new Vector2(PortalWidth + 0.12f, PortalHeight + 0.12f),
-                Orientation = PlaneMesh.OrientationEnum.Z,
-            },
-            Position = new Vector3(0, PortalHeight * 0.5f, -0.01f),
-        };
-        backGlow.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(tint.R, tint.G, tint.B, 1f),
-            Emission = tint * 2.0f,
-            EmissionEnergyMultiplier = 2.5f,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            NoDepthTest = true,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            RenderPriority = -1,
-        };
-        AddChild(backGlow);
-
         AddChild(new OmniLight3D
         {
             Position = new Vector3(0, PortalHeight * 0.5f, 0),
@@ -212,11 +163,5 @@ public partial class Portal : Area3D
     public override void _Process(double delta)
     {
         if (_cooldown > 0) _cooldown -= delta;
-        _t += delta;
-        float pulse = 0.85f + Mathf.Sin((float)_t * 2.0f) * 0.15f;
-        if (_frameGlow.MaterialOverride is StandardMaterial3D mat)
-            mat.EmissionEnergyMultiplier = 2.0f * pulse;
-        if (_portalShader != null)
-            _portalShader.SetShaderParameter("time_scale", 0.8f + pulse * 0.4f);
     }
 }

@@ -144,11 +144,11 @@ public static class RpcPresence
                 name = "Serika Social",
                 details = details,
                 state = state,
-                application_id = _applicationId,
+                applicationId = _applicationId,
                 assets = new
                 {
-                    large_image = "serika_logo",
-                    large_text = "Serika Social",
+                    largeImage = "serika_logo",
+                    largeText = "Serika Social",
                 },
                 buttons = new[]
                 {
@@ -157,8 +157,8 @@ public static class RpcPresence
             };
 
             var json = JsonSerializer.Serialize(payload);
-            var req = new HttpRequestMessage(HttpMethod.Put,
-                $"{SerikaApiBaseUrl}/api/v1/users/@me/rich-presence")
+            var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{SerikaApiBaseUrl}/api/users/me/rich-presence")
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             };
