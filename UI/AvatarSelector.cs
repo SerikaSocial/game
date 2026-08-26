@@ -4,6 +4,8 @@ using System.Threading.Tasks;
 using Godot;
 using Serika.Net;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// In-world avatar picker — a VRChat-style grid of avatar cards (thumbnail, name, author)
@@ -57,8 +59,7 @@ public partial class AvatarSelector : CanvasLayer
         Layer = 95; // above the pause menu (90) so it stacks on top when opened from it
         Visible = false;
 
-        _scrim = new ColorRect { Color = new Color(0.02f, 0.03f, 0.05f, 0.82f) };
-        _scrim.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        _scrim = Brand.Scrim(0.82f);
         AddChild(_scrim);
 
         var center = new CenterContainer();
@@ -99,7 +100,7 @@ public partial class AvatarSelector : CanvasLayer
         _mineTab.Pressed += () => SwitchTab(true);
         header.AddChild(_mineTab);
 
-        var close = Brand.Ghost_(new Button { Text = "✕" });
+        var close = Brand.Ghost_(new Button { Icon = Icons.Get(Icons.Kind.Close, 14, Brand.TextMid) });
         close.Pressed += Hide;
         header.AddChild(close);
 
@@ -246,7 +247,8 @@ public partial class AvatarSelector : CanvasLayer
 
         if (isCurrent)
         {
-            _detailEquipBtn.Text = "Equipped ✓";
+            _detailEquipBtn.Text = "Equipped";
+            _detailEquipBtn.Icon = Icons.Get(Icons.Kind.Check, 15, Brand.TextHi);
             _detailEquipBtn.Disabled = true;
         }
         else
@@ -393,7 +395,7 @@ public partial class AvatarSelector : CanvasLayer
         inner.AddChild(authorLabel);
 
         // "View" button that opens the detail panel
-        var viewBtn = Brand.Primary_(new Button { Text = isCurrent ? "Equipped ✓" : "View" });
+        var viewBtn = Brand.Primary_(new Button { Text = isCurrent ? "Equipped" : "View", Icon = isCurrent ? Icons.Get(Icons.Kind.Check, 14, Brand.TextHi) : null });
         // Capture the JsonElement for this avatar
         var avatarData = a;
         viewBtn.Pressed += () => ShowDetail(avatarData);

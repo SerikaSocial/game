@@ -19,10 +19,11 @@ public enum PortalMode
     Invite,
 }
 
-/// A walk-through portal: a glowing arch with a swirling surface. When the local player's body
-/// enters the trigger volume it raises `Entered` (once, with a short re-arm cooldown) so Main can
-/// route them — e.g. into the multiplayer Commons. Purely presentational + a trigger; the actual
-/// travel is decided by the subscriber.
+/// A walk-through portal: a glowing rectangular plane with world imagery on both sides and a
+/// purple glow frame around its edges. When the local player's body enters the trigger volume it
+/// raises `Entered` (once, with a short re-arm cooldown) so Main can route them — e.g. into the
+/// multiplayer Commons. Purely presentational + a trigger; the actual travel is decided by the
+/// subscriber.
 public partial class Portal : Area3D
 {
     public event Action<Portal> Entered;
@@ -36,12 +37,16 @@ public partial class Portal : Area3D
     /// Curated list of world IDs for CuratedList mode.
     public List<string> AllowedWorldIds { get; set; }
 
-    /// Display label shown above the arch.
+    /// Display label shown above the portal.
     public string Label { get; private set; } = "";
 
     private double _cooldown;
     private MeshInstance3D _surface;
+    private MeshInstance3D _frameGlow;
     private double _t;
+
+    private const float PortalWidth = 1.6f;
+    private const float PortalHeight = 2.2f;
 
     public static Portal Create(string label, Color tint, Vector3 position, float yawDeg = 0)
     {
@@ -69,62 +74,90 @@ public partial class Portal : Area3D
 
     private void Build(string label, Color tint)
     {
-        // Frame: a torus-ish arch made from a flattened cylinder ring.
-        var frame = new MeshInstance3D
-        {
-            Mesh = new TorusMesh { InnerRadius = 0.95f, OuterRadius = 1.15f },
-            Position = new Vector3(0, 1.3f, 0),
-            RotationDegrees = new Vector3(90, 0, 0),
-        };
-        frame.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = tint * 0.6f,
-            Emission = tint,
-            EmissionEnergyMultiplier = 1.4f,
-            Metallic = 0.3f,
-            Roughness = 0.4f,
-        };
-        AddChild(frame);
-
-        // Swirling surface — an emissive translucent disc.
+        // Portal surface: a double-sided plane showing a swirling portal effect.
         _surface = new MeshInstance3D
         {
-            Mesh = new CylinderMesh { Height = 0.04f, TopRadius = 0.95f, BottomRadius = 0.95f },
-            Position = new Vector3(0, 1.3f, 0),
+            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth, PortalHeight) },
+            Position = new Vector3(0, PortalHeight * 0.5f, 0),
             RotationDegrees = new Vector3(90, 0, 0),
         };
-        _surface.MaterialOverride = new StandardMaterial3D
+        var surfMat = new StandardMaterial3D
         {
-            AlbedoColor = new Color(tint.R, tint.G, tint.B, 0.55f),
-            Emission = tint * 1.2f,
-            EmissionEnergyMultiplier = 2.0f,
+            AlbedoColor = new Color(tint.R * 0.3f, tint.G * 0.3f, tint.B * 0.5f, 0.35f),
+            Emission = tint * 0.8f,
+            EmissionEnergyMultiplier = 1.5f,
             Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            NoDepthTest = true,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
         };
+        _surface.MaterialOverride = surfMat;
         AddChild(_surface);
+
+        // Purple glow frame: a slightly larger plane behind the surface, emissive purple,
+        // visible only as a rim around the portal edges.
+        _frameGlow = new MeshInstance3D
+        {
+            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth + 0.15f, PortalHeight + 0.15f) },
+            Position = new Vector3(0, PortalHeight * 0.5f, 0.02f),
+            RotationDegrees = new Vector3(90, 0, 0),
+        };
+        _frameGlow.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(tint.R, tint.G, tint.B, 0.9f),
+            Emission = tint * 1.5f,
+            EmissionEnergyMultiplier = 2.5f,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            NoDepthTest = true,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            RenderPriority = -1,
+        };
+        AddChild(_frameGlow);
+
+        // A second glow plane on the back side for symmetry.
+        var backGlow = new MeshInstance3D
+        {
+            Mesh = new PlaneMesh { Size = new Vector2(PortalWidth + 0.15f, PortalHeight + 0.15f) },
+            Position = new Vector3(0, PortalHeight * 0.5f, -0.02f),
+            RotationDegrees = new Vector3(90, 180, 0),
+        };
+        backGlow.MaterialOverride = new StandardMaterial3D
+        {
+            AlbedoColor = new Color(tint.R, tint.G, tint.B, 0.9f),
+            Emission = tint * 1.5f,
+            EmissionEnergyMultiplier = 2.5f,
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            NoDepthTest = true,
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            RenderPriority = -1,
+        };
+        AddChild(backGlow);
 
         AddChild(new OmniLight3D
         {
-            Position = new Vector3(0, 1.3f, 0),
+            Position = new Vector3(0, PortalHeight * 0.5f, 0),
             LightColor = tint,
-            LightEnergy = 0.8f,
-            OmniRange = 4f,
+            LightEnergy = 1.2f,
+            OmniRange = 5f,
         });
 
         AddChild(new Label3D
         {
             Text = label,
-            Position = new Vector3(0, 2.9f, 0),
+            Position = new Vector3(0, PortalHeight + 0.3f, 0),
             Billboard = BaseMaterial3D.BillboardModeEnum.Disabled,
             FontSize = 64,
             PixelSize = 0.006f,
             Modulate = tint.Lightened(0.4f),
         });
 
-        // Trigger volume filling the arch.
+        // Trigger volume filling the portal.
         var col = new CollisionShape3D
         {
-            Shape = new BoxShape3D { Size = new Vector3(1.8f, 2.4f, 1.0f) },
-            Position = new Vector3(0, 1.2f, 0),
+            Shape = new BoxShape3D { Size = new Vector3(PortalWidth + 0.3f, PortalHeight + 0.2f, 0.8f) },
+            Position = new Vector3(0, PortalHeight * 0.5f, 0),
         };
         AddChild(col);
 
@@ -143,8 +176,10 @@ public partial class Portal : Area3D
     public override void _Process(double delta)
     {
         if (_cooldown > 0) _cooldown -= delta;
-        // Gentle spin on the surface for life.
+        // Subtle pulsing on the glow frame for life.
         _t += delta;
-        _surface.RotationDegrees = new Vector3(90, 0, (float)(_t * 40.0));
+        float pulse = 0.85f + Mathf.Sin((float)_t * 2.0f) * 0.15f;
+        if (_frameGlow.MaterialOverride is StandardMaterial3D mat)
+            mat.EmissionEnergyMultiplier = 2.0f * pulse;
     }
 }

@@ -2,13 +2,15 @@ using System;
 using System.Collections.Generic;
 using Godot;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// The pause hub — what Esc opens. One clean card: who you are, who else is in the instance,
 /// and a grid of the things you actually do (worlds, avatars, camera, video, settings, invite),
 /// plus quick pills (home, respawn, emotes, quit).
 ///
-/// This replaced a crowded mock-up: a non-functional banner carousel, a fake "V ✦✦✦✦" token
+/// This replaced a crowded mock-up: a non-functional banner carousel, a fake trust-token
 /// badge, and a 2×3 grid where four of six tiles ("Live Now", "Worlds", "Social", "Groups") all
 /// routed to the same world list — visual noise pretending to be features. The redundant, never-
 /// opened `PauseMenu` was deleted at the same time; this is now the only pause surface.
@@ -26,7 +28,7 @@ public partial class QuickMenu : CanvasLayer
     public event Action OpenSettings;
     public event Action CopyInvitePressed;
     public event Action MicTogglePressed;
-    // Emotes are reached through the radial menu (the "😀 Emotes" pill → OpenRadialMenu), so the
+    // Emotes are reached through the radial menu (the "Emotes" pill → OpenRadialMenu), so the
     // hub no longer carries its own emote shortcuts.
 
     private ColorRect _scrim;
@@ -47,11 +49,7 @@ public partial class QuickMenu : CanvasLayer
         Layer = 105;
         Visible = false;
 
-        _scrim = new ColorRect
-        {
-            Color = new Color(0.02f, 0.03f, 0.05f, 0.72f),
-            AnchorRight = 1, AnchorBottom = 1,
-        };
+        _scrim = Brand.Scrim(0.72f);
         AddChild(_scrim);
 
         var center = new CenterContainer();
@@ -107,7 +105,12 @@ public partial class QuickMenu : CanvasLayer
         _locationLabel.AddThemeFontSizeOverride("font_size", 13);
         _locationLabel.AddThemeColorOverride("font_color", Brand.TextMid);
         subHeader.AddChild(_locationLabel);
-        _playerCountLabel = new Label { Text = "👥 1" };
+        subHeader.AddChild(new TextureRect
+        {
+            Texture = Icons.Get(Icons.Kind.Users, 14, Brand.TextDim),
+            StretchMode = TextureRect.StretchModeEnum.KeepCentered,
+        });
+        _playerCountLabel = new Label { Text = "1" };
         _playerCountLabel.AddThemeFontSizeOverride("font_size", 13);
         _playerCountLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         subHeader.AddChild(_playerCountLabel);
@@ -139,21 +142,21 @@ public partial class QuickMenu : CanvasLayer
         grid.AddThemeConstantOverride("v_separation", 10);
         vbox.AddChild(grid);
 
-        grid.AddChild(GridCard("🌐 Worlds", "Browse & travel", () => { Hide(); OpenMainMenuWorlds?.Invoke(); }));
-        grid.AddChild(GridCard("👕 Avatars", "Change your look", () => { Hide(); OpenMainMenuAvatars?.Invoke(); }));
-        grid.AddChild(GridCard("📷 Camera", "Photo viewfinder", () => { Hide(); OpenCameraMenu?.Invoke(); }));
-        grid.AddChild(GridCard("📺 Video", "Queue & watch", () => { Hide(); OpenVideoQueue?.Invoke(); }));
-        grid.AddChild(GridCard("⚙️ Settings", "Graphics & controls", () => { Hide(); OpenSettings?.Invoke(); }));
-        _inviteCard = GridCard("🔗 Invite", "Copy world link", () => CopyInvitePressed?.Invoke());
+        grid.AddChild(GridCard(Icons.Kind.Globe, "Worlds", "Browse & travel", () => { Hide(); OpenMainMenuWorlds?.Invoke(); }));
+        grid.AddChild(GridCard(Icons.Kind.Shirt, "Avatars", "Change your look", () => { Hide(); OpenMainMenuAvatars?.Invoke(); }));
+        grid.AddChild(GridCard(Icons.Kind.Camera, "Camera", "Photo viewfinder", () => { Hide(); OpenCameraMenu?.Invoke(); }));
+        grid.AddChild(GridCard(Icons.Kind.Screen, "Video", "Queue & watch", () => { Hide(); OpenVideoQueue?.Invoke(); }));
+        grid.AddChild(GridCard(Icons.Kind.Gear, "Settings", "Graphics & controls", () => { Hide(); OpenSettings?.Invoke(); }));
+        _inviteCard = GridCard(Icons.Kind.Link, "Invite", "Copy world link", () => CopyInvitePressed?.Invoke());
         grid.AddChild(_inviteCard);
 
         // ── Quick pills ─────────────────────────────────────────────────────────────────
         var pillRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         pillRow.AddThemeConstantOverride("separation", 8);
         vbox.AddChild(pillRow);
-        pillRow.AddChild(ActionPill("🏠 Home", () => { Hide(); HomePressed?.Invoke(); }));
-        pillRow.AddChild(ActionPill("⟲ Respawn", () => { Hide(); RespawnPressed?.Invoke(); }));
-        pillRow.AddChild(ActionPill("😀 Emotes", () => { Hide(); OpenRadialMenu?.Invoke(); }));
+        pillRow.AddChild(ActionPill(Icons.Kind.Home, "Home", () => { Hide(); HomePressed?.Invoke(); }));
+        pillRow.AddChild(ActionPill(Icons.Kind.Refresh, "Respawn", () => { Hide(); RespawnPressed?.Invoke(); }));
+        pillRow.AddChild(ActionPill(Icons.Kind.Smile, "Emotes", () => { Hide(); OpenRadialMenu?.Invoke(); }));
 
         vbox.AddChild(new HSeparator());
 
@@ -162,13 +165,25 @@ public partial class QuickMenu : CanvasLayer
         bottom.AddThemeConstantOverride("separation", 8);
         vbox.AddChild(bottom);
 
-        _micBtn = Brand.Ghost_(new Button { Text = "🎙 Mic: off", CustomMinimumSize = new Vector2(140, 40) });
+        _micBtn = Brand.Ghost_(new Button
+        {
+            Text = "Mic: off",
+            CustomMinimumSize = new Vector2(140, 40),
+            Icon = Icons.Get(Icons.Kind.Mic, 18, Brand.TextDim),
+        });
+        _micBtn.AddThemeConstantOverride("h_separation", 8);
         _micBtn.Pressed += () => MicTogglePressed?.Invoke();
         bottom.AddChild(_micBtn);
 
         bottom.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
-        var quitBtn = Brand.Ghost_(new Button { Text = "🚪 Quit", CustomMinimumSize = new Vector2(90, 40) });
+        var quitBtn = Brand.Ghost_(new Button
+        {
+            Text = "Quit",
+            CustomMinimumSize = new Vector2(90, 40),
+            Icon = Icons.Get(Icons.Kind.Power, 18, Brand.Danger),
+        });
+        quitBtn.AddThemeConstantOverride("h_separation", 8);
         quitBtn.AddThemeColorOverride("font_color", Brand.Danger);
         quitBtn.Pressed += () => QuitPressed?.Invoke();
         bottom.AddChild(quitBtn);
@@ -178,25 +193,34 @@ public partial class QuickMenu : CanvasLayer
         bottom.AddChild(resumeBtn);
     }
 
-    private static Button GridCard(string title, string subtitle, Action onClick)
+    private static Button GridCard(Icons.Kind icon, string title, string subtitle, Action onClick)
     {
         var btn = new Button
         {
             Text = $"{title}\n{subtitle}",
             CustomMinimumSize = new Vector2(165, 66),
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            Icon = Icons.Get(icon, 22, Brand.Accent),
         };
         Brand.Ghost_(btn);
         btn.AddThemeFontSizeOverride("font_size", 14);
+        btn.AddThemeConstantOverride("h_separation", 10);
         btn.Pressed += onClick;
         return btn;
     }
 
-    private static Button ActionPill(string label, Action onClick)
+    private static Button ActionPill(Icons.Kind icon, string label, Action onClick)
     {
-        var btn = new Button { Text = label, CustomMinimumSize = new Vector2(120, 38), SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        var btn = new Button
+        {
+            Text = label,
+            CustomMinimumSize = new Vector2(120, 38),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            Icon = Icons.Get(icon, 18, Brand.Accent),
+        };
         Brand.Ghost_(btn);
         btn.AddThemeFontSizeOverride("font_size", 13);
+        btn.AddThemeConstantOverride("h_separation", 8);
         btn.Pressed += onClick;
         return btn;
     }
@@ -217,7 +241,7 @@ public partial class QuickMenu : CanvasLayer
         foreach (var c in _playerList.GetChildren()) c.QueueFree();
 
         int total = 1 + (others?.Count ?? 0);
-        _playerCountLabel.Text = $"👥 {total}";
+        _playerCountLabel.Text = $"{total}";
 
         _playerList.AddChild(PlayerRow(string.IsNullOrEmpty(you) ? "You" : $"{you}  (you)", true));
         if (others != null)
@@ -252,7 +276,12 @@ public partial class QuickMenu : CanvasLayer
     /// Reflect the real mic state (owned by Main), so the button never lies about it.
     public void SetMic(bool active)
     {
-        if (_micBtn != null) _micBtn.Text = active ? "🔴 Mic: on" : "🎙 Mic: off";
+        if (_micBtn == null) return;
+        // Live mic is signalled by tinting the icon, not by swapping in a red dot emoji —
+        // the tint carries at a glance and stays on-brand.
+        _micBtn.Text = active ? "Mic: on" : "Mic: off";
+        _micBtn.Icon = Icons.Get(Icons.Kind.Mic, 18, active ? Brand.Success : Brand.TextDim);
+        _micBtn.AddThemeColorOverride("font_color", active ? Brand.TextHi : Brand.TextMid);
     }
 
     public void Open(string username)

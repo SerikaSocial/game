@@ -202,7 +202,6 @@ public static partial class Worlds
                         Position = new Vector3(sx * (2.35f + sc * 2.65f), y + 0.25f, z),
                         SeatLabel = $"Row {row + 1} Seat {sc + 1}",
                         SitYaw = 0f, // Yaw 0 = facing -Z, which is toward the screen at the back wall
-                        SitOffset = new Vector3(0, 0.05f, 0),
                     };
                     root.AddChild(seat);
                 }

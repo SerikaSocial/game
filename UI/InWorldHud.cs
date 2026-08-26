@@ -20,6 +20,12 @@ public partial class InWorldHud : CanvasLayer
     {
         Layer = 50;
 
+        // Hidden until the player is actually somewhere. This layer was previously live from
+        // boot, so the mic indicator sat in the corner of the login screen and the world list
+        // — a mic readout on a screen with no world and no voice session. `SetWorld` brings it
+        // back; `Leave` puts it away.
+        Visible = false;
+
         // Mic indicator, bottom-left. Dim when muted, lit when the mic is on, and it pulses
         // with your voice level while you're actually speaking.
         _mic = new MicIndicator
@@ -86,9 +92,20 @@ public partial class InWorldHud : CanvasLayer
         _toastTimer = seconds;
     }
 
+    /// Naming a world is what makes the player "somewhere", so it is also what reveals the HUD.
     public void SetWorld(string name)
     {
         _worldName.Text = name;
+        Visible = true;
+    }
+
+    /// Back to a screen with no world behind it (the login screen). Put the HUD away and drop
+    /// any toast still counting down, so it can't reappear over the login form.
+    public void Leave()
+    {
+        Visible = false;
+        _toast.Visible = false;
+        _toastTimer = 0;
     }
 
     public void SetPlayerCount(int count)

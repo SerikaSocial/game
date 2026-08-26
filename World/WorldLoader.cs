@@ -210,6 +210,11 @@ public static class WorldLoader
         // Environment tuned to the world: a dark cinema, a bright studio, a baked interior, …
         SetupEnvironment(root, lighting);
 
+        // …and a sun, if the GLB brought none. Must run after the fill-light pass above so a
+        // baked world's grid is already in place, and before `ApplyToScene` so the new light
+        // gets the device profile's shadow settings stamped onto it like any other.
+        EnsureKeyLight(instance as Node3D ?? root, lighting);
+
         // Cloud worlds bring their own lights and environment, all authored at full quality.
         // Stamp the device profile over them, or a Quest ends up rendering a desktop-tier world.
         UI.DeviceProfile.ApplyToScene(root);
@@ -235,6 +240,12 @@ public static class WorldLoader
         CollectLights(root, lights);
         if (lights.Count == 0) return;
 
+        // Shadows and falloff are wrong on import regardless of how sane the energies are, so
+        // this pass runs unconditionally — it used to sit inside the rescale loop below, which
+        // meant any world whose lights were already correctly scaled silently kept its
+        // shadowless, flat-falloff lights.
+        foreach (var l in lights) ConfigureLightQuality(l);
+
         float maxE = 0f;
         foreach (var l in lights) maxE = Mathf.Max(maxE, l.LightEnergy);
         const float TargetMax = 2.2f;   // brightest omni after rescale
@@ -251,6 +262,52 @@ public static class WorldLoader
                 l.LightEnergy = Mathf.Min(l.LightEnergy, TargetMax);
         }
         GD.Print($"WorldLoader: rescaled {lights.Count} world lights (max {maxE:0} → {TargetMax})");
+    }
+
+    /// Make a world's own lights behave like lights rather than decals.
+    ///
+    /// A GLB's punctual lights import with shadows off and a hard-edged default falloff, so a
+    /// wall sconce lit a perfect circle *through* its own fixture, through pillars and through
+    /// the seat backs in front of it. Shadows are what make the pool of light take the shape of
+    /// the room; the soft-shadow size is what stops the edge looking stencilled.
+    private static void ConfigureLightQuality(Light3D l)
+    {
+        if (l is DirectionalLight3D) return; // handled by DeviceProfile / EnsureKeyLight
+        if (!UI.DeviceProfile.Shadows) return;
+
+        l.ShadowEnabled = true;
+
+        // These bias values are large, and they have to be.
+        //
+        // A room this size lit by point lights self-shadows badly at the defaults (0.02 /
+        // 1.0): the acne shows up not as speckle but as smooth *concentric rings* centred on
+        // each lamp, because the surfaces are big untextured flats and the depth comparison
+        // fails in even bands radiating from the light. It looked so unlike normal shadow
+        // acne that it was mistaken in turn for SSAO, SSR, SDFGI, glow, an 8-bit banding
+        // problem and a bad normal map — all of which were ruled out one at a time before the
+        // shadow pass turned out to be the cause. Raising the bias clears it completely and
+        // costs nothing here, because nothing in these worlds is thin enough to peter-pan.
+        l.ShadowBias = 0.20f;
+        l.ShadowNormalBias = 3.0f;
+
+        // The falloff *curve* is deliberately left exactly as imported.
+        //
+        // Steepening it (an `OmniAttenuation` of 1.6, chosen to look "more physical") made the
+        // same ringing worse independently of the shadow bias, by compressing each light's
+        // gradient into fewer of the available levels. Whatever the exporter wrote is spread
+        // across enough range to stay smooth — leave it alone.
+        if (l is OmniLight3D omni)
+        {
+            // A real bulb has area, so its shadow edge softens with distance from the occluder.
+            // Verified safe once the bias above is in place: soft shadows were suspected of
+            // causing the ringing and are not.
+            omni.LightSize = 0.12f;
+            omni.OmniShadowMode = OmniLight3D.ShadowMode.Cube;
+        }
+        else if (l is SpotLight3D spot)
+        {
+            spot.LightSize = 0.1f;
+        }
     }
 
     private static void CollectLights(Node node, System.Collections.Generic.List<Light3D> into)
@@ -447,10 +504,23 @@ public static class WorldLoader
     ///   baked    model worlds whose lighting is painted into the textures (Backrooms, Gryffindor)
     private static void SetupEnvironment(Node3D root, string mode)
     {
-        // A pre-existing WorldEnvironment (e.g. a C# fallback builder set one up) wins.
+        // A pre-existing WorldEnvironment (e.g. a C# fallback builder set one up) keeps its
+        // authored sky, ambient and fog — but it still gets the post-processing pass below.
+        //
+        // This used to return outright, which meant every world that shipped an environment —
+        // which is most of them — silently opted out of ambient occlusion and tonemapping. The
+        // Cinema was the giveaway: 26 meshes, 112 seats, and not one contact shadow between
+        // them, so the whole room read as flat purple paper.
         foreach (Node child in root.GetChildren())
-            if (child is WorldEnvironment)
+        {
+            if (child is WorldEnvironment existing && existing.Environment != null)
+            {
+                ApplyPostProcessing(existing.Environment, mode);
+                GD.Print($"WorldLoader: kept authored environment, added post-processing " +
+                         $"(mode '{mode}')");
                 return;
+            }
+        }
 
         var env = new Godot.Environment
         {
@@ -504,8 +574,131 @@ public static class WorldLoader
         env.AmbientLightColor = ambient;
         env.AmbientLightEnergy = ambientEnergy;
 
+        ApplyPostProcessing(env, mode);
+
         root.AddChild(new WorldEnvironment { Environment = env });
-        GD.Print($"WorldLoader: environment mode '{mode}' (ambient {ambientEnergy})");
+        GD.Print($"WorldLoader: environment mode '{mode}' (ambient {ambientEnergy}, " +
+                 $"ssao {env.SsaoEnabled}, glow {env.GlowEnabled})");
+    }
+
+    /// Screen-space effects applied to every world, authored environment or not.
+    ///
+    /// Deliberately limited to things that add depth cues rather than style: an author's sky,
+    /// ambient colour and fog are their decisions, but "objects should look like they are
+    /// touching the floor" is not a stylistic choice.
+    private static void ApplyPostProcessing(Godot.Environment env, string mode)
+    {
+        // Contact shadows. Ambient light alone leaves every corner, doorway and
+        // object-on-floor junction at exactly the same brightness as the open floor, which is
+        // what makes an ambient-lit GLB read as flat papercraft. Skipped on the mobile tier,
+        // where SSAO is a full-resolution depth pass.
+        if (UI.DeviceProfile.Current != UI.DeviceProfile.Tier.Low)
+        {
+            env.SsaoEnabled = true;
+            env.SsaoRadius = 1.4f;
+            env.SsaoIntensity = 1.6f;
+            // Occlusion should darken *ambient* only. At 1.0 it eats the sun's contribution
+            // too and objects look sooty on their lit side.
+            env.SsaoLightAffect = 0.15f;
+        }
+
+        // Real-time global illumination (SDFGI) is deliberately NOT enabled here.
+        //
+        // It is the obvious way to get light to bounce, and on paper it is what these worlds
+        // want: they are user-uploaded GLBs that nobody is going to light-bake. But it could
+        // not be shown to improve any world available to test, it is by far the most expensive
+        // effect on the list, and it needs thick, closed geometry to avoid leaking — which a
+        // hollow GLB room built from single-sided boxes is not. Turning it on blind, on every
+        // world a user uploads, is a worse default than leaving it off.
+        //
+        // If it comes back, it needs a per-world manifest opt-in, not a global switch.
+
+        // Screen-space reflections: the specular half of the same problem. A floor that reflects
+        // nothing reads as chalk no matter how well it is lit.
+        if (UI.DeviceProfile.Current == UI.DeviceProfile.Tier.High)
+        {
+            env.SsrEnabled = true;
+            env.SsrMaxSteps = 32;
+            env.SsrFadeIn = 0.15f;
+            env.SsrFadeOut = 2.0f;
+        }
+
+        // Glow. The mode matters: a cinema screen and neon want it; a baked interior does not,
+        // because its highlights are painted into the texture and would smear.
+        if (UI.DeviceProfile.BloomEnabled && mode != "baked" && !env.GlowEnabled)
+        {
+            env.GlowEnabled = true;
+            env.GlowIntensity = mode == "dark" ? 0.9f : 0.45f;
+            env.GlowStrength = 1.1f;
+            env.GlowBloom = mode == "dark" ? 0.25f : 0.12f;
+            // Only genuinely bright things bloom. Below ~1.0 the whole image hazes over.
+            env.GlowHdrThreshold = 1.0f;
+            env.GlowHdrScale = 2.0f;
+            env.GlowBlendMode = Godot.Environment.GlowBlendModeEnum.Additive;
+            // Wide, soft falloff around a light source rather than a tight halo.
+            env.SetGlowLevel(3, 1.0f);
+            env.SetGlowLevel(4, 1.0f);
+            env.SetGlowLevel(5, 0.6f);
+        }
+
+        // Filmic tonemapping with the default white point of 1.0 clips everything brighter than
+        // white, so lamps and sky flatten into featureless patches. Headroom lets the
+        // highlights roll off instead. Only raised, never lowered — an author who set their own
+        // white point meant it.
+        if (env.TonemapMode == Godot.Environment.ToneMapper.Linear)
+            env.TonemapMode = Godot.Environment.ToneMapper.Filmic;
+        if (env.TonemapWhite < 4.0f) env.TonemapWhite = 4.0f;
+    }
+
+    /// Sun/key light for worlds that ship none.
+    ///
+    /// A `.serikaworld` is a GLB, and most GLB exports carry no lights at all — so these worlds
+    /// were lit purely by the environment's flat ambient. That was survivable while avatars
+    /// imported as `KHR_materials_unlit` and ignored lighting entirely, but the toon shader made
+    /// them respond to it: an avatar in an unlit world now gets a uniform ambient wash with no
+    /// band, no shadow side and no form. The world itself has the same problem — nothing casts a
+    /// shadow, so nothing looks like it is standing on the floor.
+    ///
+    /// Only added when the world truly has none of its own; an authored sun always wins.
+    private static void EnsureKeyLight(Node3D root, string mode)
+    {
+        // A baked world's shadows are already painted into its textures, and a theatre is
+        // supposed to be dark. Adding a sun to either fights the art.
+        if (mode is "baked" or "dark") return;
+
+        var lights = new System.Collections.Generic.List<Light3D>();
+        CollectLights(root, lights);
+        foreach (var l in lights)
+            if (l is DirectionalLight3D) return;
+
+        var (energy, colour, pitch) = mode switch
+        {
+            // Even, low-contrast fill from high up — a gallery wants form, not drama.
+            "studio" => (0.9f, new Color(1.0f, 0.98f, 1.0f), -62f),
+            // Warm, low, lamp-like to match the interior's own fixtures.
+            "lit" => (0.7f, new Color(1.0f, 0.92f, 0.80f), -38f),
+            // Outdoor: a proper sun, slightly warm, at a mid-afternoon angle.
+            _ => (1.15f, new Color(1.0f, 0.96f, 0.90f), -45f),
+        };
+
+        var sun = new DirectionalLight3D
+        {
+            Name = "SerikaKeyLight",
+            LightEnergy = energy,
+            LightColor = colour,
+            ShadowEnabled = UI.DeviceProfile.Shadows,
+            // Softens the shadow edge with distance, so a character's contact shadow stays
+            // tight while distant geometry doesn't shimmer.
+            DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel4Splits,
+            LightAngularDistance = 1.0f,
+        };
+        root.AddChild(sun);
+        // Yaw is offset from the spawn's facing so the key is three-quarter, not head-on: a
+        // light down the view axis flattens the toon ramp into a single band.
+        sun.RotationDegrees = new Vector3(pitch, 35f, 0f);
+
+        GD.Print($"WorldLoader: added key light for '{mode}' " +
+                 $"(energy {energy}, shadows {sun.ShadowEnabled})");
     }
 
     private static Node LoadPackedScene(string path)

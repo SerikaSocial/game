@@ -31,10 +31,23 @@ public static class ToonShading
     public static void ApplyToAvatar(Node model, float outlineWidth = 1.4f)
         => Apply(model, outlineWidth);
 
+    /// Whether *worlds* get the cel treatment. Off by default — see `ApplyToWorld`.
+    public static bool WorldsEnabled { get; set; }
+
     /// Toon-shade a world. No outline by default — an outline on every wall and prop reads as
     /// noise, where on a character it reads as line art.
+    ///
+    /// Disabled by default, because the cel ramp and a room are a bad match. Banding N·L into
+    /// three steps and disabling specular is exactly what you want on a character's cheek and
+    /// exactly what you do not want on a wall: every lamp's falloff collapses into a flat disc,
+    /// so a sconce stops looking like a light and starts looking like someone painted a circle
+    /// behind it. Characters keep the cel look; the room they stand in gets real light, real
+    /// specular and real shadows — which is the standard anime-character-in-a-lit-set approach.
     public static void ApplyToWorld(Node root, float outlineWidth = 0f)
-        => Apply(root, outlineWidth);
+    {
+        if (!WorldsEnabled) return;
+        Apply(root, outlineWidth);
+    }
 
     private static void Apply(Node node, float outlineWidth)
     {

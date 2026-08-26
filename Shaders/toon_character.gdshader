@@ -56,8 +56,17 @@ void light() {
 
 	// Tint the shadowed side toward a cool colour instead of pure black — the classic anime
 	// shadow. Lit side keeps the light's own colour.
+	//
+	// The tint MUST be scaled by ATTENUATION. `light()` runs once per light, so without it every
+	// light in the scene adds a constant `shadow_tint * shadow_tint_amount` to every surface no
+	// matter how far away it is or which way the surface faces. On a character lit by one sun
+	// that is invisible; in a room it is catastrophic. The Cinema has nine lights, which added
+	// roughly (1.95, 1.83, 2.27) of flat violet to every pixel — swamping the sun, the geometry
+	// and SSAO alike, and turning a 26-mesh room into uniform purple papercraft. Ambient
+	// occlusion at eight times normal strength was literally undetectable underneath it.
+	float reach = ATTENUATION;
 	vec3 lit = banded * (LIGHT_COLOR / PI);
-	vec3 shade = shadow_tint.rgb * (1.0 - banded) * shadow_tint_amount;
+	vec3 shade = shadow_tint.rgb * (1.0 - banded) * shadow_tint_amount * reach;
 	DIFFUSE_LIGHT += lit + shade;
 
 	// Rim, masked by light so it only glows on lit edges (an unlit rim looks like fog).

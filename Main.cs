@@ -144,6 +144,14 @@ public partial class Main : Node3D
             Avatar.PhysDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
             return;
         }
+        if (args.ContainsKey("serika-shot"))
+        {
+            Avatar.ShotDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null),
+                args.GetValueOrDefault("outline", null),
+                args.GetValueOrDefault("shader", null));
+            return;
+        }
         if (args.ContainsKey("serika-worldtest"))
         {
             WorldDiagnostic.Run(this, _worldRoot, args.GetValueOrDefault("world", null),
@@ -163,6 +171,14 @@ public partial class Main : Node3D
 
         // Register the serikasocial:// handler so the website's "Open in app" works, and see
         // if we were launched from such a link (e.g. serikasocial://world/<id>).
+        // UI screenshot mode builds the real screens, so it falls through the whole of _Ready
+        // rather than returning early like the other diagnostics. It only has to suppress the
+        // two asynchronous things that would swap the screen out mid-capture.
+        _uiShotMode = args.ContainsKey("serika-uishot");
+        // The VR shot mode builds its panel *after* the screens exist, but screens read this
+        // flag while constructing (for the scrim), so it has to be set up front.
+        if (_uiShotMode && args.ContainsKey("vr")) UI.VrUiSurface.Active = true;
+
         DeepLink.RegisterHandler();
         _pendingIntent = DeepLink.FromCommandLine();
 
@@ -187,14 +203,14 @@ public partial class Main : Node3D
             ShowLoading("Connecting to The Commons…");
 
         // Try to restore a saved session before showing the login screen.
-        _ = TryRestoreSession();
+        if (!_uiShotMode) _ = TryRestoreSession();
 
         // Auto-updater: check CDN for a newer version. Non-blocking — runs in the
         // background and shows a dialog only if an update is available.
         _updater = new Updater { Name = "Updater" };
         AddUi(_updater);
         _updater.CurrentVersion = Hud.ClientVersion;
-        _updater.CheckForUpdates();
+        if (!_uiShotMode) _updater.CheckForUpdates();
 
         // The single pause hub. (The old always-hidden PauseMenu that duplicated all of this
         // has been removed — this is the only pause surface now.)
@@ -285,6 +301,9 @@ public partial class Main : Node3D
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
 
+        if (_uiShotMode)
+            StartUiShots(args.GetValueOrDefault("out", null), args.GetValueOrDefault("screens", null),
+                args.ContainsKey("vr"));
     }
 
     /// Show the 3D loading screen with a status line during sign-in / connecting.
@@ -1005,6 +1024,7 @@ public partial class Main : Node3D
     private void ShowLoginScreen()
     {
         HideLoading();
+        _inWorldHud?.Leave();
         _hud?.ShowLogin();
     }
 

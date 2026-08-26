@@ -54,7 +54,7 @@ public static class Interactable
 public partial class SeatNode : Area3D, IOccupiable
 {
     [Export] public string SeatLabel { get; set; } = "Sit";
-    [Export] public Vector3 SitOffset { get; set; } = new(0, 0.45f, 0);
+    [Export] public Vector3 SitOffset { get; set; } = Vector3.Zero;
     [Export] public float SitYaw { get; set; } = 0f;
     [Export] public float InteractionRange { get; set; } = 1.6f;
 

@@ -2,6 +2,8 @@ using System;
 using Godot;
 using SerikaSocial.World;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// The in-game photo camera, held like a phone: the panel is the handset and the viewfinder
@@ -39,12 +41,7 @@ public partial class CameraMenu : CanvasLayer
         Layer = 96;
         Visible = false;
 
-        _scrim = new ColorRect
-        {
-            Color = new Color(0, 0, 0, 0.4f),
-            AnchorRight = 1,
-            AnchorBottom = 1,
-        };
+        _scrim = Brand.Scrim(0.40f);
         AddChild(_scrim);
 
         var center = new CenterContainer();
@@ -102,7 +99,7 @@ public partial class CameraMenu : CanvasLayer
         _statusLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         vfStack.AddChild(_statusLabel);
 
-        var closeBtn = Brand.Ghost_(new Button { Text = "✕", CustomMinimumSize = new Vector2(32, 32) });
+        var closeBtn = Brand.Ghost_(new Button { CustomMinimumSize = new Vector2(32, 32), Icon = Icons.Get(Icons.Kind.Close, 14, Brand.TextMid) });
         closeBtn.SetAnchorsPreset(Control.LayoutPreset.TopRight);
         closeBtn.Pressed += Hide;
         vfStack.AddChild(closeBtn);
@@ -112,19 +109,25 @@ public partial class CameraMenu : CanvasLayer
         ctrlBar.AddThemeConstantOverride("separation", 10);
         mainVBox.AddChild(ctrlBar);
 
-        ctrlBar.AddChild(ControlTile("📷", "Take Photo", SnapPhoto));
-        ctrlBar.AddChild(ControlTile("⏱️", "Timed (5s)", StartTimedPhoto));
-        ctrlBar.AddChild(ControlTile("🎥", $"Mode: {_currentMode}", ToggleMode));
-        ctrlBar.AddChild(ControlTile("🌍", $"Anchor: {_currentAnchor}", ToggleAnchor));
-        ctrlBar.AddChild(ControlTile("🔍", "Focus: Auto", () => { }));
+        ctrlBar.AddChild(ControlTile(Icons.Kind.Camera, "Take Photo", SnapPhoto));
+        ctrlBar.AddChild(ControlTile(Icons.Kind.Timer, "Timed (5s)", StartTimedPhoto));
+        ctrlBar.AddChild(ControlTile(Icons.Kind.Film, $"Mode: {_currentMode}", ToggleMode));
+        ctrlBar.AddChild(ControlTile(Icons.Kind.Globe, $"Anchor: {_currentAnchor}", ToggleAnchor));
+        ctrlBar.AddChild(ControlTile(Icons.Kind.Focus, "Focus: Auto", () => { }));
     }
 
-    private Button ControlTile(string icon, string label, Action onClick)
+    private Button ControlTile(Icons.Kind icon, string label, Action onClick)
     {
         var btn = new Button
         {
-            Text = $"{icon}\n{label}",
+            Text = label,
             CustomMinimumSize = new Vector2(110, 60),
+            Icon = Icons.Get(icon, 20, Brand.Accent),
+            // Icon above the label rather than beside it — these tiles are square-ish and a
+            // side-by-side icon leaves the text off-centre.
+            VerticalIconAlignment = VerticalAlignment.Top,
+            IconAlignment = HorizontalAlignment.Center,
+            ExpandIcon = false,
         };
         Brand.Ghost_(btn);
         btn.AddThemeFontSizeOverride("font_size", 12);

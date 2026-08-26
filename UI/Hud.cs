@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Text.Json;
 using Godot;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// The client's front-of-house UI: a polished login screen, a loading/connecting overlay with an
@@ -752,7 +754,7 @@ public partial class Hud : CanvasLayer
 
         footer.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
-        var capLabel = new Label { Text = $"👥 {capacity}" };
+        var capLabel = new Label { Text = $"{capacity}" };
         capLabel.AddThemeFontSizeOverride("font_size", 11);
         capLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.82f, 0.88f, 0.6f));
         footer.AddChild(capLabel);

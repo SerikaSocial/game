@@ -16,8 +16,9 @@ namespace SerikaSocial.UI;
 /// front of the player. The `Control`s are untouched — they still lay out against a normal
 /// screen-sized viewport and still handle ordinary mouse events, which `PushInput` delivers.
 ///
-/// v1.3: The panel is now slightly curved (cylinder section), has a drop shadow and a subtle
-/// glow rim, giving it a premium holographic feel instead of a flat texture slab.
+/// The panel is slightly curved (a shallow cylinder section) so its edges stay equidistant from
+/// the eye. It carries no chrome of its own — see `_Ready` for why the decorative shadow and
+/// glow quads were removed.
 public partial class VrUiSurface : Node3D
 {
     /// Backing resolution of the panel. 4:3-ish at a size that stays legible through the Quest's
@@ -33,17 +34,40 @@ public partial class VrUiSurface : Node3D
     /// the size of the render target the UI is really drawn on.
     public Vector2I Resolution { get; private set; }
 
-    /// Panel size in metres, and how far in front of the camera it floats.
-    private const float PanelWidth = 1.7f;
+    /// The size the `Control`s lay out against, which is deliberately *not* the render
+    /// resolution.
+    ///
+    /// Every screen in `UI/` is sized for a desktop monitor — the pause hub's card is 560 px
+    /// wide, the big menu's is 1100. Laying those out against the panel's full 1920 px made the
+    /// pause hub occupy 29% of a surface that only subtends ~60° of view, so in the headset it
+    /// was a postage stamp of unreadable 13 px text (roughly 0.36° tall, where ~0.5° is the
+    /// floor for comfortable VR reading).
+    ///
+    /// Shrinking the *logical* space magnifies everything on the panel without touching a
+    /// single screen's layout code. The floor is set by the largest screen: the big menu needs
+    /// 1100×700 plus 2×16 px of margin, so 1200×760 is as tight as this can go while still
+    /// fitting every screen.
+    public Vector2I LogicalSize { get; private set; }
+
+    private static readonly Vector2I PreferredLogicalSize = new(1200, 760);
+
+    /// Panel size in metres, and how far in front of the camera it floats. Wider than a desktop
+    /// monitor would be, because angular size is the whole game here: at 1.7 m away a 2 m panel
+    /// subtends ~61°, which combined with the logical size above puts body text near 0.65°.
+    private const float PanelWidth = 2.0f;
     private const float PanelDistance = 1.7f;
     private const float CurveAngleDeg = 14f; // degrees of cylinder arc — subtle but perceptible
 
+    /// True once the UI is being drawn on a world-space panel rather than a flat screen.
+    ///
+    /// Screens need this because a few desktop idioms are actively wrong in VR — chiefly the
+    /// full-screen scrim, which on a monitor dims the world behind a dialog but on a floating
+    /// panel just paints a large opaque slab in front of the player's face. Set before any
+    /// screen is constructed so `Brand.Scrim` can consult it while building.
+    public static bool Active { get; set; }
+
     public SubViewport Viewport { get; private set; }
     public MeshInstance3D Panel { get; private set; }
-
-    // The shadow and glow are purely cosmetic — they make the panel look premium and grounded.
-    private MeshInstance3D _shadow;
-    private MeshInstance3D _glow;
 
     private ArrayMesh _curvedMesh;
     private bool _initialized;
@@ -51,11 +75,17 @@ public partial class VrUiSurface : Node3D
 
     public override void _Ready()
     {
+        Active = true;
         Resolution = PreferredResolution;
+        LogicalSize = PreferredLogicalSize;
         Viewport = new SubViewport
         {
             Name = "UiViewport",
             Size = Resolution,
+            // Render at `Resolution`, lay out at `LogicalSize`. The stretch flag is what makes
+            // the two independent; without it the override only clips.
+            Size2DOverride = LogicalSize,
+            Size2DOverrideStretch = true,
             // The UI is mostly transparent chrome over the world; without this the panel would
             // be an opaque black slab.
             TransparentBg = true,
@@ -70,7 +100,9 @@ public partial class VrUiSurface : Node3D
         };
         AddChild(Viewport);
 
-        float aspect = (float)Resolution.Y / Resolution.X;
+        // Aspect comes from the *logical* size: that is the shape the Controls lay out in, so
+        // using the render resolution's aspect would letterbox or stretch the UI.
+        float aspect = (float)LogicalSize.Y / LogicalSize.X;
         float panelHeight = PanelWidth * aspect;
 
         _curvedMesh = BuildCurvedPanel(PanelWidth, panelHeight, CurveAngleDeg, 16);
@@ -95,47 +127,16 @@ public partial class VrUiSurface : Node3D
         };
         AddChild(Panel);
 
-        // Drop shadow: a slightly larger, dark, blurred quad offset behind the panel.
-        _shadow = new MeshInstance3D
-        {
-            Name = "PanelShadow",
-            Mesh = _curvedMesh,
-            Position = new Vector3(0, -0.02f, 0.025f), // slightly behind and below
-            Scale = new Vector3(1.06f, 1.06f, 1.0f),
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        };
-        _shadow.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(0, 0, 0, 0.35f),
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            NoDepthTest = true,
-            RenderPriority = 98,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-        };
-        AddChild(_shadow);
-
-        // Glow rim: a subtle brand-coloured emission border around the panel edge.
-        _glow = new MeshInstance3D
-        {
-            Name = "PanelGlow",
-            Mesh = _curvedMesh,
-            Scale = new Vector3(1.02f, 1.02f, 1.0f),
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        };
-        _glow.MaterialOverride = new StandardMaterial3D
-        {
-            AlbedoColor = new Color(Brand.Accent.R, Brand.Accent.G, Brand.Accent.B, 0.15f),
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            EmissionEnabled = true,
-            Emission = Brand.Accent * 0.3f,
-            EmissionEnergyMultiplier = 0.5f,
-            NoDepthTest = true,
-            RenderPriority = 99,
-            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-        };
-        AddChild(_glow);
+        // There is deliberately no drop shadow or glow quad behind the panel.
+        //
+        // Both used to exist, described as making the panel "look premium and grounded". They
+        // were full-surface quads, not rims: a black 0.35 sheet at 1.06 scale and a violet 0.15
+        // sheet at 1.02. On a desktop mock-up that reads as a subtle frame, but in the headset
+        // the panel is mostly empty — the pause hub's card covers about a quarter of it — so
+        // what the player actually saw was a large translucent purple rectangle hanging in the
+        // room with a small menu floating inside it. The screens already carry their own
+        // shadowed, bordered cards (`Brand.Panel`), so the surface itself should show nothing
+        // except what the UI draws on it.
 
         Position = new Vector3(0, 1.2f, -PanelDistance);
     }
@@ -215,8 +216,6 @@ public partial class VrUiSurface : Node3D
         }
 
         Panel.Visible = anyVisible;
-        if (_shadow != null) _shadow.Visible = anyVisible;
-        if (_glow != null) _glow.Visible = anyVisible;
         Viewport.RenderTargetUpdateMode = anyVisible
             ? SubViewport.UpdateMode.Always
             : SubViewport.UpdateMode.Disabled;
@@ -327,7 +326,7 @@ public partial class VrUiSurface : Node3D
         viewportPos = default;
         var local = Panel.GlobalTransform.AffineInverse() * worldPoint;
 
-        float aspect = (float)Resolution.Y / Resolution.X;
+        float aspect = (float)LogicalSize.Y / LogicalSize.X;
         float panelHeight = PanelWidth * aspect;
         float halfAngle = Mathf.DegToRad(CurveAngleDeg) * 0.5f;
         float radius = PanelWidth / (2f * Mathf.Sin(halfAngle));
@@ -342,7 +341,7 @@ public partial class VrUiSurface : Node3D
         u = Mathf.Clamp(u, 0f, 1f);
         v = Mathf.Clamp(v, 0f, 1f);
 
-        viewportPos = new Vector2(u * Resolution.X, v * Resolution.Y);
+        viewportPos = new Vector2(u * LogicalSize.X, v * LogicalSize.Y);
         return true;
     }
 

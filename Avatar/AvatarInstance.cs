@@ -19,6 +19,10 @@ public sealed partial class AvatarInstance : Node3D
     public float EyeHeight => Meta?.EyeHeightMeters ?? 1.6f;
     public float Height => Meta?.HeightMeters ?? 1.7f;
 
+    /// Height of the hip bone from the feet in metres, measured from the skeleton's rest pose.
+    /// Used by the seat system to place the avatar so its hips land on the seat surface.
+    public float HipHeight { get; private set; } = 0.45f;
+
     private readonly Dictionary<string, int> _roleToBone = new();
     private Node3D _model;
 
@@ -49,7 +53,7 @@ public sealed partial class AvatarInstance : Node3D
         inst.AddChild(model);
 
         inst.Skeleton = FindSkeleton(model);
-        if (inst.Skeleton != null) { inst.ResolveHumanoid(); inst.ResolveEyeOffset(); }
+        if (inst.Skeleton != null) { inst.ResolveHumanoid(); inst.ResolveEyeOffset(); inst.ResolveHipHeight(); }
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
         inst.SetupAnimation();
         // The glTF state is passed through so the avatar's own VRM spring rig can be read out of
@@ -249,6 +253,15 @@ public sealed partial class AvatarInstance : Node3D
         // No eye bones — fall back to the metadata's eye height. It's the avatar's height less a
         // constant rather than a measurement, so clamp it to a plausible skull's worth of offset.
         EyeOffsetY = Mathf.Clamp(EyeHeight - headY, 0.03f, 0.18f);
+    }
+
+    /// Measure the hip bone height from the skeleton's rest pose so seats can place the
+    /// avatar's hips exactly on the seat surface regardless of avatar proportions.
+    private void ResolveHipHeight()
+    {
+        int hips = BoneOf("hips");
+        if (Skeleton == null || hips < 0) return;
+        HipHeight = Mathf.Clamp(Skeleton.GetBoneGlobalRest(hips).Origin.Y, 0.2f, 1.2f);
     }
 
     /// Hide the head bone in first-person view so camera isn't blocked by skull geometry.

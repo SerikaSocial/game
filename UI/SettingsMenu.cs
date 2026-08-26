@@ -1,6 +1,8 @@
 using System;
 using Godot;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial.UI;
 
 /// The full settings screen — Graphics, Audio, Controls, Interface — backed by DeviceProfile and
@@ -23,7 +25,7 @@ public partial class SettingsMenu : CanvasLayer
 
     public override void _Ready()
     {
-        Layer = 92; // above the pause menu so ⚙ from it stacks correctly
+        Layer = 92; // above the pause menu so Settings opened from it stacks correctly
 
         _scrim = new ColorRect { Color = new Color(0.02f, 0.03f, 0.05f, 0.82f), AnchorRight = 1, AnchorBottom = 1, Visible = false };
         AddChild(_scrim);
@@ -46,7 +48,7 @@ public partial class SettingsMenu : CanvasLayer
         margin.AddChild(root);
 
         var header = new HBoxContainer();
-        var title = new Label { Text = "⚙  Settings", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        var title = new Label { Text = "Settings", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         title.AddThemeFontSizeOverride("font_size", 22);
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
@@ -58,10 +60,10 @@ public partial class SettingsMenu : CanvasLayer
 
         var tabs = new HBoxContainer();
         tabs.AddThemeConstantOverride("separation", 8);
-        _tabG = Tab("🖥 Graphics", () => Switch(0));
-        _tabA = Tab("🔊 Audio", () => Switch(1));
-        _tabC = Tab("🎮 Controls", () => Switch(2));
-        _tabI = Tab("🖼 Interface", () => Switch(3));
+        _tabG = Tab(Icons.Kind.Display, "Graphics", () => Switch(0));
+        _tabA = Tab(Icons.Kind.Speaker, "Audio", () => Switch(1));
+        _tabC = Tab(Icons.Kind.Gamepad, "Controls", () => Switch(2));
+        _tabI = Tab(Icons.Kind.Image, "Interface", () => Switch(3));
         tabs.AddChild(_tabG); tabs.AddChild(_tabA); tabs.AddChild(_tabC); tabs.AddChild(_tabI);
         root.AddChild(tabs);
         root.AddChild(new HSeparator());
@@ -333,9 +335,15 @@ public partial class SettingsMenu : CanvasLayer
 
     // ── small builders ──────────────────────────────────────────────────────────────────
     private static void Style(Button b, bool active) { if (active) Brand.Primary_(b); else Brand.Ghost_(b); }
-    private static Button Tab(string label, Action onClick)
+    private static Button Tab(Icons.Kind icon, string label, Action onClick)
     {
-        var b = Brand.Ghost_(new Button { Text = label, CustomMinimumSize = new Vector2(150, 40) });
+        var b = Brand.Ghost_(new Button
+        {
+            Text = label,
+            CustomMinimumSize = new Vector2(150, 40),
+            Icon = Icons.Get(icon, 16, Brand.Accent),
+        });
+        b.AddThemeConstantOverride("h_separation", 8);
         b.Pressed += onClick;
         return b;
     }

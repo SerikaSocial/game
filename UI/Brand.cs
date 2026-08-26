@@ -142,6 +142,21 @@ public static class Brand
         return t;
     }
 
+    /// The dimming layer behind a modal screen, anchored to fill its parent.
+    ///
+    /// On a monitor a scrim darkens the world so the dialog reads as the only live thing. On the
+    /// VR panel there is no world behind it to darken — the panel *is* a floating rectangle, so a
+    /// 0.7-alpha scrim turns it into a large dark slab hanging in front of the player, obscuring
+    /// the room for no benefit. In VR the scrim is therefore kept faint: enough to seat the card
+    /// against something, not enough to become an object in its own right.
+    public static ColorRect Scrim(float alpha = 0.72f)
+    {
+        if (UI.VrUiSurface.Active) alpha *= 0.28f;
+        var r = new ColorRect { Color = new Color(0.02f, 0.03f, 0.05f, alpha) };
+        r.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        return r;
+    }
+
     /// A vertical brand gradient (deep violet → near-black), for full-screen backdrops.
     public static Gradient BackdropGradient()
     {

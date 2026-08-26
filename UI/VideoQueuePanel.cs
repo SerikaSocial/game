@@ -2,6 +2,8 @@ using System;
 using Godot;
 using SerikaSocial.World.Video;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial.UI;
 
 /// The video queue, docked to the right side of the screen. Opened from the pause menu, but
@@ -45,11 +47,11 @@ public partial class VideoQueuePanel : CanvasLayer
         margin.AddChild(vbox);
 
         var header = new HBoxContainer();
-        var title = new Label { Text = "📺 Video Queue", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        var title = new Label { Text = "Video Queue", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         title.AddThemeFontSizeOverride("font_size", 18);
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
-        var closeBtn = Brand.Ghost_(new Button { Text = "✕", CustomMinimumSize = new Vector2(36, 32) });
+        var closeBtn = Brand.Ghost_(new Button { CustomMinimumSize = new Vector2(36, 32), Icon = Icons.Get(Icons.Kind.Close, 14, Brand.TextMid) });
         closeBtn.Pressed += Hide;
         header.AddChild(closeBtn);
         vbox.AddChild(header);
@@ -79,11 +81,11 @@ public partial class VideoQueuePanel : CanvasLayer
         var skipBtn = Brand.Ghost_(new Button { Text = "⏭ Skip" });
         skipBtn.Pressed += () => _manager?.Skip();
         controls.AddChild(skipBtn);
-        var clearBtn = Brand.Ghost_(new Button { Text = "🗑 Clear" });
+        var clearBtn = Brand.Ghost_(new Button { Text = "Clear", Icon = Icons.Get(Icons.Kind.Trash, 16, Brand.TextMid) });
         clearBtn.Pressed += () => _manager?.Clear();
         controls.AddChild(clearBtn);
 
-        var logBtn = Brand.Ghost_(new Button { Text = "📜 Error Log" });
+        var logBtn = Brand.Ghost_(new Button { Text = "Error Log", Icon = Icons.Get(Icons.Kind.Doc, 16, Brand.TextMid) });
         logBtn.Pressed += ToggleLog;
         controls.AddChild(logBtn);
 
@@ -218,7 +220,7 @@ public partial class VideoQueuePanel : CanvasLayer
             label.AddThemeColorOverride("font_color", Brand.TextMid);
             row.AddChild(label);
 
-            var rm = Brand.Ghost_(new Button { Text = "✕", CustomMinimumSize = new Vector2(30, 26) });
+            var rm = Brand.Ghost_(new Button { CustomMinimumSize = new Vector2(30, 26), Icon = Icons.Get(Icons.Kind.Close, 12, Brand.TextMid) });
             rm.Pressed += () => _manager?.Remove(index);
             row.AddChild(rm);
 

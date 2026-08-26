@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using Godot;
 using SerikaSocial.Avatar;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// Radial action menu (`R`), modelled on VRChat's. A root ring of six wedges leads into
@@ -21,7 +23,7 @@ public partial class ActionMenu : CanvasLayer
 
     // The avatar's own dance/emote clips, shown in place of the default "Emotes" ring when the
     // equipped avatar ships any. Null/empty → the built-in ring is used (the fallback).
-    private (string title, string icon, string clip)[] _customRing;
+    private (string title, Icons.Kind icon, string clip)[] _customRing;
     private bool _inCustomSub;
 
     /// Feed the equipped avatar's custom clip names. Trimmed to fit the ring; a "Stop" wedge is
@@ -31,10 +33,10 @@ public partial class ActionMenu : CanvasLayer
         if (names == null || names.Count == 0) { _customRing = null; return; }
 
         int n = Math.Min(names.Count, 7);
-        _customRing = new (string, string, string)[n + 1];
+        _customRing = new (string, Icons.Kind, string)[n + 1];
         for (int i = 0; i < n; i++)
-            _customRing[i] = (PrettyClip(names[i]), "💃", names[i]);
-        _customRing[n] = ("Stop", "✖", "");
+            _customRing[i] = (PrettyClip(names[i]), Icons.Kind.Music, names[i]);
+        _customRing[n] = ("Stop", Icons.Kind.Close, "");
     }
 
     /// Turn a raw clip name ("Dance_HipHop", "emote.wave 01") into a menu-friendly label.
@@ -56,52 +58,52 @@ public partial class ActionMenu : CanvasLayer
     private int SliceCount => _slices.Length;
 
     /// Root ring. Emotes live here (and only here) — there are no emote key binds.
-    private static readonly (string title, string icon)[] RootSlices =
+    private static readonly (string title, Icons.Kind icon)[] RootSlices =
     {
-        ("Emotes", "💃"),
-        ("Poses", "🧘"),
-        ("Reactions", "😀"),
-        ("Camera", "📷"),
-        ("Respawn", "⟲"),
-        ("Go Home", "🏠"),
+        ("Emotes", Icons.Kind.Music),
+        ("Poses", Icons.Kind.Sit),
+        ("Reactions", Icons.Kind.Smile),
+        ("Camera", Icons.Kind.Camera),
+        ("Respawn", Icons.Kind.Refresh),
+        ("Go Home", Icons.Kind.Home),
     };
 
     /// Submenus, each a ring of emotes. Cancel returns the avatar to normal.
-    private static readonly Dictionary<int, (string title, string icon, AvatarInstance.Emote emote)[]> SubSlices = new()
+    private static readonly Dictionary<int, (string title, Icons.Kind icon, AvatarInstance.Emote emote)[]> SubSlices = new()
     {
         [0] = new[]
         {
-            ("Dance", "💃", AvatarInstance.Emote.Dance),
-            ("Charleston", "🕺", AvatarInstance.Emote.DanceCharleston),
-            ("Victory", "🏆", AvatarInstance.Emote.Victory),
-            ("Fist Pump", "✊", AvatarInstance.Emote.VictoryFist),
-            ("Backflip", "🤸", AvatarInstance.Emote.Backflip),
-            ("Stop", "✖", AvatarInstance.Emote.None),
+            ("Dance", Icons.Kind.Music, AvatarInstance.Emote.Dance),
+            ("Charleston", Icons.Kind.Person, AvatarInstance.Emote.DanceCharleston),
+            ("Victory", Icons.Kind.Trophy, AvatarInstance.Emote.Victory),
+            ("Fist Pump", Icons.Kind.Star, AvatarInstance.Emote.VictoryFist),
+            ("Backflip", Icons.Kind.Bolt, AvatarInstance.Emote.Backflip),
+            ("Stop", Icons.Kind.Close, AvatarInstance.Emote.None),
         },
         [1] = new[]
         {
-            ("Sit", "🧍", AvatarInstance.Emote.Sit),
-            ("Meditate", "🧘", AvatarInstance.Emote.Meditate),
-            ("Sleep", "😴", AvatarInstance.Emote.Sleeping),
-            ("Bow", "🙇", AvatarInstance.Emote.Bow),
-            ("Shiver", "🥶", AvatarInstance.Emote.Shivering),
-            ("Stop", "✖", AvatarInstance.Emote.None),
+            ("Sit", Icons.Kind.Sit, AvatarInstance.Emote.Sit),
+            ("Meditate", Icons.Kind.Focus, AvatarInstance.Emote.Meditate),
+            ("Sleep", Icons.Kind.Moon, AvatarInstance.Emote.Sleeping),
+            ("Bow", Icons.Kind.Person, AvatarInstance.Emote.Bow),
+            ("Shiver", Icons.Kind.Snowflake, AvatarInstance.Emote.Shivering),
+            ("Stop", Icons.Kind.Close, AvatarInstance.Emote.None),
         },
         [2] = new[]
         {
-            ("Wave", "👋", AvatarInstance.Emote.Greeting),
-            ("Yes", "👍", AvatarInstance.Emote.Yes),
-            ("No", "👎", AvatarInstance.Emote.Reject),
-            ("Confused", "❓", AvatarInstance.Emote.Confused),
-            ("Dizzy", "💫", AvatarInstance.Emote.Dizzy),
-            ("Stop", "✖", AvatarInstance.Emote.None),
+            ("Wave", Icons.Kind.Wave, AvatarInstance.Emote.Greeting),
+            ("Yes", Icons.Kind.ThumbUp, AvatarInstance.Emote.Yes),
+            ("No", Icons.Kind.ThumbDown, AvatarInstance.Emote.Reject),
+            ("Confused", Icons.Kind.Question, AvatarInstance.Emote.Confused),
+            ("Dizzy", Icons.Kind.Star, AvatarInstance.Emote.Dizzy),
+            ("Stop", Icons.Kind.Close, AvatarInstance.Emote.None),
         },
     };
 
     // -1 = root ring, else the index of the open submenu.
     private int _openSub = -1;
 
-    private (string title, string icon)[] _slices = RootSlices;
+    private (string title, Icons.Kind icon)[] _slices = RootSlices;
 
     public override void _Ready()
     {
@@ -306,7 +308,7 @@ public partial class ActionMenu : CanvasLayer
         _openSub = index;
         _inCustomSub = false;
         var entries = SubSlices[index];
-        var ring = new (string, string)[entries.Length];
+        var ring = new (string, Icons.Kind)[entries.Length];
         for (int i = 0; i < entries.Length; i++) ring[i] = (entries[i].title, entries[i].icon);
         _slices = ring;
         _hoveredSlice = -1;
@@ -318,7 +320,7 @@ public partial class ActionMenu : CanvasLayer
     {
         _inCustomSub = true;
         _openSub = -1;
-        var ring = new (string, string)[_customRing.Length];
+        var ring = new (string, Icons.Kind)[_customRing.Length];
         for (int i = 0; i < _customRing.Length; i++) ring[i] = (_customRing[i].title, _customRing[i].icon);
         _slices = ring;
         _hoveredSlice = -1;
@@ -357,15 +359,19 @@ public partial class ActionMenu : CanvasLayer
 
             var sliceData = _slices[i];
             var font = ThemeDB.FallbackFont;
-            _radialControl.DrawString(font, labelPos + new Vector2(-16, -4), sliceData.icon, HorizontalAlignment.Center, -1, 24, Colors.White);
-            _radialControl.DrawString(font, labelPos + new Vector2(-40, 18), sliceData.title, HorizontalAlignment.Center, 80, 12, isHovered ? Colors.White : Brand.TextMid);
+            const int iconPx = 26;
+            var iconTex = Icons.Get(sliceData.icon, iconPx, isHovered ? Colors.White : Brand.AccentSoft);
+            _radialControl.DrawTexture(iconTex, labelPos + new Vector2(-iconPx / 2f, -iconPx - 2));
+            _radialControl.DrawString(font, labelPos + new Vector2(-40, 16), sliceData.title, HorizontalAlignment.Center, 80, 12, isHovered ? Colors.White : Brand.TextMid);
         }
 
         // Draw Center Circle (Close ring)
         Color centerCol = (_hoveredSlice < 0) ? Brand.PrimaryLo : Brand.Bg2;
         _radialControl.DrawCircle(center, InnerRadius, centerCol);
         _radialControl.DrawArc(center, InnerRadius, 0, Mathf.Tau, 32, Brand.Border, 2f);
-        _radialControl.DrawString(ThemeDB.FallbackFont, center + new Vector2(-10, 8), "✕", HorizontalAlignment.Center, -1, 22, Brand.TextHi);
+        const int closePx = 20;
+        _radialControl.DrawTexture(Icons.Get(Icons.Kind.Close, closePx, Brand.TextHi),
+                                   center - new Vector2(closePx / 2f, closePx / 2f));
     }
 
     private void DrawArcSegment(Vector2 center, float innerR, float outerR, float a1, float a2, Color fill, Color border)

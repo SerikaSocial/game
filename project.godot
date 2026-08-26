@@ -98,6 +98,7 @@ locale/translations_pot_files=PackedStringArray("res://Dialogue/tutorial_vr.dial
 
 renderer/rendering_method.mobile="gl_compatibility"
 textures/vram_compression/import_etc2_astc=true
+anti_aliasing/quality/use_debanding=true
 
 [xr]
 

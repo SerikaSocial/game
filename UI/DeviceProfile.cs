@@ -147,6 +147,20 @@ public static class DeviceProfile
                 _ => 4096,
             };
 
+            // Debanding: dither the final image to break up 8-bit quantisation.
+            //
+            // Not cosmetic here. A point light's falloff across a flat wall is a very shallow
+            // gradient, and in a dim scene the whole gradient spans only a handful of the 256
+            // available levels — so it renders as a set of hard concentric contour rings
+            // centred on the light. The Cinema looked like a topographic map of itself. It went
+            // unnoticed for as long as worlds were cel-shaded, because banding a gradient into
+            // three flat steps is what that shader does on purpose; it only surfaced once
+            // worlds went back to smooth PBR falloff.
+            //
+            // The cost is a single full-screen dither in the tonemap pass, so it stays on for
+            // every tier — a mobile GPU is if anything more prone to this, not less.
+            vp.UseDebanding = true;
+
             ApplyFoveation();
         }
 

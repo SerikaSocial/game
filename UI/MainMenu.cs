@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Text.Json;
 using Godot;
 
+using SerikaSocial.UI;
+
 namespace SerikaSocial;
 
 /// VRChat Main Menu (Big Menu) — exact match of VRChat's Main Menu design (input_file_1.png).
@@ -37,12 +39,7 @@ public partial class MainMenu : CanvasLayer
         Layer = 106;
         Visible = false;
 
-        _scrim = new ColorRect
-        {
-            Color = new Color(0.02f, 0.03f, 0.05f, 0.85f),
-            AnchorRight = 1,
-            AnchorBottom = 1,
-        };
+        _scrim = Brand.Scrim(0.85f);
         AddChild(_scrim);
 
         var center = new CenterContainer();
@@ -95,13 +92,17 @@ public partial class MainMenu : CanvasLayer
         header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
         // Header Icons
-        header.AddChild(HeaderIcon("🔍"));
-        header.AddChild(HeaderIcon("🔔"));
-        header.AddChild(HeaderIcon("📅"));
-        header.AddChild(HeaderIcon("📦"));
-        header.AddChild(HeaderIcon("⚙️"));
+        header.AddChild(HeaderIcon(Icons.Kind.Search));
+        header.AddChild(HeaderIcon(Icons.Kind.Bell));
+        header.AddChild(HeaderIcon(Icons.Kind.Calendar));
+        header.AddChild(HeaderIcon(Icons.Kind.Box));
+        header.AddChild(HeaderIcon(Icons.Kind.Gear));
 
-        var closeBtn = Brand.Ghost_(new Button { Text = "✕", CustomMinimumSize = new Vector2(36, 36) });
+        var closeBtn = Brand.Ghost_(new Button
+        {
+            CustomMinimumSize = new Vector2(36, 36),
+            Icon = Icons.Get(Icons.Kind.Close, 16, Brand.TextMid),
+        });
         closeBtn.Pressed += Hide;
         header.AddChild(closeBtn);
 
@@ -122,12 +123,12 @@ public partial class MainMenu : CanvasLayer
         sideTitle.AddThemeColorOverride("font_color", Brand.TextDim);
         sidebar.AddChild(sideTitle);
 
-        sidebar.AddChild(SideCategory("📍 Current World"));
-        sidebar.AddChild(SideCategory("🔥 Popular Worlds"));
-        sidebar.AddChild(SideCategory("✨ New & Noteworthy"));
-        sidebar.AddChild(SideCategory("🎭 Avatar Worlds"));
-        sidebar.AddChild(SideCategory("🎮 Mini Games"));
-        sidebar.AddChild(SideCategory("🧪 Community Labs"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Pin, "Current World"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Flame, "Popular Worlds"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Star, "New & Noteworthy"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Shirt, "Avatar Worlds"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Gamepad, "Mini Games"));
+        sidebar.AddChild(SideCategory(Icons.Kind.Flask, "Community Labs"));
 
         bodyRow.AddChild(new VSeparator());
 
@@ -171,36 +172,48 @@ public partial class MainMenu : CanvasLayer
         bottomTabs.AddThemeConstantOverride("separation", 10);
         mainVBox.AddChild(bottomTabs);
 
-        bottomTabs.AddChild(BottomTabButton("⚡ Live Now", 0));
-        bottomTabs.AddChild(BottomTabButton("🌐 Worlds", 1));
-        bottomTabs.AddChild(BottomTabButton("👕 Avatars", 2));
-        bottomTabs.AddChild(BottomTabButton("👥 Social", 3));
-        bottomTabs.AddChild(BottomTabButton("🏰 Groups", 4));
-        bottomTabs.AddChild(BottomTabButton("🛒 Shop", 5));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Bolt, "Live Now", 0));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Globe, "Worlds", 1));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Shirt, "Avatars", 2));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Users, "Social", 3));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Group, "Groups", 4));
+        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Cart, "Shop", 5));
     }
 
-    private Button HeaderIcon(string icon)
+    private Button HeaderIcon(Icons.Kind icon)
     {
-        var b = new Button { Text = icon, CustomMinimumSize = new Vector2(36, 36) };
+        var b = new Button
+        {
+            CustomMinimumSize = new Vector2(36, 36),
+            Icon = Icons.Get(icon, 17, Brand.TextMid),
+        };
         Brand.Ghost_(b);
         return b;
     }
 
-    private Button SideCategory(string text)
+    private Button SideCategory(Icons.Kind icon, string text)
     {
-        var b = new Button { Text = text, CustomMinimumSize = new Vector2(0, 36) };
+        var b = new Button
+        {
+            Text = text,
+            CustomMinimumSize = new Vector2(0, 36),
+            Icon = Icons.Get(icon, 16, Brand.Accent),
+        };
         Brand.Ghost_(b);
         b.AddThemeFontSizeOverride("font_size", 13);
+        b.AddThemeConstantOverride("h_separation", 9);
         return b;
     }
 
-    private Button BottomTabButton(string label, int index)
+    private Button BottomTabButton(Icons.Kind icon, string label, int index)
     {
         var btn = new Button
         {
             Text = label,
             CustomMinimumSize = new Vector2(130, 42),
+            Icon = Icons.Get(icon, 17, Brand.TextMid),
         };
+        btn.AddThemeConstantOverride("h_separation", 8);
         btn.Pressed += () => SwitchBottomTab(index);
         _tabButtons.Add(btn);
         return btn;
@@ -264,7 +277,7 @@ public partial class MainMenu : CanvasLayer
                 _statusLabel.Text = $"{_worldsCache.Count} live server(s)";
                 foreach (var w in _worldsCache)
                 {
-                    var card = MakeCard($"🟢 {w.name}", $"{w.cap} slots · popular server", w.cap, null, w.name);
+                    var card = MakeCard($"{w.name}", $"{w.cap} slots · popular server", w.cap, null, w.name);
                     card.Pressed += () => { Hide(); JoinWorldPressed?.Invoke(w.id); };
                     _contentGrid.AddChild(card);
                 }
@@ -283,19 +296,19 @@ public partial class MainMenu : CanvasLayer
 
             case 3: // Social — friends & online players + your groups
                 _statusLabel.Text = "Friends, online players and your groups.";
-                _contentGrid.AddChild(InfoCard("👥 Online Players", "See who's in your current world. Full friends list is coming soon."));
-                _contentGrid.AddChild(InfoCard("➕ Create a Group", "Groups you make and join will appear here. Coming soon."));
+                _contentGrid.AddChild(InfoCard("Online Players", "See who's in your current world. Full friends list is coming soon."));
+                _contentGrid.AddChild(InfoCard("Create a Group", "Groups you make and join will appear here. Coming soon."));
                 return;
 
             case 4: // Groups — user-created groups
                 _statusLabel.Text = "Community groups you can create and join.";
-                _contentGrid.AddChild(InfoCard("🏰 Your Groups", "Groups you belong to appear here."));
-                _contentGrid.AddChild(InfoCard("➕ New Group", "Create a user group anyone can join. Coming soon."));
+                _contentGrid.AddChild(InfoCard("Your Groups", "Groups you belong to appear here."));
+                _contentGrid.AddChild(InfoCard("New Group", "Create a user group anyone can join. Coming soon."));
                 return;
 
             default: // 5: Shop
                 _statusLabel.Text = "";
-                _contentGrid.AddChild(InfoCard("🛒 Shop", "Coming soon."));
+                _contentGrid.AddChild(InfoCard("Shop", "Coming soon."));
                 return;
         }
     }
@@ -330,7 +343,12 @@ public partial class MainMenu : CanvasLayer
     {
         var btn = new Button
         {
-            CustomMinimumSize = new Vector2(195, 150),
+            // Tall enough for everything the card actually contains: 10 px padding, a 64 px
+            // banner, title, a 36 px two-line description, the footer, and the separations
+            // between them. At the previous 150 px the content overflowed by ~16 px and the
+            // capacity badge rendered *outside* the card's bottom edge — a VBoxContainer
+            // anchored to a too-short parent overflows rather than clipping or shrinking.
+            CustomMinimumSize = new Vector2(195, 178),
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
 
@@ -375,7 +393,13 @@ public partial class MainMenu : CanvasLayer
         if (capacity >= 0)
         {
             var footer = new HBoxContainer();
-            var capLbl = new Label { Text = $"👥 {capacity}" };
+            footer.AddThemeConstantOverride("separation", 5);
+            footer.AddChild(new TextureRect
+            {
+                Texture = Icons.Get(Icons.Kind.Users, 13, Brand.Accent),
+                StretchMode = TextureRect.StretchModeEnum.KeepCentered,
+            });
+            var capLbl = new Label { Text = $"{capacity}" };
             capLbl.AddThemeFontSizeOverride("font_size", 11);
             capLbl.AddThemeColorOverride("font_color", Brand.Accent);
             footer.AddChild(capLbl);

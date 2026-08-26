@@ -308,7 +308,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         _occupying = spot;
         Velocity = Vector3.Zero;
-        GlobalPosition = spot.AnchorPosition;
+
+        // The anchor is where the avatar's hips should land (the seat surface). The player
+        // origin is at the feet, so subtract the seated hip height to put the feet on the
+        // ground below the seat. When sitting with legs bent 90°, the hips drop to roughly
+        // knee level — about half the standing hip height.
+        float hipH = (_avatar?.HipHeight ?? 0.9f) * 0.5f;
+        GlobalPosition = spot.AnchorPosition - new Vector3(0, hipH, 0);
 
         var yr = _yaw.Rotation;
         yr.Y = spot.AnchorYaw;
@@ -340,9 +346,11 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _smoothedHeadY = _currentCameraY;
 
         // Step clear of the anchor, otherwise we're still inside the seat's trigger volume and
-        // the prompt immediately offers to sit back down.
+        // the prompt immediately offers to sit back down. The anchor is at hip height, so
+        // subtract the avatar's hip height to land the feet on the ground.
         var forward = new Vector3(Mathf.Sin(spot.AnchorYaw), 0, Mathf.Cos(spot.AnchorYaw));
-        GlobalPosition = spot.AnchorPosition + forward * 0.7f;
+        float hipH = (_avatar?.HipHeight ?? 0.9f) * 0.5f;
+        GlobalPosition = spot.AnchorPosition + forward * 0.7f - new Vector3(0, hipH, 0);
         Velocity = Vector3.Zero;
     }
 
