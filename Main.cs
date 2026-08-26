@@ -875,7 +875,7 @@ public partial class Main : Node3D
             SaveSession(_api.SessionToken);
 
             // Start rich presence (Discord IPC + Serika RPC).
-            RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+            RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
             RpcPresence.UpdateState("Home", 1);
 
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
@@ -911,7 +911,7 @@ public partial class Main : Node3D
             SaveSession(_api.SessionToken);
 
             // Start rich presence (Discord IPC + Serika RPC).
-            RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+            RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
             RpcPresence.UpdateState("Home", 1);
 
             SetLoadingStatus("Loading your avatar…");
@@ -1024,7 +1024,7 @@ public partial class Main : Node3D
                 GD.Print($"session restored as {_username}");
 
                 // Start rich presence (Discord IPC + Serika RPC).
-                RpcPresence.Init(ApiBaseUrl, _api.SessionToken);
+                RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
                 RpcPresence.UpdateState("Home", 1);
 
                 SetLoadingStatus("Loading your avatar…");

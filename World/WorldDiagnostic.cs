@@ -38,7 +38,16 @@ public static partial class WorldDiagnostic
             return;
         }
 
-        foreach (var child in worldRoot.GetChildren()) child.QueueFree();
+        // Detach *now*, not at end of frame. `QueueFree` alone left the login backdrop — and
+        // crucially its WorldEnvironment — parented under the same root the bundle loads into,
+        // so `SetupEnvironment` found an "authored" environment and skipped the manifest's
+        // lighting mode entirely. The diagnostic then measured a room lit by the login screen,
+        // which is not what the game does: `SwapWorld` builds into a *fresh* root.
+        foreach (var child in worldRoot.GetChildren())
+        {
+            worldRoot.RemoveChild(child);
+            child.QueueFree();
+        }
 
         GD.Print($"WORLDTEST: loading {path}");
         var spawn = WorldLoader.LoadFromPath(path, "worldtest", worldRoot);
@@ -75,6 +84,21 @@ public static partial class WorldDiagnostic
                      $" .. {seats.Max(s => s.GlobalPosition.Y):0.00} m");
         GD.Print($"WORLDTEST: mesh instances = {Descendants(worldRoot).OfType<MeshInstance3D>().Count()}");
 
+        // Lights, post-normalisation. Energy alone says nothing about how bright a room ends
+        // up: an omni's *range* is what decides whether it lights its corner or the whole
+        // building, and glTF carries no range, so a light that looks tame by energy can still
+        // wash out every surface in the world. Print both, plus the environment's ambient.
+        ReportLights(worldRoot, "at rest");
+        foreach (var we in Descendants(worldRoot).OfType<WorldEnvironment>())
+        {
+            var e = we.Environment;
+            if (e == null) continue;
+            GD.Print($"WORLDTEST: env ambient {e.AmbientLightEnergy:0.00} {e.AmbientLightColor}, " +
+                     $"glow {e.GlowEnabled} (intensity {e.GlowIntensity:0.00}, " +
+                     $"threshold {e.GlowHdrThreshold:0.00}), tonemap {e.TonemapMode} " +
+                     $"white {e.TonemapWhite:0.0}, exposure {e.TonemapExposure:0.00}");
+        }
+
         if (string.IsNullOrEmpty(shot))
         {
             GD.Print("WORLDTEST: done");
@@ -110,7 +134,7 @@ public static partial class WorldDiagnostic
             foreach (var s in screens) s.Play("diag://local", ogv, "ogv", "theora");
         }
 
-        host.AddChild(new ShotTaker(shot, screenMeshes.FirstOrDefault()));
+        host.AddChild(new ShotTaker(shot, screenMeshes.FirstOrDefault(), worldRoot));
     }
 
     /// Waits for the decoder to produce frames, reports whether the screen texture is real,
@@ -119,12 +143,14 @@ public static partial class WorldDiagnostic
     {
         private readonly string _path;
         private readonly MeshInstance3D _screen;
+        private readonly Node _worldRoot;
         private int _frames;
 
-        public ShotTaker(string path, MeshInstance3D screen)
+        public ShotTaker(string path, MeshInstance3D screen, Node worldRoot)
         {
             _path = path;
             _screen = screen;
+            _worldRoot = worldRoot;
         }
 
         public override void _Process(double delta)
@@ -158,11 +184,31 @@ public static partial class WorldDiagnostic
                 }
             }
 
+            ReportLights(_worldRoot, "at capture");
+
             var img = GetViewport().GetTexture().GetImage();
             img.SavePng(_path);
             GD.Print($"WORLDTEST: wrote {_path}");
             GD.Print("WORLDTEST: done");
             GetTree().Quit(0);
+        }
+    }
+
+    /// Dump every light's energy and reach. Called once at load and again at capture time, so a
+    /// run with `--ogv` shows the house lights before and after the film starts — the whole point
+    /// of `HouseLights` is a change in these numbers over time, which one snapshot cannot show.
+    private static void ReportLights(Node worldRoot, string when)
+    {
+        foreach (var l in Descendants(worldRoot).OfType<Light3D>())
+        {
+            string extent = l switch
+            {
+                OmniLight3D o => $"range {o.OmniRange:0.0} m, atten {o.OmniAttenuation:0.00}",
+                SpotLight3D s => $"range {s.SpotRange:0.0} m, angle {s.SpotAngle:0}°",
+                _ => "directional",
+            };
+            GD.Print($"WORLDTEST: light [{when}] {l.Name} energy {l.LightEnergy:0.00}, {extent}, " +
+                     $"visible {l.Visible}, shadows {l.ShadowEnabled}");
         }
     }
 

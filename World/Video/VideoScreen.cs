@@ -308,7 +308,23 @@ public partial class VideoScreen : Node, IInteractable
         _subViewport.RenderTargetUpdateMode = on
             ? SubViewport.UpdateMode.Always
             : SubViewport.UpdateMode.Disabled;
+        _rendering = on;
     }
+
+    private bool _rendering;
+
+    /// True while frames are actually being decoded onto this screen — not merely "a clip is
+    /// queued". This is the flag the house lights watch, so it has to mean "there is a picture
+    /// on the wall right now": it goes true on the first segment and stays true across segment
+    /// boundaries and encoder stalls, so the room does not strobe between segments.
+    public bool IsRendering => _rendering && Alive;
+
+    /// The quad the picture is painted on, so a light can be placed relative to it.
+    public MeshInstance3D Surface => _mesh;
+
+    /// The decoder's current frame, or null when nothing is playing. Read by the house lights
+    /// to tint the screen bounce; nothing else should need it.
+    public Texture2D FrameTexture => Alive && _rendering ? _player.GetVideoTexture() : null;
 
     public void Stop()
     {

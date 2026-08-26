@@ -13,7 +13,8 @@ namespace SerikaSocial;
 /// shows what world they're in and how full the lobby is.
 ///
 /// Discord RPC uses the official IPC pipe (Unix domain socket on Linux/macOS, \\\.\pipe on Windows).
-/// Serika RPC uses the REST endpoint PUT /api/v1/users/@me/rich-presence on api.serika.chat.
+/// Serika RPC uses the REST endpoint POST /api/users/me/rich-presence on api.serika.chat,
+/// authenticated with the serika-accounts JWT (not the game API session token).
 ///
 /// Both are fire-and-forget: failures log a warning and the next heartbeat retries. The presence
 /// expires ~60s after the last push on Serika's side, so we re-push every 30s while active.
@@ -22,6 +23,7 @@ public static class RpcPresence
     // SerikaCord API is a separate service from the game API.
     private const string SerikaApiBaseUrl = "https://api.serika.chat";
     private static string _sessionToken;
+    private static string _accountsToken;
     private static string _worldName = "Home";
     private static int _playerCount = 1;
     private static int _maxPlayers = 16;
@@ -39,9 +41,10 @@ public static class RpcPresence
 
     /// Initialise with the game API URL (unused for Serika RPC — that hits api.serika.chat
     /// directly) and session token for Serika RPC.
-    public static void Init(string apiBaseUrl, string sessionToken)
+    public static void Init(string apiBaseUrl, string sessionToken, string accountsToken = null)
     {
         _sessionToken = sessionToken;
+        _accountsToken = accountsToken;
         _active = true;
 
         // Try Discord IPC connection (non-fatal if it fails — Discord may not be running).
@@ -128,7 +131,7 @@ public static class RpcPresence
         }
 
         // Serika — hits api.serika.chat, not the game API
-        if (!string.IsNullOrEmpty(_sessionToken))
+        if (!string.IsNullOrEmpty(_accountsToken))
         {
             _ = PushSerikaAsync(details, state);
         }
@@ -162,7 +165,7 @@ public static class RpcPresence
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json"),
             };
-            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _sessionToken);
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _accountsToken);
 
             var res = await Http.SendAsync(req);
             if (!res.IsSuccessStatusCode)

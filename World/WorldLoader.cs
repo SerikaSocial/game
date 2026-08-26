@@ -200,7 +200,13 @@ public static class WorldLoader
         SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
 
         // Swap authoring markers for the live nodes they stand for (mirrors, seats, video).
-        var spawnMarker = ResolveMarkers(instance);
+        var spawnMarker = ResolveMarkers(instance, out int videoScreens);
+
+        // A theatre with a screen in it gets house lights: the room drops when a clip starts and
+        // the picture becomes the only thing lighting it. Gated on the `dark` mode, so a video
+        // screen in a daylit world does not put out the sun when someone queues a clip.
+        if (lighting == "dark" && videoScreens > 0)
+            (instance as Node3D)?.AddChild(new HouseLights { Name = "HouseLights" });
 
         // Baked model worlds ship no lights of their own, so avatars (lit at runtime, not
         // baked) would be black. Add a ceiling grid of fill lights sized to the geometry.
@@ -244,6 +250,9 @@ public static class WorldLoader
         // this pass runs unconditionally — it used to sit inside the rescale loop below, which
         // meant any world whose lights were already correctly scaled silently kept its
         // shadowless, flat-falloff lights.
+        // Reach first: it reads the *imported* energy, which is still in glTF candela at this
+        // point. Rescaling below destroys that.
+        foreach (var l in lights) ClampLightReach(l);
         foreach (var l in lights) ConfigureLightQuality(l);
 
         float maxE = 0f;
@@ -262,6 +271,46 @@ public static class WorldLoader
                 l.LightEnergy = Mathf.Min(l.LightEnergy, TargetMax);
         }
         GD.Print($"WorldLoader: rescaled {lights.Count} world lights (max {maxE:0} → {TargetMax})");
+    }
+
+    /// Give an imported point/spot light a finite reach.
+    ///
+    /// This is the single biggest reason cloud worlds came out washed out. glTF has no required
+    /// `range` on a punctual light and Blender's exporter writes none, so Godot imports every
+    /// one of them at its default **4096 m**. Godot's falloff is
+    /// `pow(1 - distance / range, attenuation)` — at a range of 4096 that term is 0.998 across a
+    /// 16 x 24 m room, i.e. no falloff at all. The Cinema's nine lamps were therefore each
+    /// lighting every surface in the building at essentially full strength: a flat ~10x
+    /// over-exposure with no pools of light, no gradients, and everything pushed past the glow
+    /// threshold so the whole room hazed over. It read as "the world is too bright" but the
+    /// energies were fine — only the distances were wrong.
+    ///
+    /// glTF point/spot intensity is in candela, which falls off as inverse-square, so the
+    /// distance at which a lamp stops mattering is `sqrt(intensity / cutoff)`. That puts a 5163 cd
+    /// sconce at ~10 m and the 7609 cd screen bounce at ~12 m — believable for a room this size,
+    /// and derived from what the author actually wrote rather than a magic number per world.
+    ///
+    /// Only applied when the range is still the importer's default: an author who set a range
+    /// meant it, and every C# fallback builder sets its own.
+    private static void ClampLightReach(Light3D l)
+    {
+        const float ImporterDefaultRange = 4096f; // Godot's default when glTF omits `range`
+        const float CutoffCandela = 50f;          // below this a lamp contributes nothing visible
+        const float MinRange = 4f, MaxRange = 40f;
+
+        float energy = l.LightEnergy;
+        float reach = Mathf.Clamp(Mathf.Sqrt(Mathf.Max(energy, 1f) / CutoffCandela), MinRange, MaxRange);
+
+        if (l is OmniLight3D omni)
+        {
+            if (omni.OmniRange < ImporterDefaultRange - 1f) return;
+            omni.OmniRange = reach;
+        }
+        else if (l is SpotLight3D spot)
+        {
+            if (spot.SpotRange < ImporterDefaultRange - 1f) return;
+            spot.SpotRange = reach;
+        }
     }
 
     /// Make a world's own lights behave like lights rather than decals.
@@ -391,8 +440,10 @@ public static class WorldLoader
     private const string MarkerVideo  = "SERIKA_VIDEO";
 
     /// Replace every marker node with the live node it stands for. Returns the SPAWN
-    /// marker's position when the world declares one.
-    private static Vector3? ResolveMarkers(Node worldRoot)
+    /// marker's position when the world declares one, and how many video screens it built —
+    /// the screens are not in the scene tree yet at this point, so the caller cannot count
+    /// them by group.
+    private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens)
     {
         Vector3? spawn = null;
         int mirrors = 0, seats = 0, videos = 0;
@@ -466,6 +517,7 @@ public static class WorldLoader
         if (mirrors + seats + videos > 0)
             GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), {videos} video screen(s)");
 
+        videoScreens = videos;
         return spawn;
     }
 
@@ -628,9 +680,15 @@ public static class WorldLoader
         if (UI.DeviceProfile.BloomEnabled && mode != "baked" && !env.GlowEnabled)
         {
             env.GlowEnabled = true;
-            env.GlowIntensity = mode == "dark" ? 0.9f : 0.45f;
+            env.GlowIntensity = mode == "dark" ? 0.7f : 0.45f;
             env.GlowStrength = 1.1f;
-            env.GlowBloom = mode == "dark" ? 0.25f : 0.12f;
+            // `GlowBloom` is a *threshold-independent* lift: it blooms the entire image by that
+            // fraction, dark pixels included. The threshold below is the knob that says "only
+            // bright things glow"; adding bloom on top quietly undoes it, and a dark room with a
+            // few very hot emissive strips is where that shows worst — the Cinema's aisle lights
+            // and cove strips smeared a haze over every seat in the house. Keep it at zero for
+            // dark interiors and barely on elsewhere.
+            env.GlowBloom = mode == "dark" ? 0.0f : 0.05f;
             // Only genuinely bright things bloom. Below ~1.0 the whole image hazes over.
             env.GlowHdrThreshold = 1.0f;
             env.GlowHdrScale = 2.0f;

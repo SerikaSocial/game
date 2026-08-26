@@ -17,6 +17,7 @@ public sealed class ApiClient
     private readonly string _baseUrl;
     public string BaseUrl => _baseUrl;
     public string SessionToken { get; private set; }
+    public string AccountsToken { get; private set; }
 
     public ApiClient(string baseUrl) => _baseUrl = baseUrl.TrimEnd('/');
 
@@ -47,6 +48,8 @@ public sealed class ApiClient
         if (!res.IsSuccessStatusCode)
             throw new InvalidOperationException(json.TryGetProperty("error", out var e) ? e.GetString() : "exchange_failed");
         SessionToken = json.GetProperty("session_token").GetString();
+        if (json.TryGetProperty("accounts_token", out var at))
+            AccountsToken = at.GetString();
         return json.GetProperty("user");
     }
 
@@ -60,6 +63,8 @@ public sealed class ApiClient
         if (!res.IsSuccessStatusCode)
             throw new InvalidOperationException(json.TryGetProperty("error", out var e) ? e.GetString() : "login_failed");
         SessionToken = json.GetProperty("session_token").GetString();
+        if (json.TryGetProperty("accounts_token", out var at))
+            AccountsToken = at.GetString();
         return json.GetProperty("user");
     }
 
