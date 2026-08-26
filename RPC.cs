@@ -23,7 +23,7 @@ public static class RpcPresence
     private static string _worldName = "Home";
     private static int _playerCount = 1;
     private static int _maxPlayers = 16;
-    private static string _applicationId = "serika-social-game";
+    private static string _applicationId = "93fdd8eb-b425-4799-aaef-b745671d4153";
     private static double _lastPush;
     private static double _pushInterval = 30.0;
     private static bool _active;
@@ -32,7 +32,7 @@ public static class RpcPresence
     private static readonly System.Net.Http.HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
     // Discord IPC
-    private const string DiscordClientId = "1390123456789012345"; // placeholder — replace with real app ID
+    private const string DiscordClientId = "1542129033683279955";
     private static DiscordIpc _discord;
 
     /// Initialise with the Serika API URL and session token for Serika RPC.
