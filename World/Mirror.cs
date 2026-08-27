@@ -195,6 +195,11 @@ public partial class Mirror : Node3D
         return _farMaterial;
     }
 
+    /// Whether this mirror is currently rendering a live reflection rather than dark glass.
+    /// Read by the mirror diagnostic to check the render budget actually caps a room full of
+    /// them; a world with eight mirrors must not be doing eight scene renders a frame.
+    public bool IsLive => _showingLive;
+
     private void SetLive(bool live)
     {
         if (_showingLive == live || _surface == null) return;

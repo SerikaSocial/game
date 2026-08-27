@@ -69,7 +69,9 @@ public static partial class MirrorDiagnostic
         public Camera3D Cam;
         public string OutPrefix;
         public int Frames, PoseIndex, PoseFrames;
-        public List<Node3D> Avatars = new();
+        public List<SerikaSocial.Avatar.AvatarInstance> Avatars = new();
+        /// Avatar world AABBs, refreshed each pose (the idle animation moves them).
+        public readonly List<(Vector3 min, Vector3 max)> AvatarBounds = new();
 
         // defect tallies over the whole sweep
         public readonly Dictionary<string, (int good, int bad)> PerMarker = new();
@@ -111,13 +113,18 @@ public static partial class MirrorDiagnostic
         // Godot rig's forward is −Z and the mirror is at +Z), because "what do I look like" is
         // the thing mirrors are actually for — and a reflected FACE is a far better read on
         // whether the optics are right than a reflected back.
+        // Both stand to the +X side of the room. Centred, they sat squarely on the sightlines
+        // from the virtual eye to the lower marker row and the occlusion skip quietly dropped
+        // those checks — 'yellow' went a whole sweep without ever being verified. Off to one
+        // side they still stand in front of the glass and still appear in every reflection,
+        // but the six probe columns stay visible.
         var av1 = SerikaSocial.Avatar.AvatarLibrary.InstantiateOrDefault(skaPath);
         root.AddChild(av1);
-        av1.GlobalPosition = new Vector3(-0.85f, 0f, 1.45f);
+        av1.GlobalPosition = new Vector3(0.55f, 0f, 0.85f);
         av1.GlobalRotation = new Vector3(0, Mathf.Pi, 0);
         var av2 = SerikaSocial.Avatar.AvatarLibrary.InstantiateBean();
         root.AddChild(av2);
-        av2.GlobalPosition = new Vector3(1.15f, 0f, 2.15f);
+        av2.GlobalPosition = new Vector3(1.90f, 0f, 2.35f);
         av2.GlobalRotation = new Vector3(0, Mathf.Pi, 0);
         st.Avatars.Add(av1);
         st.Avatars.Add(av2);
@@ -213,9 +220,12 @@ public static partial class MirrorDiagnostic
                 "red"     => new Vector3(-2.40f, 1.95f, BackWallZ + 0.35f),
                 "green"   => new Vector3( 0.00f, 1.95f, BackWallZ + 0.35f),
                 "blue"    => new Vector3( 2.40f, 1.95f, BackWallZ + 0.35f),
-                "yellow"  => new Vector3(-2.40f, 0.70f, BackWallZ + 0.35f),
-                "cyan"    => new Vector3( 0.00f, 0.70f, BackWallZ + 0.35f),
-                _         => new Vector3( 2.40f, 0.70f, BackWallZ + 0.35f), // magenta
+                // The outer columns cannot go wider than about ±2.4 m: from the dead-centre
+                // pose the reflection of a point at (x, ~-3.25) crosses the glass at 0.28x, so
+                // anything past ±2.49 m images outside the 1.4 m quad and can never be checked.
+                "yellow"  => new Vector3(-2.40f, 0.75f, BackWallZ + 0.35f),
+                "cyan"    => new Vector3( 0.00f, 0.55f, BackWallZ + 0.35f),
+                _         => new Vector3( 2.40f, 0.75f, BackWallZ + 0.35f), // magenta
             };
             st.Markers[name] = p;
             var ball = new MeshInstance3D
@@ -342,6 +352,50 @@ public static partial class MirrorDiagnostic
     /// deeper than that to count as a real blocker; shallower crossings fall inside the
     /// clipped-away hole and do not occlude.
     private static bool HostBlocked(Vector3 ePrime, Vector3 marker, PlaneInfo pl, Vector3 mirroredGaze, float near)
+        => BoxBlocked(ePrime, marker, pl.SlabMin, pl.SlabMax, mirroredGaze, near);
+
+    /// True when any avatar standing in the room blocks the mirrored eye's line to a marker.
+    ///
+    /// A reflected avatar occludes exactly like a real one, so an avatar between the virtual eye
+    /// and a marker is the reflection being CORRECT, not a defect — and with two rigs standing in
+    /// front of a 1.4 m quad it happens constantly. Bounds come from the rigs' own meshes each
+    /// pose rather than a guessed capsule, because the idle animation moves them.
+    private static bool AvatarBlocked(RunState st, Vector3 ePrime, Vector3 marker, Vector3 mirroredGaze, float near)
+    {
+        foreach (var (min, max) in st.AvatarBounds)
+            if (BoxBlocked(ePrime, marker, min, max, mirroredGaze, near)) return true;
+        return false;
+    }
+
+    /// World-space AABB of every visible mesh under `node`, or null when it has none.
+    private static (Vector3 min, Vector3 max)? WorldBounds(Node node)
+    {
+        Vector3 lo = Vector3.Inf, hi = -Vector3.Inf;
+        bool any = false;
+        var stack = new Stack<Node>();
+        stack.Push(node);
+        while (stack.Count > 0)
+        {
+            var n = stack.Pop();
+            foreach (Node c in n.GetChildren()) stack.Push(c);
+            if (n is not VisualInstance3D vi || !vi.IsVisibleInTree()) continue;
+            var aabb = vi.GlobalTransform * vi.GetAabb();
+            for (int corner = 0; corner < 8; corner++)
+            {
+                var p = aabb.GetEndpoint(corner);
+                lo = new Vector3(Mathf.Min(lo.X, p.X), Mathf.Min(lo.Y, p.Y), Mathf.Min(lo.Z, p.Z));
+                hi = new Vector3(Mathf.Max(hi.X, p.X), Mathf.Max(hi.Y, p.Y), Mathf.Max(hi.Z, p.Z));
+            }
+            any = true;
+        }
+        return any ? (lo, hi) : null;
+    }
+
+    /// Ray-vs-AABB along the segment virtual-eye → marker, with the same near-clip rule the
+    /// rendered reflection obeys: an occluder nearer than the clip plane along the mirrored gaze
+    /// has been clipped away and cannot block anything.
+    private static bool BoxBlocked(Vector3 ePrime, Vector3 marker, Vector3 boxMin, Vector3 boxMax,
+                                   Vector3 mirroredGaze, float near)
     {
         Vector3 d = marker - ePrime;
         float tEnter = float.NegativeInfinity, tExit = float.PositiveInfinity;
@@ -349,8 +403,8 @@ public static partial class MirrorDiagnostic
         {
             float da = a == 0 ? d.X : a == 1 ? d.Y : d.Z;
             float oa = a == 0 ? ePrime.X : a == 1 ? ePrime.Y : ePrime.Z;
-            float mn = a == 0 ? pl.SlabMin.X : a == 1 ? pl.SlabMin.Y : pl.SlabMin.Z;
-            float mx = a == 0 ? pl.SlabMax.X : a == 1 ? pl.SlabMax.Y : pl.SlabMax.Z;
+            float mn = a == 0 ? boxMin.X : a == 1 ? boxMin.Y : boxMin.Z;
+            float mx = a == 0 ? boxMax.X : a == 1 ? boxMax.Y : boxMax.Z;
             if (Mathf.Abs(da) < 1e-6f)
             {
                 if (oa < mn || oa > mx) return false; // parallel and outside the slab
@@ -404,6 +458,10 @@ public static partial class MirrorDiagnostic
         public override void _Process(double delta)
         {
             _st.Frames++;
+            // Hold a natural idle. Left un-animated the rigs sit in their bind T-pose, which is
+            // both an unrealistic thing to photograph a mirror with and nearly two metres wide —
+            // arms spread across the reflection and ate the marker checks behind them.
+            foreach (var av in _st.Avatars) av.Animate(delta, 0f, true);
             if (_st.Frames < WarmupFrames) return;
 
             if (_st.PoseIndex >= _st.Poses.Count)
@@ -444,6 +502,12 @@ public static partial class MirrorDiagnostic
             var (phi, r, h) = pose;
             string tag = $"phi{phi:+0;-0;0}_r{r:0.0}_h{h:0.0}";
             var eye = _st.Cam.GlobalPosition;
+
+            // Refresh the avatar occluders for THIS frame's pose — the idle animation moves the
+            // rigs, so a bound captured once at startup would drift out of register.
+            _st.AvatarBounds.Clear();
+            foreach (var av in _st.Avatars)
+                if (WorldBounds(av) is { } b2) _st.AvatarBounds.Add(b2);
 
             // One-shot deep trace of the first pose: prints the whole optical chain for the
             // yellow marker (bounce point, both projections) so mapping mismatches are
@@ -538,6 +602,7 @@ public static partial class MirrorDiagnostic
                 foreach (var (name, mpos) in _st.Markers)
                 {
                     if (HostBlocked(ePrime, mpos, pl, gaze, nearPlane)) continue;
+                    if (AvatarBlocked(_st, ePrime, mpos, gaze, nearPlane)) continue;
 
                     var bounce = BouncePoint(eye, mpos, pl);
                     if (bounce == null) continue;

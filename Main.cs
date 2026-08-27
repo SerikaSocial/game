@@ -194,6 +194,13 @@ public partial class Main : Node3D
                 args.GetValueOrDefault("wait", null));
             return;
         }
+        if (args.ContainsKey("serika-mirrorworld"))
+        {
+            World.MirrorWorldDiagnostic.Run(this, _worldRoot,
+                args.GetValueOrDefault("world", null), args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null), args.GetValueOrDefault("index", null));
+            return;
+        }
         if (args.ContainsKey("serika-mirrortest"))
         {
             World.MirrorDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
