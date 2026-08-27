@@ -63,7 +63,7 @@ static class Program
         {
             FlowDirection = FlowDirection.LeftToRight,
             Dock = DockStyle.Fill,
-            Padding = new System.Drawing.Padding(20, 10, 20, 10),
+            Padding = new System.Windows.Forms.Padding(20, 10, 20, 10),
             BackColor = System.Drawing.Color.FromArgb(14, 10, 26),
         };
 
