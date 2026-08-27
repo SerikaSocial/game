@@ -975,6 +975,40 @@ public partial class Main : Node3D
         catch (Exception e) { GD.PrintErr($"default outfit fetch failed: {e.Message}"); }
     }
 
+    /// How long the avatar fetch may hold the loading screen before the client gives up and gets
+    /// on with it. `ApiClient`'s own HttpClient timeout is 180 s, and this stage makes two calls
+    /// back to back — so a stalled connection could sit on "Loading your avatar…" for six minutes,
+    /// which is indistinguishable from a hang and is exactly how it gets reported.
+    private const double AvatarFetchTimeoutSeconds = 20;
+
+    /// Fetch the equipped avatar and the shared default outfit, but never let either hold the
+    /// loading screen indefinitely.
+    ///
+    /// Timing out is not the same as failing. The requests are left running rather than cancelled:
+    /// they write into `user://avatars`, so a slow download still populates the cache and is simply
+    /// picked up on the next launch. The player gets into Home now, wearing whatever already
+    /// resolved — a cached avatar, the default outfit, or the bean.
+    ///
+    /// The two fetches also run concurrently now rather than in sequence. They hit different
+    /// endpoints and neither reads the other's result.
+    private async Task LoadAvatarsWithTimeout()
+    {
+        var work = Task.WhenAll(FetchCurrentAvatar(), FetchDefaultOutfit());
+        var timeout = Task.Delay(TimeSpan.FromSeconds(AvatarFetchTimeoutSeconds));
+
+        if (await Task.WhenAny(work, timeout) == timeout)
+        {
+            GD.PrintErr($"avatar fetch still running after {AvatarFetchTimeoutSeconds}s — " +
+                        "entering Home without it; the download continues and will be cached");
+            return;
+        }
+
+        // Surface a faulted WhenAll rather than let it become an unobserved exception. Both
+        // fetches already swallow their own errors, so this only fires on something unexpected.
+        if (work.IsFaulted)
+            GD.PrintErr($"avatar fetch faulted: {work.Exception?.GetBaseException().Message}");
+    }
+
     /// Fetch the logged-in user's block list so blocked peers show as beans in-world.
     private async Task FetchBlockList()
     {
@@ -1019,8 +1053,7 @@ public partial class Main : Node3D
 
             // Fetch the user's chosen avatar (or a default outfit) so uploaded avatars are worn.
             SetLoadingStatus("Loading your avatar…");
-            await FetchCurrentAvatar();
-            await FetchDefaultOutfit();
+            await LoadAvatarsWithTimeout();
             _ = FetchBlockList();
 
             await RouteAfterLogin();
@@ -1054,8 +1087,7 @@ public partial class Main : Node3D
             RpcPresence.UpdateState("Home", 1);
 
             SetLoadingStatus("Loading your avatar…");
-            await FetchCurrentAvatar();
-            await FetchDefaultOutfit();
+            await LoadAvatarsWithTimeout();
             _ = FetchBlockList();
 
             await RouteAfterLogin();
@@ -1167,8 +1199,7 @@ public partial class Main : Node3D
                 RpcPresence.UpdateState("Home", 1);
 
                 SetLoadingStatus("Loading your avatar…");
-                await FetchCurrentAvatar();
-                await FetchDefaultOutfit();
+                await LoadAvatarsWithTimeout();
                 _ = FetchBlockList();
 
                 await RouteAfterLogin();
@@ -1312,15 +1343,48 @@ public partial class Main : Node3D
     /// available, and where the player lands after login.
     private void EnterHome()
     {
-        _inHome = true;
-        _inWorld = false;
-        _currentWorldId = null;
-        TeardownRemotes();
-        _transport?.Disconnect();
-        _transport = null;
-        BuildHomeWorld();
-        if (_local == null) SpawnLocalPlayer();
-        MoveLocalTo(_homeInfo.Spawn);
+        // The whole body is guarded because this runs from a `CallDeferred`, which has no caller
+        // to catch anything: an exception here escaped into Godot's message loop and skipped
+        // `HideLoading()`, stranding the player on "Loading your avatar…" with no error and no way
+        // out. That is the single worst failure shape in the client — it looks like a hang, so it
+        // gets reported as "loading is broken" rather than as whatever actually threw.
+        //
+        // Spawning the rig is the risky part: it instantiates a user-supplied avatar. Everything
+        // after it is ordinary local setup.
+        try
+        {
+            _inHome = true;
+            _inWorld = false;
+            _currentWorldId = null;
+            TeardownRemotes();
+            _transport?.Disconnect();
+            _transport = null;
+            BuildHomeWorld();
+            if (_local == null) SpawnLocalPlayer();
+            MoveLocalTo(_homeInfo.Spawn);
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"EnterHome failed: {e}");
+            // Better a bean in Home than a frozen loading screen. If even that fails there is no
+            // playable state left, so say so on the loading screen instead of hiding it.
+            try
+            {
+                if (_local == null)
+                {
+                    _localAvatarPath = null;
+                    AvatarLibrary.CurrentDefaultPath = null;
+                    SpawnLocalPlayer();
+                }
+            }
+            catch (Exception inner)
+            {
+                GD.PrintErr($"EnterHome fallback also failed: {inner.Message}");
+                SetLoadingStatus("Something went wrong loading your avatar. Restart the app.");
+                return;
+            }
+        }
+
         _worldName = "Home";
         HideLoading();
 

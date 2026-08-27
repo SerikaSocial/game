@@ -55,17 +55,41 @@ public sealed partial class AvatarInstance : Node3D
         inst.Skeleton = FindSkeleton(model);
         if (inst.Skeleton != null) { inst.ResolveHumanoid(); inst.ResolveEyeOffset(); inst.ResolveHipHeight(); }
         else GD.PrintErr("avatar: no Skeleton3D found in imported scene");
-        inst.SetupAnimation();
+
+        // Everything below is an *enhancement* to an avatar that already exists and renders. Each
+        // stage is isolated so one unusual rig cannot cost the player their whole avatar — and,
+        // before `AvatarLibrary.Instantiate` grew a handler, could not cost them the session by
+        // escaping into `EnterHome` and leaving the loading screen up forever.
+        //
+        // These are the stages most likely to throw on real user content: the spring import reads
+        // author-supplied VRM extension JSON, the toggle setup walks arbitrary node trees, and
+        // BreastRig re-skins live vertex weights. A rig that trips one of them is usually still
+        // perfectly wearable without it.
+        Stage(inst, "animation", () => inst.SetupAnimation());
         // The glTF state is passed through so the avatar's own VRM spring rig can be read out of
         // it — the author's chains and, crucially, their collider ladder.
-        inst.SetupPhysBones(state);
-        inst.SetupToggles();
-
+        Stage(inst, "secondary physics", () => inst.SetupPhysBones(state));
+        Stage(inst, "toggles", () => inst.SetupToggles());
         // Cel-shade the flat PBR the VRM/PMX imported as. Done last so it sees the final mesh,
         // including any chest geometry BreastRig re-skinned.
-        ToonShading.ApplyToAvatar(model);
+        Stage(inst, "toon shading", () => ToonShading.ApplyToAvatar(model));
 
         return inst;
+    }
+
+    /// Run one optional post-import stage, logging and continuing if it throws.
+    ///
+    /// Named rather than anonymous so the log says which stage failed. "avatar failed to load" is
+    /// almost useless on a user-supplied rig; "avatar: 'secondary physics' stage failed" points
+    /// straight at `VrmSpringImport` and the author's `VRMC_springBone` data.
+    private static void Stage(AvatarInstance inst, string what, Action body)
+    {
+        try { body(); }
+        catch (Exception e)
+        {
+            GD.PrintErr($"avatar: '{what}' stage failed on '{inst.Meta?.Name ?? "?"}' " +
+                        $"({e.GetType().Name}: {e.Message}) — continuing without it");
+        }
     }
 
     /// Load a `.ska` from a Godot path (res:// bundled default, or user:// download).

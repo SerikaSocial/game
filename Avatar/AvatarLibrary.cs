@@ -40,11 +40,27 @@ public static class AvatarLibrary
     }
 
     /// Build an avatar from a path, or null on failure (caller falls back to the bean).
+    ///
+    /// The try/catch is the point. `FromBytes` returns null for the failures it anticipates, but
+    /// it also runs glTF scene generation, skeleton resolution, spring-bone import, re-skinning
+    /// and shader rebuilding — none of which is guarded, and any of which can throw on a rig that
+    /// is merely unusual rather than malformed. That exception used to escape all the way out of
+    /// `Main.EnterHome`, which runs from a `CallDeferred` and has no handler, so `HideLoading()`
+    /// never ran: the client sat on "Loading your avatar…" forever with no error on screen. A
+    /// broken avatar must cost you the avatar, not the session.
     public static AvatarInstance Instantiate(string path)
     {
         if (string.IsNullOrEmpty(path)) return null;
-        var bytes = LoadBytes(path);
-        return bytes == null ? null : AvatarInstance.FromBytes(bytes);
+        try
+        {
+            var bytes = LoadBytes(path);
+            return bytes == null ? null : AvatarInstance.FromBytes(bytes);
+        }
+        catch (System.Exception e)
+        {
+            GD.PrintErr($"AvatarLibrary: {path} threw while loading ({e.GetType().Name}: {e.Message})");
+            return null;
+        }
     }
 
     /// Build the procedural bean avatar — the offline / blocked-user fallback.
