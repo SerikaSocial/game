@@ -28,6 +28,13 @@ namespace SerikaSocial.Player;
 ///   JUMP   — holding the jump button must produce exactly one jump, not one per frame.
 ///   STICK  — stick locomotion must move the body.
 ///   WALL   — physically walking in the guardian must be stopped by world collision.
+///   ORIENT — hand-relative movement must follow the CONTROLLER's heading, not the head's.
+///   DASH   — the right stick must teleport in smooth mode, and must not do so while turning.
+///   GEST   — the gesture classifier must name each canonical hand shape, and must hold its last
+///            answer in the dead space between shapes rather than strobing.
+///   FINGER — applying a curl must actually fold the avatar's fingertip toward its palm.
+///   PANEL  — the UI panel (and so the laser) must be idle unless a real menu is on it. HUD
+///            chrome must not count, which is what pinned the panel and laser on permanently.
 public static partial class VrDiagnostic
 {
     // Far out of the way. The wall used to sit at z=-1.5, which put it directly in the path of
@@ -78,6 +85,7 @@ public static partial class VrDiagnostic
     {
         private readonly VrPlayer _vr;
         private readonly Node3D _cam, _left, _right;
+        private readonly XROrigin3D _playSpace;
         private readonly List<Phase> _phases = new();
         private int _index, _frames;
         private bool _ok = true;
@@ -90,6 +98,10 @@ public static partial class VrDiagnostic
         private Vector3 _stickStart;
         private int _takeoffs;
         private bool _airborne;
+
+        // Injected controller headings, in play-space local coordinates.
+        private float _leftYaw;    // yaws the left controller for the hand-relative movement check
+        private float _rightPitch; // tips the right controller down so the dash arc finds the floor
 
         private sealed class Phase
         {
@@ -106,6 +118,8 @@ public static partial class VrDiagnostic
             _cam = vr.HeadCamera;
             _left = vr.LeftHand;
             _right = vr.RightHand;
+            // The play space, so phases can start from a clean room offset — see Recentre.
+            _playSpace = _cam.GetParent<XROrigin3D>();
             // Run ahead of the rig each tick, so the injected headset pose and button state are
             // in place before VrPlayer reads them rather than a frame behind.
             ProcessPhysicsPriority = -100;
@@ -225,6 +239,228 @@ public static partial class VrDiagnostic
                              $"{(ok ? "ok" : "FAIL — room-scale walking passes through geometry")}");
                 },
                 _ => _head.Z -= 0.06f);
+
+            // ── ORIENT ───────────────────────────────────────────────────────────────
+            // Hand-relative movement: yaw the left controller 90° away from the head and walk
+            // forward. Travel must follow the controller, not the gaze.
+            //
+            // The check is angular rather than axis-based on purpose — asserting "travel is along
+            // -X" bakes in a sign that depends on Godot's basis conventions, and getting that
+            // wrong writes a test that passes on a bug. Comparing travel against the two candidate
+            // headings measures the thing the setting actually promises.
+            Add("orient-place", () =>
+            {
+                Recentre();
+                UI.DeviceProfile.Settings.VrMoveOrientation = UI.DeviceProfile.Settings.MoveOrientation.Hand;
+                _leftYaw = Mathf.Pi * 0.5f;
+                _stickStart = _vr.GlobalPosition;
+            }, 5);
+
+            Add("orient", () => VrTestInput.LeftStick = new Vector2(0, -0.8f), 60, () =>
+            {
+                VrTestInput.LeftStick = Vector2.Zero;
+                UI.DeviceProfile.Settings.VrMoveOrientation = UI.DeviceProfile.Settings.MoveOrientation.Head;
+
+                var travel = (_vr.GlobalPosition - _stickStart) with { Y = 0 };
+                var headFwd = (-_cam.GlobalTransform.Basis.Z with { Y = 0 }).Normalized();
+                var handFwd = (-_left.GlobalTransform.Basis.Z with { Y = 0 }).Normalized();
+
+                if (travel.Length() < 0.2f)
+                {
+                    _ok = false;
+                    GD.Print($"VRTEST ORIENT hand-relative walk travelled only {travel.Length():F2} m  " +
+                             "FAIL — no movement to measure a heading from");
+                }
+                else
+                {
+                    var dir = travel.Normalized();
+                    float toHand = Mathf.RadToDeg(Mathf.Acos(Mathf.Clamp(dir.Dot(handFwd), -1f, 1f)));
+                    float toHead = Mathf.RadToDeg(Mathf.Acos(Mathf.Clamp(dir.Dot(headFwd), -1f, 1f)));
+                    bool ok = toHand < 20f && toHead > 60f;
+                    _ok &= ok;
+                    GD.Print($"VRTEST ORIENT travelled {travel.Length():F2} m, {toHand:F1}° off the " +
+                             $"controller heading and {toHead:F1}° off the gaze  " +
+                             $"{(ok ? "ok — hand-relative movement follows the hand" : "FAIL — movement ignores the controller heading")}");
+                }
+                _leftYaw = 0f;
+            });
+
+            // ── DASH ─────────────────────────────────────────────────────────────────
+            // Right stick forward must blink the player across the room in smooth mode; a
+            // diagonal flick must turn instead, or every turn becomes an accidental teleport.
+            Add("dash-place", () =>
+            {
+                Recentre();
+                UI.DeviceProfile.Settings.VrLocomotion = UI.DeviceProfile.Settings.Locomotion.Smooth;
+                UI.DeviceProfile.Settings.VrDashTeleport = true;
+                // Aim the right controller down-forward so the arc lands on the floor ahead.
+                _rightPitch = -Mathf.Pi * 0.12f;
+                _stickStart = _vr.GlobalPosition;
+            }, 10);
+
+            // Hold forward to aim, then release: the teleport commits on release.
+            Add("dash-aim", () => VrTestInput.RightStick = new Vector2(0, -1f), 20);
+            Add("dash-fire", () => VrTestInput.RightStick = Vector2.Zero, 10, () =>
+            {
+                _dashTravel = ((_vr.GlobalPosition - _stickStart) with { Y = 0 }).Length();
+            });
+
+            Add("dash-turn-place", () =>
+            {
+                Recentre();
+                _stickStart = _vr.GlobalPosition;
+                _startYaw = _vr.GlobalRotation.Y;
+            }, 10);
+            // A diagonal: full forward AND full sideways. Turning owns this, so no teleport.
+            Add("dash-turn-aim", () => VrTestInput.RightStick = new Vector2(1f, -1f).Normalized(), 20);
+            Add("dash-turn-fire", () => VrTestInput.RightStick = Vector2.Zero, 10, () =>
+            {
+                float turnTravel = ((_vr.GlobalPosition - _stickStart) with { Y = 0 }).Length();
+                float turned = Mathf.RadToDeg(Mathf.Abs(Mathf.AngleDifference(_startYaw, _vr.GlobalRotation.Y)));
+                _rightPitch = 0f;
+
+                // The diagonal must TURN, and must not teleport. It is not checked against zero
+                // travel, because turning legitimately moves the body a little: `RotateAroundHead`
+                // pivots about the headset rather than the body origin (deliberately — pivoting
+                // about the origin swings the player through an arc that feels like a fairground
+                // ride), so the body swings around that pivot. What distinguishes the two is scale:
+                // a dash crosses metres, a turn's arc is a fraction of one.
+                bool ok = _dashTravel > 1f && turned > 20f && turnTravel < _dashTravel * 0.5f;
+                _ok &= ok;
+                GD.Print($"VRTEST DASH   forward flick → {_dashTravel:F2} m travelled; diagonal " +
+                         $"flick → turned {turned:F0}° and travelled {turnTravel:F2} m  " +
+                         $"{(ok ? "ok — dash fires forward only, diagonals turn instead" : "FAIL — dash either does not fire or fires while turning")}");
+            });
+
+            // ── GEST ─────────────────────────────────────────────────────────────────
+            Add("gesture", () => { }, 1, CheckGestures);
+
+            // ── FINGER ───────────────────────────────────────────────────────────────
+            Add("finger", () => { }, 1, CheckFingers);
+
+            // ── PANEL ────────────────────────────────────────────────────────────────
+            Add("panel-build", BuildPanel, 10);
+            Add("panel-idle", () => { }, 10, () => _panelIdle = _surface.HasInteractiveUi);
+            Add("panel-menu", () => _menuLayer.Visible = true, 10, () =>
+            {
+                bool panelMenu = _surface.HasInteractiveUi;
+                // With no OpenXR runtime the controllers report no tracking data, so the laser is
+                // suppressed by the tracking check regardless of the panel — only the negative
+                // case is observable headless. It is also the case that regressed.
+                bool laserIdle = !_vr.PointerVisible;
+
+                bool ok = !_panelIdle && panelMenu && laserIdle;
+                _ok &= ok;
+                GD.Print($"VRTEST PANEL  chrome-only → interactive={_panelIdle}, " +
+                         $"menu open → interactive={panelMenu}, laser while idle drawn={!laserIdle}  " +
+                         $"{(ok ? "ok — the panel and pointer track real menus only" : "FAIL — HUD chrome still counts as a menu")}");
+            });
+        }
+
+        private float _dashTravel;
+        private float _startYaw;
+        private bool _panelIdle;
+        private UI.VrUiSurface _surface;
+        private CanvasLayer _menuLayer;
+
+        /// A panel carrying one always-visible chrome layer and one menu layer that starts hidden.
+        /// This is the exact arrangement that used to pin the panel on: `InWorldHud` is visible for
+        /// the whole session, so "any visible layer" was always true.
+        private void BuildPanel()
+        {
+            _surface = new UI.VrUiSurface { Name = "TestSurface" };
+            AddChild(_surface);
+            _vr.UiSurface = _surface;
+
+            // Chrome now lives on the wrist, so it must NOT be mounted here. Mounting it is the
+            // regression; leaving the panel with only a hidden menu is the fixed state.
+            _menuLayer = new CanvasLayer { Name = "TestMenu", Visible = false };
+            _surface.Viewport.AddChild(_menuLayer);
+        }
+
+        private void CheckGestures()
+        {
+            // curl order: thumb, index, middle, ring, little
+            var cases = new (string name, float[] curl, HandGesture want)[]
+            {
+                ("fist",      new[] { 1f, 1f, 1f, 1f, 1f }, HandGesture.Fist),
+                ("open",      new[] { 0f, 0f, 0f, 0f, 0f }, HandGesture.Open),
+                ("point",     new[] { 1f, 0f, 1f, 1f, 1f }, HandGesture.Point),
+                ("thumbsup",  new[] { 0f, 1f, 1f, 1f, 1f }, HandGesture.ThumbsUp),
+                ("peace",     new[] { 1f, 0f, 0f, 1f, 1f }, HandGesture.Peace),
+                ("gun",       new[] { 0f, 0f, 1f, 1f, 1f }, HandGesture.Gun),
+                ("rock",      new[] { 1f, 0f, 1f, 1f, 0f }, HandGesture.RockNRoll),
+            };
+
+            bool ok = true;
+            foreach (var (name, curl, want) in cases)
+            {
+                var got = HandGestures.Classify(curl);
+                if (got == want) continue;
+                ok = false;
+                GD.Print($"VRTEST GEST   {name}: expected {want}, got {got}  FAIL");
+            }
+
+            // Dead space: everything at half curl matches no shape, so the previous gesture must
+            // survive. Without this the gesture strobes as a finger drifts across a threshold.
+            var ambiguous = new[] { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+            var held = HandGestures.Classify(ambiguous, HandGesture.Peace);
+            if (held != HandGesture.Peace)
+            {
+                ok = false;
+                GD.Print($"VRTEST GEST   dead space: expected the previous gesture (Peace), got {held}  FAIL");
+            }
+
+            _ok &= ok;
+            GD.Print($"VRTEST GEST   {cases.Length} canonical shapes + dead-space hold  " +
+                     $"{(ok ? "ok" : "FAIL")}");
+        }
+
+        private void CheckFingers()
+        {
+            var avatar = _vr.Avatar;
+            var skel = avatar?.Skeleton;
+            var poser = new HandPoser(avatar, left: true);
+
+            if (skel == null || !poser.Valid)
+            {
+                // Not a failure: the procedural bean genuinely has no finger bones. It IS worth
+                // saying out loud, because a silent skip here reads exactly like a pass.
+                GD.Print("VRTEST FINGER avatar has no finger bones — SKIPPED " +
+                         "(pass a real --ska to exercise this)");
+                return;
+            }
+
+            int wrist = avatar.BoneOf("leftHand");
+            int tip = avatar.BoneOf("leftIndexDistal");
+            if (wrist < 0 || tip < 0)
+            {
+                GD.Print("VRTEST FINGER rig has knuckles but no leftHand/leftIndexDistal — SKIPPED");
+                return;
+            }
+
+            float Reach()
+            {
+                skel.ForceUpdateBoneChildTransform(tip);
+                return skel.GetBoneGlobalPose(wrist).Origin.DistanceTo(skel.GetBoneGlobalPose(tip).Origin);
+            }
+
+            poser.Apply(new[] { 0f, 0f, 0f, 0f, 0f });
+            float straight = Reach();
+            poser.Apply(new[] { 1f, 1f, 1f, 1f, 1f });
+            float curled = Reach();
+
+            // A curled index fingertip sits markedly closer to the wrist than an extended one.
+            // 15% is well under a real fist (~45%) but far outside numerical noise, so it fails
+            // loudly on a wrong-axis bend (which splays sideways and barely changes the distance).
+            float shrink = straight > 1e-5f ? 1f - curled / straight : 0f;
+            bool ok = shrink > 0.15f;
+            _ok &= ok;
+            GD.Print($"VRTEST FINGER index tip → wrist: straight {straight * 100f:F1} cm, " +
+                     $"curled {curled * 100f:F1} cm ({shrink:P0} closer)  " +
+                     $"{(ok ? "ok — fingers fold toward the palm" : "FAIL — curl axis is wrong; fingers are not flexing")}");
+
+            poser.Apply(new[] { 0f, 0f, 0f, 0f, 0f });
         }
 
         public override void _PhysicsProcess(double delta)
@@ -248,6 +484,10 @@ public static partial class VrDiagnostic
             // degenerate one — a broken chain would print noise into every other check.
             _left.Position = _head + new Vector3(-0.25f, -0.45f, -0.15f);
             _right.Position = _head + new Vector3(0.25f, -0.45f, -0.15f);
+            // Controller headings. Hand-relative movement and the teleport arc both read these,
+            // so they are posed here alongside the positions rather than nudged inside a phase.
+            _left.Rotation = new Vector3(0, _leftYaw, 0);
+            _right.Rotation = new Vector3(_rightPitch, 0, 0);
 
             _frames++;
             if (_frames >= phase.Frames)
@@ -265,6 +505,25 @@ public static partial class VrDiagnostic
         {
             _vr.GlobalPosition = new Vector3(0, 0.05f, 0);
             _vr.Velocity = Vector3.Zero;
+            // Put the injected headset back over the body's origin as well.
+            //
+            // The WALL phase walks `_head` 2.4 m forward inside the play space and leaves it
+            // there. `SyncBodyToHead` carries that offset onto the body every frame, so any later
+            // phase that only reset the body was measuring a rig sprinting 2.4 m per tick along
+            // the gaze axis — which swamped the thing being measured and, worse, pointed the
+            // travel down the head's heading, so a hand-relative movement check "failed" for a
+            // reason that had nothing to do with hand-relative movement.
+            _head = new Vector3(0, 1.62f, 0);
+
+            // ...and put the play space back over the body too.
+            //
+            // `SyncBodyToHead` cancels whatever the body actually travelled out of the origin, so
+            // the origin accumulates the player's standing offset within their room. Left over
+            // from the WALL phase that is ~0.7 m, and since `RotateAroundHead` pivots about the
+            // headset, a snap turn then swings the body around a 0.7 m radius — 0.67 m of travel
+            // that has nothing to do with the locomotion being measured. Y is preserved: it
+            // carries the height calibration, not the room offset.
+            if (_playSpace != null) _playSpace.Position = _playSpace.Position with { X = 0, Z = 0 };
         }
 
         private static float Planar(Vector3 v) => new Vector2(v.X, v.Z).Length();

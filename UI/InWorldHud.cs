@@ -28,12 +28,21 @@ public partial class InWorldHud : CanvasLayer
 
         // Mic indicator, bottom-left. Dim when muted, lit when the mic is on, and it pulses
         // with your voice level while you're actually speaking.
-        _mic = new MicIndicator
+        //
+        // Desktop only. In VR this HUD is a 15 cm panel on the player's wrist, and a mic icon is
+        // exactly the kind of always-on ornament that does not survive the trip: it costs a third
+        // of the panel to say something the player already knows, and while it lived on the main
+        // menu panel it was single-handedly keeping that panel — and its laser pointer — switched
+        // on for the entire session. Mute state is in the pause hub, next to the mute control.
+        if (!UI.VrUiSurface.Active)
         {
-            AnchorLeft = 0, AnchorTop = 1, AnchorRight = 0, AnchorBottom = 1,
-            OffsetLeft = 20, OffsetTop = -60, OffsetRight = 64, OffsetBottom = -16,
-        };
-        AddChild(_mic);
+            _mic = new MicIndicator
+            {
+                AnchorLeft = 0, AnchorTop = 1, AnchorRight = 0, AnchorBottom = 1,
+                OffsetLeft = 20, OffsetTop = -60, OffsetRight = 64, OffsetBottom = -16,
+            };
+            AddChild(_mic);
+        }
 
         var container = new VBoxContainer
         {
@@ -120,10 +129,11 @@ public partial class InWorldHud : CanvasLayer
     }
 
     /// Set whether the mic is enabled (unmuted). Shown as a lit vs slashed mic bottom-left.
-    public void SetMicEnabled(bool enabled) => _mic.SetEnabled(enabled);
+    /// No-op in VR, where there is no mic icon — see `_Ready`.
+    public void SetMicEnabled(bool enabled) => _mic?.SetEnabled(enabled);
 
     /// Feed the live capture level (raw RMS ~0..1) so the icon pulses while you speak.
-    public void SetMicLevel(float rms) => _mic.SetLevel(rms);
+    public void SetMicLevel(float rms) => _mic?.SetLevel(rms);
 
     public override void _Process(double delta)
     {

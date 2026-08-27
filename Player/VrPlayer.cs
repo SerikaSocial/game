@@ -60,6 +60,36 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private readonly System.Collections.Generic.Dictionary<string, XRNode3D> _fbtNodes = new();
     private readonly string[] _fbtTrackerNames = { "hip", "left_foot", "right_foot" };
 
+    // ── Hands ────────────────────────────────────────────────────────────────────────
+    // Index 0 = left, 1 = right throughout, matching the grab arrays below.
+
+    /// Optical hand tracking, one per hand. Always polled; `Active` is only ever true when a
+    /// camera genuinely sees the hand (see `VrHandTracking`).
+    private readonly VrHandTracking[] _handTrack = { new(isLeft: true), new(isLeft: false) };
+
+    /// Per-finger curls, fed either from the tracked joints or synthesised from the controller's
+    /// trigger/grip. Allocated once — this is written every frame.
+    private readonly float[][] _curl = { new float[5], new float[5] };
+    private readonly HandGesture[] _gesture = { HandGesture.Neutral, HandGesture.Neutral };
+
+    /// Curls the avatar's own finger bones. Rebuilt with each avatar, null when the rig has no
+    /// finger bones to pose (the procedural bean, and plenty of real rigs).
+    private readonly HandPoser[] _poser = new HandPoser[2];
+
+    /// The controller "bean" meshes, kept so they can be hidden the moment the runtime starts
+    /// reporting real hands. Showing a floating capsule where the player can see their own bare
+    /// fingers is the single most immersion-breaking thing hand tracking can do.
+    private readonly Node3D[] _handVisual = new Node3D[2];
+
+    /// Which hand is currently driving the UI ray. Bare hands point with the index finger, so
+    /// whichever hand is actually tracked and raised should own the pointer rather than the
+    /// right hand always owning it.
+    private int _pointerHand = 1;
+
+    /// Pinch edge-detection for hand-tracked UI clicks, the bare-hands equivalent of the
+    /// trigger's Schmitt trigger in `VrUiPointer`.
+    private bool _pinchLatch;
+
     public float MouseSensitivity { get; set; } = 0.003f; // unused in VR; satisfies IPlayer
 
     /// Raised when the player presses the menu button, so `Main` can open the pause hub.
@@ -193,8 +223,13 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         _rightHand = new XRController3D { Name = "RightHand", Tracker = "right_hand", ShowWhenTracked = true };
         _origin.AddChild(_rightHand);
 
-        AddHandVisual(_leftHand, new Color(0.45f, 0.62f, 0.95f));
-        AddHandVisual(_rightHand, new Color(0.95f, 0.5f, 0.42f));
+        _handVisual[0] = AddHandVisual(_leftHand, new Color(0.45f, 0.62f, 0.95f));
+        _handVisual[1] = AddHandVisual(_rightHand, new Color(0.95f, 0.5f, 0.42f));
+
+        _jointMarkers[0] = BuildJointMarkers(new Color(0.45f, 0.62f, 0.95f));
+        _jointMarkers[1] = BuildJointMarkers(new Color(0.95f, 0.5f, 0.42f));
+        AddChild(_jointMarkers[0]);
+        AddChild(_jointMarkers[1]);
 
         _nameTag = new NameTag3D { Name = "NameTag", Position = new Vector3(0, 1.95f, 0) };
         AddChild(_nameTag);
@@ -212,12 +247,19 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
 
     /// Controller hand visual: a capsule oriented along the controller's grip axis, so it
     /// rotates with the controller instead of floating as an axis-aligned box.
-    private void AddHandVisual(Node3D parent, Color color)
+    ///
+    /// Returns a wrapper node holding both parts, so the whole visual can be hidden in one call
+    /// when optical hand tracking takes over.
+    private Node3D AddHandVisual(Node3D parent, Color color)
     {
+        var group = new Node3D { Name = "HandVisual" };
+        parent.AddChild(group);
+        parent = group;
+
         // Capsule along Z (the grip/aim axis) looks like a stylised controller body.
         var mesh = new MeshInstance3D
         {
-            Name = "HandVisual",
+            Name = "HandBody",
             Mesh = new CapsuleMesh { Height = 0.10f, Radius = 0.022f },
             // Rotate the capsule to lie along the controller's Z axis (aim direction).
             Rotation = new Vector3(Mathf.DegToRad(90), 0, 0),
@@ -249,7 +291,40 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
             AlbedoColor = new Color(1, 1, 1, 0.6f),
         };
         parent.AddChild(tip);
+        return group;
     }
+
+    /// A procedural bare-hand visual: a small sphere on each tracked joint.
+    ///
+    /// This is deliberately not a hand *mesh*. The player's hands are their avatar's hands — the
+    /// arm IK already puts a fully modelled, correctly skinned hand at the wrist — so a second
+    /// rendered hand would be a duplicate hovering inside the first. These markers exist only
+    /// while an avatar has not loaded yet, and on the pre-login boot rig, where there is no
+    /// avatar hand to look at.
+    private static Node3D BuildJointMarkers(Color color)
+    {
+        var group = new Node3D { Name = "HandJoints" };
+        var mat = new StandardMaterial3D
+        {
+            AlbedoColor = color,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        };
+        for (int i = 0; i < JointMarkerCount; i++)
+        {
+            group.AddChild(new MeshInstance3D
+            {
+                Name = $"J{i}",
+                Mesh = new SphereMesh { Radius = 0.008f, Height = 0.016f },
+                CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+                MaterialOverride = mat,
+                TopLevel = true, // positioned in world space straight from the tracker
+                Visible = false,
+            });
+        }
+        return group;
+    }
+
+    private const int JointMarkerCount = 5; // the five fingertips — enough to read a hand shape
 
     /// Tunnelling vignette: a black quad parented to the camera whose centre aperture closes
     /// while you move. This is the single most effective motion-sickness mitigation in VR, so
@@ -380,6 +455,8 @@ void fragment() {
         _avatar?.QueueFree();
         _avatar = avatar;
         _ik = null;
+        _poser[0] = null;
+        _poser[1] = null;
 
         if (avatar == null)
         {
@@ -405,6 +482,16 @@ void fragment() {
             GD.Print("VR: avatar has no solvable arm chain — keeping procedural animation only");
             _ik = null;
         }
+
+        // Finger posing is independent of the arm IK: a rig can have perfectly good finger bones
+        // and no solvable arm chain, and gestures are worth having either way.
+        for (int i = 0; i < 2; i++)
+        {
+            var poser = new HandPoser(avatar, left: i == 0);
+            _poser[i] = poser.Valid ? poser : null;
+        }
+        if (_poser[0] == null && _poser[1] == null)
+            GD.Print("VR: avatar has no finger bones — hand gestures will not show on the avatar");
 
         HideOwnHead(avatar);
         ApplyHeightOffset();
@@ -510,6 +597,14 @@ void fragment() {
         else _avatar.PlayCustomEmote(clip);
     }
 
+    /// Whether the UI laser is currently drawn. Exposed for the headless diagnostic, which has no
+    /// other way to observe pointer gating.
+    public bool PointerVisible => _laser != null && _laser.Visible;
+
+    /// Re-read the height offset setting and move the play space. Called when the settings slider
+    /// changes, since `ApplyHeightOffset` otherwise only runs on avatar swaps and calibration.
+    public void ReapplyHeightOffset() => ApplyHeightOffset();
+
     /// Re-centre the play space so the player faces world-forward from where they stand.
     /// Bound to the secondary button held with the trigger — an accidental recenter mid-session
     /// is disorienting, so it deliberately needs two hands.
@@ -528,6 +623,7 @@ void fragment() {
 
         TryAutoCalibrate();
         UpdateFbtTrackers();
+        UpdateHands(dt);
 
         // The headset keeps tracking even while a menu is up; only *input* is suspended.
         UpdateHeadVelocity(dt);
@@ -635,17 +731,17 @@ void fragment() {
 
         var stick = ControlsEnabled ? StickOf(_leftHand, left: true) : Vector2.Zero;
 
-        if (UI.DeviceProfile.Settings.VrTeleport)
+        if (UI.DeviceProfile.Settings.VrLocomotion == UI.DeviceProfile.Settings.Locomotion.Teleport)
         {
             v.X = 0; v.Z = 0;
-            UpdateTeleport(stick);
+            UpdateTeleport(stick, _leftHand);
         }
         else
         {
             var move = ApplyDeadzone(stick);
             if (move != Vector2.Zero)
             {
-                var (fwd, right) = HeadBasis();
+                var (fwd, right) = MoveBasis();
                 float speed = IsSprinting(stick) ? SprintSpeed : WalkSpeed;
                 var dir = (fwd * -move.Y + right * move.X) * speed;
                 v.X = dir.X;
@@ -655,11 +751,106 @@ void fragment() {
             {
                 v.X = 0; v.Z = 0;
             }
+
+            // Dash: teleport stays reachable in smooth mode, aimed with the *right* hand so it
+            // never fights the left stick's walking. Pushing the right stick forward is otherwise
+            // an unused input — turning is on its X axis.
+            if (UI.DeviceProfile.Settings.VrDashTeleport)
+            {
+                var right = ControlsEnabled ? StickOf(_rightHand, left: false) : Vector2.Zero;
+                // Only the forward push arms the dash, and only when the stick is not being used
+                // to turn, so a diagonal flick turns rather than blinking you across the room.
+                var dashStick = Mathf.Abs(right.X) < TurnDeadzone ? right : Vector2.Zero;
+                UpdateTeleport(dashStick, _rightHand);
+            }
         }
+
+        // Bare hands have no stick to walk with and no button to teleport with, so without this a
+        // player who puts their controllers down is rooted to the spot. Point where you want to
+        // go, pinch to go there.
+        if (ControlsEnabled) UpdateBareHandTeleport();
 
         Velocity = v;
         MoveAndSlide();
         return new Vector2(Velocity.X, Velocity.Z).Length();
+    }
+
+    /// True while hand `i` is held in the aiming shape: index extended, the other three curled.
+    ///
+    /// Deliberately read off the curls rather than off `HandGesture`, because pinching to commit
+    /// moves the thumb and would reclassify the pose mid-aim (Point becomes Gun becomes something
+    /// else), cancelling the aim on the exact frame it is supposed to fire. The three fingers this
+    /// tests are the ones a pinch does not move.
+    private bool IsAimShape(int i)
+        => IsHandTracked(i)
+           && _curl[i][(int)HandPoser.Finger.Index] < 0.35f
+           && (_curl[i][(int)HandPoser.Finger.Middle]
+               + _curl[i][(int)HandPoser.Finger.Ring]
+               + _curl[i][(int)HandPoser.Finger.Little]) / 3f > 0.6f;
+
+    private bool _bareAiming;
+    private bool _barePinchLatch;
+
+    /// Bare-hands locomotion: hold the pointing shape to aim a teleport arc out of the index
+    /// fingertip, then pinch to commit.
+    ///
+    /// Suppressed entirely while a menu is up (the same pinch is the UI click) and while any
+    /// controller is driving — a player holding controllers gets the stick, not this.
+    private void UpdateBareHandTeleport()
+    {
+        if (UiSurface != null && UiSurface.HasInteractiveUi) { CancelBareAim(); return; }
+
+        int i = IsAimShape(1) ? 1 : IsAimShape(0) ? 0 : -1;
+        if (i < 0) { CancelBareAim(); return; }
+        if (!_handTrack[i].TryGetPointerRay(out var origin, out var dir)) { CancelBareAim(); return; }
+
+        _bareAiming = true;
+        _teleportAiming = true;
+        _teleportValid = TraceArc(origin, dir, out _teleportTarget);
+        DrawArc(origin, dir);
+
+        bool pinched = _handTrack[i].Pinch > 0.8f;
+        if (pinched && !_barePinchLatch && _teleportValid)
+        {
+            var camFlat = GlobalTransform.Basis * new Vector3(_camera.Position.X, 0, _camera.Position.Z);
+            GlobalPosition = _teleportTarget - camFlat;
+            Velocity = Vector3.Zero;
+            // Same reason as the controller teleport: several metres in one frame otherwise
+            // arrives with the avatar's hair and skirt streaming out behind it.
+            _avatar?.ResetPhysics();
+            CancelBareAim();
+        }
+        _barePinchLatch = pinched;
+    }
+
+    private void CancelBareAim()
+    {
+        if (!_bareAiming) return;
+        _bareAiming = false;
+        _teleportAiming = false;
+        _barePinchLatch = false;
+        _teleportArc.Visible = false;
+        _teleportPad.Visible = false;
+    }
+
+    /// The basis stick input is interpreted against, per the movement-orientation setting.
+    ///
+    /// Head-relative walks where you look. Hand-relative walks where the left controller points,
+    /// which decouples travel from gaze — you can circle something while watching it. Both are
+    /// flattened to the ground plane; without that, looking at your feet in head-relative mode
+    /// scales your walking speed down to nothing.
+    private (Vector3 fwd, Vector3 right) MoveBasis()
+    {
+        if (UI.DeviceProfile.Settings.VrMoveOrientation != UI.DeviceProfile.Settings.MoveOrientation.Hand)
+            return HeadBasis();
+
+        var b = _leftHand.GlobalTransform.Basis;
+        var fwd = -b.Z with { Y = 0 };
+        var right = b.X with { Y = 0 };
+        // Pointing the controller straight up or down leaves no horizontal heading at all, and
+        // normalising near-zero here would send the player off in a direction driven by noise.
+        if (fwd.LengthSquared() < 1e-4f || right.LengthSquared() < 1e-4f) return HeadBasis();
+        return (fwd.Normalized(), right.Normalized());
     }
 
     /// Sprint by pushing the stick to its rim, rather than by squeezing the left grip.
@@ -744,19 +935,36 @@ void fragment() {
     /// interferes with normal play.
     private void UpdatePointer()
     {
-        bool menuOpen = !ControlsEnabled;
-        bool tracked = _rightHand.GetHasTrackingData();
-        _laser.Visible = menuOpen && tracked;
-        if (!menuOpen || !tracked)
+        // The pointer exists to click menus, so it appears only when there is a menu — not merely
+        // whenever control is suspended, and emphatically not because some always-on HUD chrome
+        // happens to be drawn. See `VrUiSurface.HasInteractiveUi`.
+        bool menuOpen = UiSurface != null && UiSurface.HasInteractiveUi;
+
+        int i = _pointerHand;
+        var hand = i == 0 ? _leftHand : _rightHand;
+        bool bare = IsHandTracked(i);
+
+        // With bare hands the ray leaves the index fingertip; with a controller it leaves the
+        // controller's aim axis.
+        Vector3 origin, aim;
+        bool haveRay = bare
+            ? _handTrack[i].TryGetPointerRay(out origin, out aim)
+            : TryControllerRay(hand, out origin, out aim);
+
+        // The laser is a stand-in for a finger. When the player has an actual finger to point
+        // with, drawing a beam out of it is redundant clutter — the fingertip and the dot on the
+        // panel already say everything the beam would.
+        _laser.Visible = menuOpen && haveRay && !bare;
+        // The laser is parented to the right controller but the pointer can be either hand.
+        if (_laser.Visible && _laser.GetParent() != hand) Reparent(_laser, hand);
+
+        if (!menuOpen || !haveRay)
         {
             if (_laserDot != null) _laserDot.Visible = false;
             if (_pointerDown) ReleasePointer();
+            _pinchLatch = false;
             return;
         }
-        if (UiSurface == null) return;
-
-        var origin = _rightHand.GlobalPosition;
-        var aim = -_rightHand.GlobalTransform.Basis.Z;
 
         Vector2 screen = Vector2.Zero;
         bool hitPanel = UiSurface.RayHit(origin, aim, out var hit) && UiSurface.WorldToViewport(hit, out screen);
@@ -781,8 +989,24 @@ void fragment() {
             if (_laserDot != null) _laserDot.Visible = false;
         }
 
-        bool pressed = _rightHand.GetFloat(ActTrigger) > 0.6f;
-        if (pressed != _pointerDown)
+        // Click: a pinch with bare hands, the trigger with a controller. Both use a Schmitt
+        // trigger — a single threshold makes an analogue input held near it chatter press/release
+        // for several frames, which reads as a dead or double-firing button.
+        bool pressed;
+        if (bare)
+        {
+            float pinch = _handTrack[i].Pinch;
+            pressed = _pinchLatch ? pinch > 0.55f : pinch > 0.8f;
+            _pinchLatch = pressed;
+        }
+        else
+        {
+            pressed = _pointerDown ? hand.GetFloat(ActTrigger) > 0.4f : hand.GetFloat(ActTrigger) > 0.7f;
+        }
+
+        // A press only counts on the panel; a release always fires, so dragging off the panel can
+        // never latch a button down forever.
+        if (pressed != _pointerDown && (hitPanel || !pressed))
         {
             _pointerDown = pressed;
             UiSurface.Viewport.PushInput(new InputEventMouseButton
@@ -790,10 +1014,31 @@ void fragment() {
                 Position = hitPanel ? screen : _pointerPos,
                 GlobalPosition = hitPanel ? screen : _pointerPos,
                 ButtonIndex = MouseButton.Left,
+                ButtonMask = pressed ? MouseButtonMask.Left : 0,
                 Pressed = pressed,
             }, true);
-            if (pressed) Pulse(_rightHand, 0.3f, 0.02f);
+            if (pressed) Pulse(hand, 0.3f, 0.02f);
         }
+    }
+
+    /// A controller's aim ray, or false when the controller is not tracked — a stale pose points
+    /// somewhere arbitrary, and firing blind clicks at the panel from it is worse than no pointer.
+    private static bool TryControllerRay(XRController3D hand, out Vector3 origin, out Vector3 aim)
+    {
+        origin = default;
+        aim = default;
+        if (hand == null || !hand.GetHasTrackingData()) return false;
+        origin = hand.GlobalPosition;
+        aim = -hand.GlobalTransform.Basis.Z;
+        return true;
+    }
+
+    /// Move `node` under `parent`, preserving nothing — the laser's transform is entirely local
+    /// to whichever hand holds it.
+    private static void Reparent(Node3D node, Node parent)
+    {
+        node.GetParent()?.RemoveChild(node);
+        parent.AddChild(node);
     }
 
     /// Let go of a synthetic click when the menu closes mid-press, so the UI never latches on a
@@ -824,8 +1069,10 @@ void fragment() {
             Velocity = Velocity with { Y = JumpVelocity };
         _jumpLatch = jump;
 
-        // Menu — latch so a held button opens the menu once.
-        bool menu = _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu);
+        // Menu — latch so a held button opens the menu once. Bare hands have no buttons at all,
+        // so they get the wrist tap below instead.
+        bool menu = _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu)
+                    || WristTapped();
         if (menu && !_menuLatch) MenuPressed?.Invoke();
         _menuLatch = menu;
 
@@ -838,6 +1085,32 @@ void fragment() {
         if (recenter && !_recenterLatch) Recenter();
         _recenterLatch = recenter;
     }
+
+    /// The bare-hands menu gesture: touch one index fingertip to the other wrist and pinch.
+    ///
+    /// This is the one place a hand-tracking UI genuinely needs a convention, and it is worth
+    /// following the platform's: Meta puts a menu button on the wrist, so players already reach
+    /// there. It also has no orientation maths in it. A "palm facing your face" test — the obvious
+    /// alternative — needs a palm *normal*, and the sign of that normal flips between hands and
+    /// between runtime conventions, so getting it wrong silently means the gesture only works on
+    /// one hand. Touching a point is unambiguous.
+    ///
+    /// The wrist HUD is drawn at exactly this spot, so there is something visible to aim at.
+    private bool WristTapped()
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            int other = 1 - i;
+            if (!IsHandTracked(i) || !IsHandTracked(other)) continue;
+            if (_handTrack[i].Pinch < 0.8f) continue;
+            if (!_handTrack[i].TryGetJoint(XRHandTracker.HandJoint.IndexFingerTip, out var tip)) continue;
+            if (!_handTrack[other].TryGetWrist(out var wrist)) continue;
+            if (tip.Origin.DistanceTo(wrist.Origin) < WristTapRadius) return true;
+        }
+        return false;
+    }
+
+    private const float WristTapRadius = 0.07f;
 
     // ---------------------------------------------------------------- grabbing
 
@@ -852,7 +1125,15 @@ void fragment() {
 
     private void UpdateHand(int i, XRController3D hand, float dt)
     {
+        bool bare = IsHandTracked(i);
+
+        // Grab from the hand the player is actually using. With bare hands the grab point is the
+        // palm, not the wrist: closing your hand around something puts it in your palm, and
+        // grabbing from the wrist means reaching a hand's width past everything you aim at.
         var pos = hand.GlobalPosition;
+        if (bare && _handTrack[i].TryGetJoint(XRHandTracker.HandJoint.Palm, out var palm))
+            pos = palm.Origin;
+
         if (dt > 0f)
         {
             var raw = (pos - _lastHandPos[i]) / dt;
@@ -861,7 +1142,14 @@ void fragment() {
         }
         _lastHandPos[i] = pos;
 
-        bool gripped = GripOf(hand, left: i == 0) > 0.6f;
+        // Closing your hand is the grab, whichever input reports it. For bare hands that is the
+        // three fingers that actually wrap an object — the index is excluded because it is also
+        // the pointing/pinching finger, and including it would make every pinch a grab attempt.
+        bool gripped = bare
+            ? (_curl[i][(int)HandPoser.Finger.Middle]
+               + _curl[i][(int)HandPoser.Finger.Ring]
+               + _curl[i][(int)HandPoser.Finger.Little]) / 3f > 0.6f
+            : GripOf(hand, left: i == 0) > 0.6f;
 
         if (gripped && !_gripLatch[i])
         {
@@ -888,7 +1176,11 @@ void fragment() {
         // video screens. There is no three-way ambiguity with the UI pointer, because this whole
         // method only runs while `ControlsEnabled` is true and `UpdatePointer` only acts while it
         // is false — a menu being open already routes the trigger away from here.
-        bool trigger = hand.GetFloat(ActTrigger) > 0.6f;
+        // A pinch made while pointing is the teleport commit, not an interact — without this
+        // exclusion, blinking across the room also sits you on whatever chair you aimed past.
+        bool trigger = bare
+            ? !IsAimShape(i) && _handTrack[i].Pinch > 0.8f
+            : hand.GetFloat(ActTrigger) > 0.6f;
         if (trigger && !_triggerLatch[i])
         {
             // A held item claims the trigger first: while you are holding a marker pen, pulling
@@ -933,17 +1225,20 @@ void fragment() {
 
     // ---------------------------------------------------------------- teleport
 
-    /// Push the left stick forward to aim a ballistic arc; release to teleport to where it
-    /// lands. Only surfaces flat enough to stand on are accepted.
-    private void UpdateTeleport(Vector2 stick)
+    /// Push the stick forward to aim a ballistic arc; release to teleport to where it lands.
+    /// Only surfaces flat enough to stand on are accepted.
+    ///
+    /// `aimHand` is the hand the arc comes out of — the left in teleport mode, the right when
+    /// this is the dash available alongside smooth locomotion.
+    private void UpdateTeleport(Vector2 stick, XRController3D aimHand)
     {
         bool aiming = ControlsEnabled && stick.Y < -0.5f;
 
         if (aiming)
         {
             _teleportAiming = true;
-            var origin = _leftHand.GlobalPosition;
-            var dir = -_leftHand.GlobalTransform.Basis.Z;
+            var origin = aimHand.GlobalPosition;
+            var dir = -aimHand.GlobalTransform.Basis.Z;
             _teleportValid = TraceArc(origin, dir, out _teleportTarget);
             DrawArc(origin, dir);
         }
@@ -962,7 +1257,7 @@ void fragment() {
                 // Up to 12 m in one frame: without this the avatar arrives with its hair and
                 // skirt streaming out behind it, which in VR reads as a glitch, not as motion.
                 _avatar?.ResetPhysics();
-                Pulse(_leftHand, 0.6f, 0.08f);
+                Pulse(aimHand, 0.6f, 0.08f);
             }
         }
     }
@@ -1105,10 +1400,129 @@ void fragment() {
         if (_fbtNodes.TryGetValue("right_foot", out var rfNode) && rfNode.GetHasTrackingData())
             rightFootPos = rfNode.GlobalPosition;
 
+        // Bare hands put the wrist where the camera sees it; controllers put it where the
+        // controller is. The wrist rather than the palm, because that is what the humanoid
+        // `leftHand`/`rightHand` bone is — see `VrHandTracking.TryGetWrist`.
+        var leftTarget = _handTrack[0].Active && UI.DeviceProfile.Settings.VrHandTracking
+                         && _handTrack[0].TryGetWrist(out var lw)
+            ? lw.Origin : _leftHand.GlobalPosition;
+        var rightTarget = _handTrack[1].Active && UI.DeviceProfile.Settings.VrHandTracking
+                          && _handTrack[1].TryGetWrist(out var rw)
+            ? rw.Origin : _rightHand.GlobalPosition;
+
         // While a nod or shake is running the gesture owns the head bone; re-solving it from the
         // headset every frame would overwrite the gesture before anyone could see it.
-        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition,
+        _ik?.Solve(headTransform, leftTarget, rightTarget,
                    hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive);
+
+        // Fingers go on last, for the same reason `HeadAim` does: whatever writes a bone last
+        // wins, and the arm IK above rewrites the hand bone these hang off.
+        //
+        // Local only, for now. `HumanoidBones.Lod1` is the wire order and carries 22 body bones —
+        // no fingers — so a gesture is visible to its owner and in mirrors but does not reach
+        // peers. Widening the pose frame is a proto change, which is a breaking-change review.
+        if (UI.DeviceProfile.Settings.VrFingerPosing)
+        {
+            _poser[0]?.Apply(_curl[0]);
+            _poser[1]?.Apply(_curl[1]);
+        }
+    }
+
+    // ---------------------------------------------------------------- hands
+
+    /// True when the runtime is optically tracking hand `i` and the player has hand tracking on.
+    public bool IsHandTracked(int i)
+        => UI.DeviceProfile.Settings.VrHandTracking && i >= 0 && i < 2 && _handTrack[i].Active;
+
+    /// The gesture hand `i` is currently making. Exposed for the diagnostic and for `Main`, which
+    /// maps a couple of gestures onto emotes.
+    public HandGesture GetGesture(int i) => i >= 0 && i < 2 ? _gesture[i] : HandGesture.Neutral;
+
+    /// Raised when a hand settles into a new gesture. Carries (hand, gesture) with hand 0 = left.
+    public event System.Action<int, HandGesture> GestureChanged;
+
+    /// Poll both hands, derive curls and gestures, and swap the controller visual for bare hands.
+    ///
+    /// Runs whether or not `ControlsEnabled` is set: a gesture is a *pose*, not an action, and it
+    /// should keep reading correctly while a menu is open — otherwise your avatar's hands snap
+    /// flat the moment you open the pause hub, which every peer sees.
+    private void UpdateHands(double delta)
+    {
+        bool wantTracking = UI.DeviceProfile.Settings.VrHandTracking;
+        var originXform = _origin.GlobalTransform;
+
+        for (int i = 0; i < 2; i++)
+        {
+            var hand = i == 0 ? _leftHand : _rightHand;
+            var track = _handTrack[i];
+
+            if (wantTracking) track.Poll(delta, originXform);
+
+            bool bare = wantTracking && track.Active;
+
+            // The controller bean and the player's real hand are mutually exclusive.
+            if (_handVisual[i] != null) _handVisual[i].Visible = !bare;
+            if (_jointMarkers[i] != null)
+            {
+                // Markers only stand in for an avatar hand that does not exist yet.
+                bool wantMarkers = bare && _avatar == null;
+                _jointMarkers[i].Visible = wantMarkers;
+                if (wantMarkers) PlaceJointMarkers(i, track);
+            }
+
+            if (bare)
+            {
+                System.Array.Copy(track.Curl, _curl[i], _curl[i].Length);
+            }
+            else
+            {
+                // No optical hands: synthesise the curl from what the controller does have.
+                bool thumbDown = hand.IsButtonPressed(ActPrimaryBtn)
+                                 || hand.IsButtonPressed(ActSecondaryBtn)
+                                 || StickOf(hand, left: i == 0).LengthSquared() > 0.04f;
+                HandGestures.CurlsFromController(
+                    hand.GetFloat(ActTrigger), GripOf(hand, left: i == 0), thumbDown, _curl[i]);
+            }
+
+            var next = HandGestures.Classify(_curl[i], _gesture[i]);
+            if (next != _gesture[i])
+            {
+                _gesture[i] = next;
+                GestureChanged?.Invoke(i, next);
+            }
+        }
+
+        // Bare hands point with a finger, so the pointer follows whichever hand is tracked.
+        // Right wins a tie, matching where the laser lived before hand tracking existed.
+        if (IsHandTracked(1)) _pointerHand = 1;
+        else if (IsHandTracked(0)) _pointerHand = 0;
+        else _pointerHand = 1;
+    }
+
+    private readonly Node3D[] _jointMarkers = new Node3D[2];
+
+    private static readonly XRHandTracker.HandJoint[] MarkerJoints =
+    {
+        XRHandTracker.HandJoint.ThumbTip,
+        XRHandTracker.HandJoint.IndexFingerTip,
+        XRHandTracker.HandJoint.MiddleFingerTip,
+        XRHandTracker.HandJoint.RingFingerTip,
+        XRHandTracker.HandJoint.PinkyFingerTip,
+    };
+
+    private void PlaceJointMarkers(int i, VrHandTracking track)
+    {
+        var group = _jointMarkers[i];
+        for (int j = 0; j < MarkerJoints.Length && j < group.GetChildCount(); j++)
+        {
+            if (group.GetChild(j) is not MeshInstance3D m) continue;
+            if (track.TryGetJoint(MarkerJoints[j], out var xform))
+            {
+                m.Visible = true;
+                m.GlobalPosition = xform.Origin;
+            }
+            else m.Visible = false;
+        }
     }
 
     /// Dynamically discover and update Full Body Tracking (FBT) trackers.

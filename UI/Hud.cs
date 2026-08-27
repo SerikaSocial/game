@@ -25,7 +25,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.6.3";
+    public const string ClientVersion = "1.6.4";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -511,7 +511,7 @@ public partial class Hud : CanvasLayer
         _scrim.Visible = false;
         _loginScreen.Visible = false;
         _homePanel.Visible = false;
-        _homeButton.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _worldDetailPanel.Visible = false;
         SetSpinning(false);
     }
@@ -523,15 +523,22 @@ public partial class Hud : CanvasLayer
         Visible = true;
         _scrim.Visible = false;
         _loginScreen.Visible = false;
-        _homeButton.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _worldDetailPanel.Visible = false;
         _homeLabel.Text = $"Worlds — hi, {username}";
         _homePanel.Visible = true;
     }
 
     // A small button, top-left, to return to Home from a world.
+    //
+    // Desktop only. In VR it sat in the corner of the floating menu panel, which is not a screen
+    // corner — it is a slab in the middle of the room — so it read as a stray button hanging in
+    // space above whatever menu was open. Going home in VR is a pill in the pause hub
+    // (`QuickMenu`), reachable from the menu button, which is where every other world action is.
     private void BuildHomeButton()
     {
+        if (VrUiSurface.Active) return;
+
         _homeButton = new Button
         {
             Text = "⌂ Home",
@@ -564,7 +571,7 @@ public partial class Hud : CanvasLayer
         _retryButton.Visible = false;
         _quitButton.Visible = true;
         _homePanel.Visible = false;
-        _homeButton.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _worldDetailPanel.Visible = false;
         SetSpinning(false);
         _subtitle.Visible = true;
@@ -584,7 +591,7 @@ public partial class Hud : CanvasLayer
         _quitButton.Visible = false;
         _subtitle.Visible = false;
         _homePanel.Visible = false;
-        _homeButton.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _worldDetailPanel.Visible = false;
         SetSpinning(true);
         _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
@@ -614,7 +621,7 @@ public partial class Hud : CanvasLayer
         _scrim.Visible = false;
         _loginScreen.Visible = false;
         _homePanel.Visible = false;
-        _homeButton.Visible = true;
+        if (_homeButton != null) _homeButton.Visible = true;
         _worldDetailPanel.Visible = false;
         SetSpinning(false);
         if (!string.IsNullOrEmpty(toast))
@@ -632,7 +639,7 @@ public partial class Hud : CanvasLayer
         Visible = true;
         _scrim.Visible = false;
         _loginScreen.Visible = false;
-        _homeButton.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _worldDetailPanel.Visible = false;
         _homeLabel.Text = $"Welcome, {username}";
         _homePanel.Visible = true;

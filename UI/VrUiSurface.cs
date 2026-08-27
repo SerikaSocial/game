@@ -196,6 +196,16 @@ public partial class VrUiSurface : Node3D
         return mesh;
     }
 
+    /// True while a real, interactive menu is on the panel.
+    ///
+    /// This is the signal the controller pointers gate on, and the reason `Main` refuses to mount
+    /// HUD chrome here. The mic indicator and the world-name label are *always* visible in a
+    /// world, so as long as they lived on this panel it was never idle — which meant the panel
+    /// hung permanently in front of the player and a laser pointer was permanently lit, aimed at
+    /// a mic icon nobody can click. Chrome now goes to the wrist (`VrWristHud`), so "something is
+    /// visible on the panel" and "the player is in a menu" are finally the same statement.
+    public bool HasInteractiveUi { get; private set; }
+
     /// Stop rendering the panel while nothing is on it.
     ///
     /// `UpdateMode.Always` re-rendered a 1600×1000 target and composited a transparent quad every
@@ -205,9 +215,12 @@ public partial class VrUiSurface : Node3D
     {
         // Polled a few times a second rather than every frame: walking the child list allocates a
         // Godot Array and boxes each entry into a Variant, and this runs for the whole session.
+        // 20 Hz. This used to be 5 Hz, which was fine when it only decided whether to render the
+        // panel, but it now also gates the laser pointer — and a fifth of a second between
+        // opening a menu and being able to point at it reads as the click being dropped.
         _visibilityPoll -= delta;
         if (_visibilityPoll > 0) return;
-        _visibilityPoll = 0.2;
+        _visibilityPoll = 0.05;
 
         bool anyVisible = false;
         for (int i = 0, n = Viewport.GetChildCount(); i < n; i++)
@@ -216,6 +229,7 @@ public partial class VrUiSurface : Node3D
         }
 
         Panel.Visible = anyVisible;
+        HasInteractiveUi = anyVisible;
         Viewport.RenderTargetUpdateMode = anyVisible
             ? SubViewport.UpdateMode.Always
             : SubViewport.UpdateMode.Disabled;

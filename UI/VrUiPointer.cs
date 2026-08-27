@@ -81,9 +81,13 @@ public partial class VrUiPointer : Node3D
             return;
         }
 
+        // A pointer with nothing to point at is clutter. Before login the panel always has the
+        // login screen on it, so this is nearly always true here — but "nearly" is why it is
+        // checked: the panel goes idle between the login screen being dismissed and the player
+        // rig taking over, and a laser hanging in an empty room during that gap looks broken.
         // Without tracking the controller pose is stale, so the ray would point somewhere
         // arbitrary; hide the laser rather than fire blind clicks at the panel.
-        bool tracked = _hand.GetHasTrackingData();
+        bool tracked = _hand.GetHasTrackingData() && surface.HasInteractiveUi;
         _laser.Visible = tracked;
         if (!tracked)
         {

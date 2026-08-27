@@ -50,6 +50,7 @@ public partial class Main : Node3D
     // In VR every CanvasLayer is parented to this surface's SubViewport instead of to Main, so
     // the UI reaches the eye buffers via a world-space quad. Null in desktop/mobile mode.
     private UI.VrUiSurface _vrUi;
+    private UI.VrWristHud _vrWristHud;  // wrist-mounted chrome panel; built with the VR rig
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
     private readonly HashSet<string> _blockedUserIds = new();
     private readonly Dictionary<uint, string> _peerUserIds = new();
@@ -323,7 +324,11 @@ public partial class Main : Node3D
         };
 
         _interactPrompt = new UI.InteractionPrompt { Name = "InteractionPrompt" };
-        AddUi(_interactPrompt);
+        // In VR the interaction hint is drawn on the hand instead (`VrInteractLabel`, wired in
+        // SetupVrInteractors) — right next to the thing it is describing, rather than composited
+        // onto a panel somewhere else entirely. Mounting the flat prompt too would show the same
+        // hint twice, once in the wrong place.
+        if (!_vrMode) AddUi(_interactPrompt);
 
         _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
         AddUi(_videoQueuePanel);
@@ -343,7 +348,7 @@ public partial class Main : Node3D
         _settingsMenu.SettingChanged += OnSettingChanged;
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
-        AddUi(_inWorldHud);
+        AddUi(_inWorldHud, chrome: true);
 
         _chat = new ChatOverlay { Name = "ChatOverlay" };
         AddUi(_chat);
@@ -592,14 +597,68 @@ public partial class Main : Node3D
     /// SubViewport instead, because a `CanvasLayer` parented to the XR viewport draws into a 2D
     /// canvas that Godot never composites into the eye buffers — the reason the headset showed
     /// the world but no login screen or menus.
-    private void AddUi(CanvasLayer layer)
+    /// `chrome` marks a layer as a persistent readout rather than a menu — something that is
+    /// visible the whole time the player is in a world and that nobody clicks.
+    ///
+    /// The distinction only matters in VR, and it matters a great deal there. The menu panel's
+    /// "is anything visible on me" test is what decides whether the panel is drawn and whether a
+    /// laser pointer is lit, so an always-visible layer mounted on it pins both on forever — a
+    /// slab and a laser permanently in the player's face, aimed at a mic icon that cannot be
+    /// clicked. Chrome goes to the wrist instead; see `VrWristHud`.
+    private void AddUi(CanvasLayer layer, bool chrome = false)
     {
+        if (_vrMode && chrome)
+        {
+            // No wrist panel yet (it is built with the player rig) — park the layer until then.
+            if (_vrWristHud != null) _vrWristHud.Viewport.AddChild(layer);
+            else _pendingChrome.Add(layer);
+            return;
+        }
+
         if (_vrMode && _vrUi != null)
         {
             _vrUi.Viewport.AddChild(layer);
             GD.Print($"VR UI: mounted {layer.Name} on panel ({_vrUi.Viewport.GetChildCount()} layers)");
         }
         else AddChild(layer);
+    }
+
+    /// Chrome layers constructed before the wrist panel exists. Drained by `AttachWristHud`.
+    private readonly System.Collections.Generic.List<CanvasLayer> _pendingChrome = new();
+
+    /// Build the wrist panel on the VR rig's left controller and move the parked chrome onto it.
+    private void AttachWristHud(VrPlayer vr)
+    {
+        if (vr?.LeftHand == null) return;
+
+        _vrWristHud = new UI.VrWristHud { Name = "WristHud", HeadCamera = vr.HeadCamera };
+        vr.LeftHand.AddChild(_vrWristHud);
+
+        foreach (var layer in _pendingChrome)
+        {
+            layer.GetParent()?.RemoveChild(layer);
+            _vrWristHud.Viewport.AddChild(layer);
+        }
+        _pendingChrome.Clear();
+        GD.Print($"VR UI: wrist HUD live ({_vrWristHud.Viewport.GetChildCount()} chrome layers)");
+    }
+
+    /// Take the chrome layers back off the wrist panel and park them, so the panel can be freed
+    /// with the rig it is attached to without destroying them.
+    private void DetachWristHud()
+    {
+        if (_vrWristHud == null) return;
+
+        var viewport = _vrWristHud.Viewport;
+        for (int i = viewport.GetChildCount() - 1; i >= 0; i--)
+        {
+            if (viewport.GetChild(i) is not CanvasLayer layer) continue;
+            viewport.RemoveChild(layer);
+            _pendingChrome.Add(layer);
+        }
+
+        _vrWristHud.QueueFree();
+        _vrWristHud = null;
     }
 
     /// Give the XR viewport a camera before the player rig exists.
@@ -729,6 +788,12 @@ public partial class Main : Node3D
         // kept simulating and rendering, so you'd literally see yourself in the lobby.
         if (_localNode != null)
         {
+            // The wrist panel hangs off the VR rig's left controller, so freeing the rig frees it
+            // — and it would take the chrome layers parented into its viewport with it. Those are
+            // long-lived singletons (`_inWorldHud` is held in a field and used from a dozen call
+            // sites), so they have to be rescued before the rig goes, or joining a world silently
+            // disposes the HUD and every later call lands on a freed object.
+            DetachWristHud();
             _localNode.QueueFree();
             _localNode = null;
             _local = null;
@@ -782,6 +847,9 @@ public partial class Main : Node3D
             // The hint has to live on the hand: a CanvasLayer prompt is composited onto the menu
             // panel in VR, nowhere near the thing being described.
             SetupVrInteractors(vr);
+
+            // The in-world HUD lives on the wrist in VR, not on the menu panel — see AddUi.
+            AttachWristHud(vr);
 
             // Parity with desktop: name tag prefs and profile picture apply to the VR rig too.
             _ = ApplyLocalIdentity();
@@ -1989,6 +2057,12 @@ public partial class Main : Node3D
         {
             case "sensitivity":
                 if (_local != null) _local.MouseSensitivity = UI.DeviceProfile.Settings.MouseSensitivity;
+                break;
+            case "vr_height":
+                // Height is the one VR setting that must be pushed rather than polled: the play
+                // space offset is written once when it changes, so a slider that only updated the
+                // stored value would appear to do nothing until the next avatar swap.
+                _localVr?.ReapplyHeightOffset();
                 break;
             case "name_tags":
             case "pfp":

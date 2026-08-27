@@ -21,7 +21,9 @@ public partial class SettingsMenu : CanvasLayer
     private ColorRect _scrim;
     private PanelContainer _card;
     private VBoxContainer _graphics, _audio, _controls, _iface;
-    private Button _tabG, _tabA, _tabC, _tabI;
+    // The VR tab and its section are null outside a headset — see the guard in _Ready.
+    private VBoxContainer _vr;
+    private Button _tabG, _tabA, _tabC, _tabI, _tabV;
 
     public override void _Ready()
     {
@@ -65,6 +67,13 @@ public partial class SettingsMenu : CanvasLayer
         _tabC = Tab(Icons.Kind.Gamepad, "Controls", () => Switch(2));
         _tabI = Tab(Icons.Kind.Image, "Interface", () => Switch(3));
         tabs.AddChild(_tabG); tabs.AddChild(_tabA); tabs.AddChild(_tabC); tabs.AddChild(_tabI);
+        // The VR tab only exists in a headset. On desktop every control on it is inert, and a tab
+        // of settings that cannot do anything is worse than no tab.
+        if (VrUiSurface.Active)
+        {
+            _tabV = Tab(Icons.Kind.Focus, "VR", () => Switch(4));
+            tabs.AddChild(_tabV);
+        }
         root.AddChild(tabs);
         root.AddChild(new HSeparator());
 
@@ -79,6 +88,7 @@ public partial class SettingsMenu : CanvasLayer
         _controls = BuildControls();
         _iface = BuildInterface();
         stack.AddChild(_graphics); stack.AddChild(_audio); stack.AddChild(_controls); stack.AddChild(_iface);
+        if (_tabV != null) { _vr = BuildVr(); stack.AddChild(_vr); }
 
         root.AddChild(new HSeparator());
         var footer = new HBoxContainer();
@@ -234,6 +244,120 @@ public partial class SettingsMenu : CanvasLayer
         return v;
     }
 
+    // ── VR tab ──────────────────────────────────────────────────────────────────────────
+    private OptionButton _vrLocoOpt, _vrOrientOpt, _vrTurnOpt;
+    private HSlider _vrSnapAngle; private Label _vrSnapAngleVal;
+    private HSlider _vrSmoothTurn; private Label _vrSmoothTurnVal;
+    private HSlider _vrVignetteAmt; private Label _vrVignetteAmtVal;
+    private HSlider _vrHeight; private Label _vrHeightVal;
+    private CheckButton _vrVignetteChk, _vrDashChk, _vrHandsChk, _vrFingersChk, _vrWristChk, _vrHapticsChk;
+
+    private VBoxContainer BuildVr()
+    {
+        var v = Section();
+
+        _vrLocoOpt = new OptionButton();
+        _vrLocoOpt.AddItem("Smooth"); _vrLocoOpt.AddItem("Teleport");
+        _vrLocoOpt.ItemSelected += i =>
+        {
+            DeviceProfile.Settings.VrLocomotion = (DeviceProfile.Settings.Locomotion)(int)i;
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Movement", _vrLocoOpt));
+
+        _vrOrientOpt = new OptionButton();
+        _vrOrientOpt.AddItem("Head (look to walk)"); _vrOrientOpt.AddItem("Hand (point to walk)");
+        _vrOrientOpt.ItemSelected += i =>
+        {
+            DeviceProfile.Settings.VrMoveOrientation = (DeviceProfile.Settings.MoveOrientation)(int)i;
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Movement direction", _vrOrientOpt));
+
+        _vrDashChk = new CheckButton();
+        _vrDashChk.Toggled += on => { DeviceProfile.Settings.VrDashTeleport = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Dash teleport (right stick)", _vrDashChk));
+
+        _vrTurnOpt = new OptionButton();
+        _vrTurnOpt.AddItem("Snap"); _vrTurnOpt.AddItem("Smooth");
+        _vrTurnOpt.ItemSelected += i => { DeviceProfile.Settings.VrSnapTurn = i == 0; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Turning", _vrTurnOpt));
+
+        _vrSnapAngle = new HSlider { MinValue = 15, MaxValue = 90, Step = 5, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _vrSnapAngleVal = ValLabel();
+        _vrSnapAngle.ValueChanged += x =>
+        {
+            DeviceProfile.Settings.VrSnapTurnAngle = (float)x;
+            _vrSnapAngleVal.Text = $"{(int)x}°";
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Snap turn angle", _vrSnapAngle, _vrSnapAngleVal));
+
+        _vrSmoothTurn = new HSlider { MinValue = 45, MaxValue = 240, Step = 5, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _vrSmoothTurnVal = ValLabel();
+        _vrSmoothTurn.ValueChanged += x =>
+        {
+            DeviceProfile.Settings.VrSmoothTurnSpeed = (float)x;
+            _vrSmoothTurnVal.Text = $"{(int)x}°/s";
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Smooth turn speed", _vrSmoothTurn, _vrSmoothTurnVal));
+
+        _vrVignetteChk = new CheckButton();
+        _vrVignetteChk.Toggled += on => { DeviceProfile.Settings.VrVignette = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Comfort vignette", _vrVignetteChk));
+
+        _vrVignetteAmt = new HSlider { MinValue = 0.2, MaxValue = 1.0, Step = 0.05, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _vrVignetteAmtVal = ValLabel();
+        _vrVignetteAmt.ValueChanged += x =>
+        {
+            DeviceProfile.Settings.VrVignetteStrength = (float)x;
+            _vrVignetteAmtVal.Text = $"{x:P0}";
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Vignette strength", _vrVignetteAmt, _vrVignetteAmtVal));
+
+        _vrHandsChk = new CheckButton();
+        _vrHandsChk.Toggled += on => { DeviceProfile.Settings.VrHandTracking = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Hand tracking", _vrHandsChk));
+
+        _vrFingersChk = new CheckButton();
+        _vrFingersChk.Toggled += on => { DeviceProfile.Settings.VrFingerPosing = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Avatar finger gestures", _vrFingersChk));
+
+        _vrWristChk = new CheckButton();
+        _vrWristChk.Toggled += on => { DeviceProfile.Settings.VrWristHud = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Wrist info panel", _vrWristChk));
+
+        _vrHapticsChk = new CheckButton();
+        _vrHapticsChk.Toggled += on => { DeviceProfile.Settings.VrHaptics = on; DeviceProfile.Settings.Save(); };
+        v.AddChild(Row("Haptics", _vrHapticsChk));
+
+        _vrHeight = new HSlider { MinValue = -0.5, MaxValue = 0.5, Step = 0.01, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _vrHeightVal = ValLabel();
+        _vrHeight.ValueChanged += x =>
+        {
+            DeviceProfile.Settings.VrHeightOffset = (float)x;
+            _vrHeightVal.Text = $"{x:+0.00;-0.00;0.00} m";
+            SettingChanged?.Invoke("vr_height");
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Height offset", _vrHeight, _vrHeightVal));
+
+        var hint = new Label
+        {
+            Text = "Controllers: left stick move · right stick turn · push right stick forward to dash\n" +
+                   "A/X jump · menu button opens this hub · grip to grab · trigger to interact\n" +
+                   "Hands: point and pinch to teleport · pinch to click · tap your other wrist for the menu",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        hint.AddThemeFontSizeOverride("font_size", 12);
+        hint.AddThemeColorOverride("font_color", Brand.TextDim);
+        v.AddChild(hint);
+
+        return v;
+    }
+
     // ── Open / close ────────────────────────────────────────────────────────────────────
     public bool IsOpen => _card.Visible;
 
@@ -286,6 +410,36 @@ public partial class SettingsMenu : CanvasLayer
         _thirdPerson.SetPressedNoSignal(DeviceProfile.Settings.StartThirdPerson);
         _nameTags.SetPressedNoSignal(DeviceProfile.Settings.NameTags);
         _pfp.SetPressedNoSignal(DeviceProfile.Settings.ProfilePictures);
+
+        RebuildVrValues();
+    }
+
+    /// The VR section only exists in a headset, so every control here may legitimately be null.
+    private void RebuildVrValues()
+    {
+        if (_vr == null) return;
+
+        _vrLocoOpt.Selected = (int)DeviceProfile.Settings.VrLocomotion;
+        _vrOrientOpt.Selected = (int)DeviceProfile.Settings.VrMoveOrientation;
+        _vrTurnOpt.Selected = DeviceProfile.Settings.VrSnapTurn ? 0 : 1;
+        _vrDashChk.SetPressedNoSignal(DeviceProfile.Settings.VrDashTeleport);
+
+        _vrSnapAngle.SetValueNoSignal(DeviceProfile.Settings.VrSnapTurnAngle);
+        _vrSnapAngleVal.Text = $"{(int)DeviceProfile.Settings.VrSnapTurnAngle}°";
+        _vrSmoothTurn.SetValueNoSignal(DeviceProfile.Settings.VrSmoothTurnSpeed);
+        _vrSmoothTurnVal.Text = $"{(int)DeviceProfile.Settings.VrSmoothTurnSpeed}°/s";
+
+        _vrVignetteChk.SetPressedNoSignal(DeviceProfile.Settings.VrVignette);
+        _vrVignetteAmt.SetValueNoSignal(DeviceProfile.Settings.VrVignetteStrength);
+        _vrVignetteAmtVal.Text = $"{DeviceProfile.Settings.VrVignetteStrength:P0}";
+
+        _vrHandsChk.SetPressedNoSignal(DeviceProfile.Settings.VrHandTracking);
+        _vrFingersChk.SetPressedNoSignal(DeviceProfile.Settings.VrFingerPosing);
+        _vrWristChk.SetPressedNoSignal(DeviceProfile.Settings.VrWristHud);
+        _vrHapticsChk.SetPressedNoSignal(DeviceProfile.Settings.VrHaptics);
+
+        _vrHeight.SetValueNoSignal(DeviceProfile.Settings.VrHeightOffset);
+        _vrHeightVal.Text = $"{DeviceProfile.Settings.VrHeightOffset:+0.00;-0.00;0.00} m";
     }
 
     private void PopulateDevices()
@@ -331,6 +485,8 @@ public partial class SettingsMenu : CanvasLayer
     {
         _graphics.Visible = i == 0; _audio.Visible = i == 1; _controls.Visible = i == 2; _iface.Visible = i == 3;
         Style(_tabG, i == 0); Style(_tabA, i == 1); Style(_tabC, i == 2); Style(_tabI, i == 3);
+        if (_vr != null) _vr.Visible = i == 4;
+        if (_tabV != null) Style(_tabV, i == 4);
     }
 
     // ── small builders ──────────────────────────────────────────────────────────────────

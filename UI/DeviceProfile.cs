@@ -292,9 +292,47 @@ public static class DeviceProfile
         public static float VrSmoothTurnSpeed = 120f; // degrees/sec when snap turn is off
         public static bool VrVignette = true;
         public static float VrVignetteStrength = 0.7f; // 0..1, how far the aperture closes
-        public static bool VrTeleport = false;         // teleport locomotion instead of smooth
         public static bool VrHaptics = true;
         public static float VrHeightOffset = 0f;       // manual calibration, metres
+
+        /// How the left stick moves you. The two modes social VR has standardised on, and the
+        /// reason `VrTeleport` above is now derived rather than authoritative: a bool cannot grow
+        /// a third mode, and it could not express "teleport is available *while* smooth is the
+        /// default", which is how the dash below works.
+        public enum Locomotion { Smooth = 0, Teleport = 1 }
+
+        /// Which way "forward" is. Head-relative walks where you look; hand-relative walks where
+        /// the *left controller* points, which lets you strafe around something while keeping your
+        /// eyes on it. Hand-relative is what experienced players switch to and what desktop
+        /// players find baffling, so head stays the default.
+        public enum MoveOrientation { Head = 0, Hand = 1 }
+
+        public static Locomotion VrLocomotion = Locomotion.Smooth;
+        public static MoveOrientation VrMoveOrientation = MoveOrientation.Head;
+
+        /// Teleport on the *right* stick even in smooth mode. Costs nothing when unused and means
+        /// a player who is fine with smooth locomotion can still blink across a room.
+        public static bool VrDashTeleport = true;
+
+        /// Optical hand tracking: use bare hands when the runtime sees them, drive the avatar's
+        /// fingers from the joints, and put the UI ray on the index fingertip.
+        public static bool VrHandTracking = true;
+
+        /// Curl the avatar's fingers from the trigger/grip (controllers) or the tracked joints
+        /// (bare hands). Separate from `VrHandTracking` because it applies to controllers too.
+        public static bool VrFingerPosing = true;
+
+        /// The wrist-anchored info panel (world, players, clock). Off puts nothing at all in the
+        /// player's view while they are just standing in a world, which some people want.
+        public static bool VrWristHud = true;
+
+        /// Back-compat shim for the old `VrTeleport` bool. Reading and writing the enum through
+        /// this keeps every existing call site working while there is one source of truth.
+        public static bool VrTeleport
+        {
+            get => VrLocomotion == Locomotion.Teleport;
+            set => VrLocomotion = value ? Locomotion.Teleport : Locomotion.Smooth;
+        }
 
         private static bool _loading;
 
@@ -345,7 +383,15 @@ public static class DeviceProfile
             VrSmoothTurnSpeed = (float)cfg.GetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);
             VrVignette = (bool)cfg.GetValue("vr", "vignette", VrVignette);
             VrVignetteStrength = (float)cfg.GetValue("vr", "vignette_strength", VrVignetteStrength);
+            // `teleport` is the pre-1.6.4 key. Read it first so an existing config carries its
+            // choice forward, then let the newer `locomotion` key win if it is present.
             VrTeleport = (bool)cfg.GetValue("vr", "teleport", VrTeleport);
+            VrLocomotion = (Locomotion)(int)cfg.GetValue("vr", "locomotion", (int)VrLocomotion);
+            VrMoveOrientation = (MoveOrientation)(int)cfg.GetValue("vr", "move_orientation", (int)VrMoveOrientation);
+            VrDashTeleport = (bool)cfg.GetValue("vr", "dash_teleport", VrDashTeleport);
+            VrHandTracking = (bool)cfg.GetValue("vr", "hand_tracking", VrHandTracking);
+            VrFingerPosing = (bool)cfg.GetValue("vr", "finger_posing", VrFingerPosing);
+            VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
             VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
             VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
 
@@ -376,7 +422,12 @@ public static class DeviceProfile
             cfg.SetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);
             cfg.SetValue("vr", "vignette", VrVignette);
             cfg.SetValue("vr", "vignette_strength", VrVignetteStrength);
-            cfg.SetValue("vr", "teleport", VrTeleport);
+            cfg.SetValue("vr", "locomotion", (int)VrLocomotion);
+            cfg.SetValue("vr", "move_orientation", (int)VrMoveOrientation);
+            cfg.SetValue("vr", "dash_teleport", VrDashTeleport);
+            cfg.SetValue("vr", "hand_tracking", VrHandTracking);
+            cfg.SetValue("vr", "finger_posing", VrFingerPosing);
+            cfg.SetValue("vr", "wrist_hud", VrWristHud);
             cfg.SetValue("vr", "haptics", VrHaptics);
             cfg.SetValue("vr", "height_offset", VrHeightOffset);
             cfg.Save(Path);
