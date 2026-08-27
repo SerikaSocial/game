@@ -33,6 +33,10 @@ namespace SerikaSocial.Player;
 ///   GEST   — the gesture classifier must name each canonical hand shape, and must hold its last
 ///            answer in the dead space between shapes rather than strobing.
 ///   FINGER — applying a curl must actually fold the avatar's fingertip toward its palm.
+///   WIRE   — that curl must survive Encode→Decode→ApplyBonePose onto a second rig at LOD0, and
+///            must NOT appear at LOD1. Fingers live at wire indices 25-54, which only ride in a
+///            LOD0 frame; the client sent LOD1 exclusively until v1.6.5, which is exactly why
+///            gestures used to stop at the sender's own eyes.
 ///   PANEL  — the UI panel (and so the laser) must be idle unless a real menu is on it. HUD
 ///            chrome must not count, which is what pinned the panel and laser on permanently.
 public static partial class VrDiagnostic
@@ -62,7 +66,7 @@ public static partial class VrDiagnostic
         vr.SetAvatar(avatar);
 
         VrTestInput.Active = true;
-        host.AddChild(new Driver(vr));
+        host.AddChild(new Driver(vr, skaPath));
     }
 
     private static void BuildWorld(Node3D root)
@@ -84,6 +88,8 @@ public static partial class VrDiagnostic
     private sealed partial class Driver : Node
     {
         private readonly VrPlayer _vr;
+        // The rig under test, so the WIRE check can build a second one to receive the frame.
+        private readonly string _skaPath;
         private readonly Node3D _cam, _left, _right;
         private readonly XROrigin3D _playSpace;
         private readonly List<Phase> _phases = new();
@@ -112,9 +118,10 @@ public static partial class VrDiagnostic
             public Action Exit;
         }
 
-        public Driver(VrPlayer vr)
+        public Driver(VrPlayer vr, string skaPath)
         {
             _vr = vr;
+            _skaPath = skaPath;
             _cam = vr.HeadCamera;
             _left = vr.LeftHand;
             _right = vr.RightHand;
@@ -460,7 +467,87 @@ public static partial class VrDiagnostic
                      $"curled {curled * 100f:F1} cm ({shrink:P0} closer)  " +
                      $"{(ok ? "ok — fingers fold toward the palm" : "FAIL — curl axis is wrong; fingers are not flexing")}");
 
+            WireCheck(avatar, skel, wrist, tip, poser, straight);
+
             poser.Apply(new[] { 0f, 0f, 0f, 0f, 0f });
+        }
+
+        /// The link that makes a hand gesture visible to *other people* — asserted, not assumed.
+        ///
+        /// Fingers live at wire indices 25-54, which only ride in a LOD0 frame. The client sent
+        /// LOD1 exclusively until this change, which is exactly why gestures stopped at the
+        /// sender's own eyes. This encodes the curled rig with the production `PoseFrame.Encode`
+        /// at `Lod.Full`, decodes it, and applies it to a second rig through `ApplyBonePose` —
+        /// the precise path a remote peer's client takes.
+        ///
+        /// It also checks the negative: the same pose sent at `Lod.Body` must leave the receiver's
+        /// fingers alone. Without that, a passing LOD0 result proves nothing about whether the
+        /// LOD choice actually matters.
+        private void WireCheck(AvatarInstance sender, Skeleton3D skel, int wrist, int tip,
+                               HandPoser poser, float straightReach)
+        {
+            var peer = AvatarLibrary.InstantiateOrDefault(_skaPath);
+            if (peer == null) { GD.Print("VRTEST WIRE   no peer avatar — SKIPPED"); return; }
+            AddChild(peer);
+
+            var peerSkel = peer.Skeleton;
+            int peerWrist = peer.BoneOf("leftHand");
+            int peerTip = peer.BoneOf("leftIndexDistal");
+            if (peerSkel == null || peerWrist < 0 || peerTip < 0)
+            {
+                GD.Print("VRTEST WIRE   peer rig lacks the finger chain — SKIPPED");
+                peer.QueueFree();
+                return;
+            }
+
+            float PeerReach()
+            {
+                peerSkel.ForceUpdateBoneChildTransform(peerTip);
+                return peerSkel.GetBoneGlobalPose(peerWrist).Origin
+                    .DistanceTo(peerSkel.GetBoneGlobalPose(peerTip).Origin);
+            }
+
+            float peerRest = PeerReach();
+
+            // Curl the sender's hand into a fist, then ship it.
+            poser.Apply(new[] { 1f, 1f, 1f, 1f, 1f });
+            skel.ForceUpdateBoneChildTransform(tip);
+
+            var full = Player.AvatarPose.FromTransform(
+                Transform3D.Identity, 0, sender, Serika.Net.Codec.Lod.Full);
+            var fullBytes = full.Encode();
+            var decodedFull = Serika.Net.Codec.PoseFrame.Decode(fullBytes);
+            peer.ApplyBonePose(decodedFull.Bones);
+            float peerCurled = PeerReach();
+
+            // Reset the peer, then send the same curled pose at LOD1.
+            peer.ApplyBonePose(new System.Collections.Generic.List<Serika.Net.Codec.Quat>());
+            var body = Player.AvatarPose.FromTransform(
+                Transform3D.Identity, 0, sender, Serika.Net.Codec.Lod.Body);
+            var bodyBytes = body.Encode();
+            var decodedBody = Serika.Net.Codec.PoseFrame.Decode(bodyBytes);
+            // A fresh peer, so its fingers start at rest and must stay there.
+            var peer2 = AvatarLibrary.InstantiateOrDefault(_skaPath);
+            AddChild(peer2);
+            var peer2Skel = peer2.Skeleton;
+            int p2Wrist = peer2.BoneOf("leftHand"), p2Tip = peer2.BoneOf("leftIndexDistal");
+            peer2.ApplyBonePose(decodedBody.Bones);
+            peer2Skel.ForceUpdateBoneChildTransform(p2Tip);
+            float peerBodyReach = peer2Skel.GetBoneGlobalPose(p2Wrist).Origin
+                .DistanceTo(peer2Skel.GetBoneGlobalPose(p2Tip).Origin);
+
+            float shrink = peerRest > 1e-5f ? 1f - peerCurled / peerRest : 0f;
+            float bodyShrink = peerRest > 1e-5f ? 1f - peerBodyReach / peerRest : 0f;
+
+            bool ok = fullBytes.Length == 232 && bodyBytes.Length == 100
+                      && shrink > 0.15f && Mathf.Abs(bodyShrink) < 0.02f;
+            _ok &= ok;
+            GD.Print($"VRTEST WIRE   LOD0 {fullBytes.Length} B → peer index tip {shrink:P0} closer " +
+                     $"to its wrist; LOD1 {bodyBytes.Length} B → {bodyShrink:P0} (fingers untouched)  " +
+                     $"{(ok ? "ok — gestures reach peers over the wire" : "FAIL — finger rotations do not survive the trip")}");
+
+            peer.QueueFree();
+            peer2.QueueFree();
         }
 
         public override void _PhysicsProcess(double delta)

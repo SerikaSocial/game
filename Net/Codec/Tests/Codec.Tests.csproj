@@ -21,6 +21,11 @@
          as opaque), but the two transports disagree on PhysGrab's layout by design, so the
          difference needs a test to keep it from rotting. -->
     <Compile Include="..\..\ObjectFrames.cs" />
+    <!-- The canonical bone order. The relay only ever sees "N quaternions", so which bone each
+         wire slot means is decided entirely here, and agreed between a sender and a receiver that
+         are both this client. That makes it as load-bearing as the byte layout, so it gets the
+         same treatment: a frozen test in the same suite. Pure C#, no Godot dependency. -->
+    <Compile Include="..\..\..\Avatar\HumanoidBones.cs" />
   </ItemGroup>
 
   <ItemGroup>

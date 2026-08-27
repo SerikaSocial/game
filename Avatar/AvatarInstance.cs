@@ -182,19 +182,28 @@ public sealed partial class AvatarInstance : Node3D
             int idx = Skeleton.FindBone(boneName);
             if (idx >= 0) _roleToBone[role] = idx;
         }
+        // Folded in here rather than called alongside at the one call site, so a second
+        // construction path cannot forget it and silently leave every rig fingerless on the wire.
+        ResolveFingerBones();
     }
 
     public int BoneOf(string role) => _roleToBone.GetValueOrDefault(role, -1);
 
     /// Read this rig's current local bone rotations into wire order, for streaming to peers.
-    /// Roles this avatar doesn't have are written as identity. `dst` must hold at least
-    /// `HumanoidBones.Lod1.Length` entries; nothing is allocated here (hot path, 20 Hz).
+    /// Roles this avatar doesn't have are written as identity. Nothing is allocated here
+    /// (hot path, 20 Hz).
+    ///
+    /// **`dst.Length` selects the LOD**: pass 22 entries for a LOD1 body frame, 55 for a LOD0
+    /// frame carrying eyes, jaw and fingers. Both are prefixes of the same `HumanoidBones.Full`
+    /// table, so there is one loop rather than one per LOD — which is what stops the two drifting
+    /// apart on the bones they share.
     public void CaptureBonePose(Serika.Net.Codec.Quat[] dst)
     {
         if (Skeleton == null) return;
-        for (int i = 0; i < HumanoidBones.Lod1.Length && i < dst.Length; i++)
+        int n = System.Math.Min(dst.Length, HumanoidBones.Full.Length);
+        for (int i = 0; i < n; i++)
         {
-            int b = BoneOf(HumanoidBones.Lod1[i]);
+            int b = BoneOf(HumanoidBones.Full[i]);
             if (b < 0) { dst[i] = Serika.Net.Codec.Quat.Identity; continue; }
             var q = Skeleton.GetBonePoseRotation(b);
             dst[i] = new Serika.Net.Codec.Quat(q.X, q.Y, q.Z, q.W);
@@ -204,18 +213,40 @@ public sealed partial class AvatarInstance : Node3D
     /// Drive this rig from bone rotations received off the wire. This is what makes a remote
     /// player's crouch, emote and locomotion match what the sender actually sees, rather than
     /// being re-guessed locally from their observed velocity.
+    ///
+    /// `src.Count` is whatever LOD arrived — 22 or 55 — clamped to the table, so a peer sending a
+    /// 22-bone body frame simply leaves this rig's fingers where they were rather than snapping
+    /// them to identity every frame.
     public void ApplyBonePose(System.Collections.Generic.IReadOnlyList<Serika.Net.Codec.Quat> src)
     {
         if (Skeleton == null || src == null) return;
-        int n = System.Math.Min(src.Count, HumanoidBones.Lod1.Length);
+        int n = System.Math.Min(src.Count, HumanoidBones.Full.Length);
         for (int i = 0; i < n; i++)
         {
-            int b = BoneOf(HumanoidBones.Lod1[i]);
+            int b = BoneOf(HumanoidBones.Full[i]);
             if (b < 0) continue;
             var q = src[i];
             var rot = new Quaternion(q.X, q.Y, q.Z, q.W);
             if (!rot.IsNormalized()) rot = rot.Normalized();
             Skeleton.SetBonePoseRotation(b, rot);
+        }
+    }
+
+    /// Whether this rig has any finger bones worth sending at LOD0. Resolved once at load rather
+    /// than probed per frame.
+    ///
+    /// Without this the sender would pay 232 bytes a frame to transmit 30 identity quaternions
+    /// for a rig that has no fingers at all — which is most PMX conversions and a fair number of
+    /// VRMs (several avatars in the local cache carry only the 22 body roles).
+    public bool HasFingerBones { get; private set; }
+
+    private void ResolveFingerBones()
+    {
+        for (int i = HumanoidBones.FirstFingerIndex; i < HumanoidBones.Full.Length; i++)
+        {
+            if (BoneOf(HumanoidBones.Full[i]) < 0) continue;
+            HasFingerBones = true;
+            return;
         }
     }
 

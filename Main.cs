@@ -2220,9 +2220,10 @@ public partial class Main : Node3D
             if (_poseTimer >= 0.05)
             {
                 _poseTimer = 0;
+                var xf = _local.PoseTransform();
+                var avatar = _localDesktop?.Avatar ?? _localVr?.Avatar;
                 _transport.SendPose(AvatarPose.FromTransform(
-                    _local.PoseTransform(), _poseSeq++,
-                    _localDesktop?.Avatar ?? _localVr?.Avatar));
+                    xf, _poseSeq++, avatar, ChoosePoseLod(xf.Origin, avatar)));
             }
         }
 
@@ -2235,6 +2236,47 @@ public partial class Main : Node3D
                 GetTree().Quit();
             }
         }
+    }
+
+    /// Radius within which a peer is close enough to read a hand, so the local avatar upgrades to
+    /// a full 55-bone frame. `pose_codec.md` specifies 5 m for LOD0; this uses a little more so
+    /// the upgrade has already happened by the time someone is close enough to notice.
+    private const float FingerLodRadius = 6f;
+    /// ...and the distance it drops back at. The gap is deliberate: a peer loitering exactly on
+    /// the threshold would otherwise flip the frame size 20 times a second.
+    private const float FingerLodDropRadius = 7.5f;
+    private bool _sendingFingerLod;
+
+    /// Pick the LOD for the outbound pose frame.
+    ///
+    /// The sender chooses one LOD for a frame that the relay fans out to everyone, so this cannot
+    /// be per-receiver the way `pose_codec.md`'s table implies — there is one broadcast, not one
+    /// per peer. The rule is therefore "upgrade while anybody is close enough to see fingers",
+    /// which costs 232 B/frame instead of 100 only while someone is actually in conversation
+    /// range, and leaves an empty instance at the cheap LOD.
+    ///
+    /// Rigs with no finger bones never upgrade. Sending LOD0 for them would spend 132 extra bytes
+    /// a frame transmitting 30 identity quaternions.
+    private Lod ChoosePoseLod(Vector3 selfPos, Avatar.AvatarInstance avatar)
+    {
+        if (avatar is not { HasFingerBones: true } || _remotes.Count == 0)
+        {
+            _sendingFingerLod = false;
+            return Lod.Body;
+        }
+
+        float nearestSq = float.MaxValue;
+        foreach (var remote in _remotes.Values)
+        {
+            if (!GodotObject.IsInstanceValid(remote)) continue;
+            float d = selfPos.DistanceSquaredTo(remote.GlobalPosition);
+            if (d < nearestSq) nearestSq = d;
+        }
+
+        // Hysteresis: rise at one radius, fall at a wider one.
+        float threshold = _sendingFingerLod ? FingerLodDropRadius : FingerLodRadius;
+        _sendingFingerLod = nearestSq <= threshold * threshold;
+        return _sendingFingerLod ? Lod.Full : Lod.Body;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────
