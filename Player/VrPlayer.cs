@@ -105,7 +105,7 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
 
     private float _gravity = 9.8f;
     private float _snapCooldown;
-    private bool _menuLatch, _actionLatch, _recenterLatch;
+    private bool _menuLatch, _actionLatch, _recenterLatch, _jumpLatch;
 
     // Per-hand grab state. Index 0 = left, 1 = right.
     private readonly SerikaSocial.World.PhysicsProp[] _heldProp = new SerikaSocial.World.PhysicsProp[2];
@@ -136,6 +136,27 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     }
 
     public bool ControlsEnabled { get; set; } = true;
+
+    // ── Input reads ──────────────────────────────────────────────────────────────────
+    // Routed through these three accessors so the headless diagnostic can inject controller
+    // state (see Player/VrDiagnostic.cs). With no OpenXR runtime every real read returns zero,
+    // which would make each input check pass by doing nothing at all. `VrTestInput.Active` is
+    // false in every real build, so this costs one static bool test per read.
+
+    private static Vector2 StickOf(XRController3D hand, bool left)
+    {
+        if (VrTestInput.Active) return left ? VrTestInput.LeftStick : VrTestInput.RightStick;
+        return hand.GetVector2(ActStick);
+    }
+
+    private static float GripOf(XRController3D hand, bool left)
+    {
+        if (VrTestInput.Active) return left ? VrTestInput.LeftGrip : 0f;
+        return hand.GetFloat(ActGrip);
+    }
+
+    private static bool JumpButton(XRController3D hand)
+        => VrTestInput.Active ? VrTestInput.JumpHeld : hand.IsButtonPressed(ActPrimaryBtn);
 
     public override void _Ready()
     {
@@ -409,21 +430,15 @@ void fragment() {
         }
     }
 
-    // Same visual layers the desktop rig uses, so mirrors — which render every layer — keep
-    // showing a complete avatar while our own camera drops just the head.
-    private const uint FpAvatarLayer = 1u << 2; // visual layer 3
-    private const uint FpHeadLayer = 1u << 3;   // visual layer 4
-
-    /// Cull the head meshes from our own view only. The meshes stay in the scene so mirrors,
-    /// shadows, and every remote peer still see a complete avatar.
+    /// First-person head removal for the VR rig — the exact same three-representation split the
+    /// desktop rig uses (see Avatar/FirstPersonProxy.cs), so baked-in hair planes, head ornaments
+    /// and the jawline underside are gone from the HMD view too, while mirrors, other clients and
+    /// every shadow pass still get the complete avatar.
     private void HideOwnHead(AvatarInstance avatar)
     {
-        foreach (var child in avatar.FindChildren("*", "MeshInstance3D", true, false))
-        {
-            if (child is not MeshInstance3D mesh) continue;
-            mesh.Layers = avatar.IsHeadMesh(mesh) ? FpHeadLayer : FpAvatarLayer;
-        }
-        _camera.CullMask = 1048575u & ~FpHeadLayer;
+        FirstPersonProxy.Apply(avatar, LocalPlayer.AvatarOthersLayer, LocalPlayer.AvatarFpLayer,
+                               LocalPlayer.AvatarShadowLayer);
+        _camera.CullMask = 1048575u & ~LocalPlayer.FpCullLayers;
     }
 
     /// Raise or lower the play space so the avatar's eyes line up with the headset. Without
@@ -452,14 +467,32 @@ void fragment() {
     {
         if (_heightCalibrated) return;
         if (XRServer.GetTracker("head") is not XRPositionalTracker headTracker || !headTracker.HasPose("default")) return;
-        // The camera's local Y in the XROrigin is the floor-to-headset distance.
+        // The camera's local Y in the XROrigin is the floor-to-headset distance — but ONLY in a
+        // floor-relative reference space. See the note on `xr/openxr/reference_space` in
+        // project.godot: with the seated LOCAL space this reads about zero, this guard rejects
+        // every frame forever, and the play space ends up placed from a hardcoded constant.
         float camY = _camera.Position.Y;
-        if (camY < 0.3f || camY > 2.5f) return; // sanity: sitting or standing, not glitched
+        if (camY < 0.3f || camY > 2.5f)
+        {
+            // Say so out loud rather than failing silently, which is how the reference-space bug
+            // survived: nothing in the logs ever mentioned that calibration had not happened.
+            _calibrateWarnTimer += 1f / Mathf.Max(1, Engine.PhysicsTicksPerSecond);
+            if (_calibrateWarnTimer > 5f)
+            {
+                _calibrateWarnTimer = float.NegativeInfinity; // warn once
+                GD.PrintErr($"VR: headset floor distance reads {camY:0.00}m after 5s, outside the " +
+                            "plausible 0.3–2.5m — height auto-calibration is not running. Check " +
+                            "xr/openxr/reference_space is a floor-relative space (2 = Local Floor).");
+            }
+            return;
+        }
         _measuredEyeHeight = camY;
         _heightCalibrated = true;
         GD.Print($"VR: auto-calibrated eye height = {camY:0.00}m");
         ApplyHeightOffset();
     }
+
+    private float _calibrateWarnTimer;
 
     /// Toggle a built-in emote, matching `LocalPlayer.PlayEmote`. While an emote is playing the
     /// arm IK stands down — otherwise the controllers would fight the animation and the emote
@@ -535,9 +568,19 @@ void fragment() {
         // body does not jitter or slide down slopes when standing completely still.
         if (flat.Length() < 0.015f) return;
 
-        var worldDelta = GlobalTransform.Basis * flat;
-        GlobalPosition += worldDelta;
-        _origin.Position -= flat;
+        // Swept against world collision rather than teleported. This used to be a bare
+        // `GlobalPosition += worldDelta`, which moves a CharacterBody3D straight through geometry:
+        // physically walking in your guardian took you through walls and off ledges, with the
+        // stick the only thing collision ever applied to.
+        var before = GlobalPosition;
+        MoveAndCollide(GlobalTransform.Basis * flat);
+
+        // Cancel out of the play space only what the body actually travelled. When a wall stops
+        // the body short, the leftover offset stays on the origin, so the headset keeps its real
+        // position relative to the room while the avatar stays outside the wall — the standard
+        // outcome, and self-correcting as soon as the player steps back.
+        var movedLocal = GlobalTransform.Basis.Inverse() * (GlobalPosition - before);
+        _origin.Position -= new Vector3(movedLocal.X, 0, movedLocal.Z);
     }
 
     /// Track head velocity for predictive tracking. Called from _PhysicsProcess before
@@ -576,33 +619,26 @@ void fragment() {
     private Quaternion _prevHeadRot;
     private bool _hasPrevHeadRot;
 
-    /// Check if optical hand tracking (Quest/Pico bare hands) is currently active instead of physical controllers.
-    private bool IsOpticalHandTrackingActive()
-    {
-        var leftTracker = XRServer.GetTracker("left_hand");
-        var rightTracker = XRServer.GetTracker("right_hand");
-        bool hasHandTracker = leftTracker != null || rightTracker != null;
-        bool controllerStickActive = _leftHand.GetVector2(ActStick).LengthSquared() > 0.01f || _rightHand.GetVector2(ActStick).LengthSquared() > 0.01f;
-
-        return hasHandTracker && !controllerStickActive;
-    }
-
     /// Returns planar speed so the caller can drive both the vignette and the walk cycle.
+    ///
+    /// There is no bare-hands special case here any more. There used to be an
+    /// `IsOpticalHandTrackingActive()` guard meant to disable stick locomotion for optical hand
+    /// tracking, but Godot registers *controllers* under the tracker names `left_hand` and
+    /// `right_hand` too, so it was true whenever controllers were connected; both call sites then
+    /// AND-ed it with "the stick is centred", which made it a no-op that merely looked like a
+    /// feature. Bare hands report a zero stick anyway, so simply reading the stick does the right
+    /// thing for both input types — and cannot accidentally strand a controller user in place.
     private float HandleLocomotion(float dt)
     {
         var v = Velocity;
         if (!IsOnFloor()) v.Y -= _gravity * dt;
 
-        // When optical hand tracking is active (bare hands), stick locomotion is disabled
-        // so movement is strictly room-scale physical walking within the real room.
-        bool handTrackingOnly = IsOpticalHandTrackingActive() && _leftHand.GetVector2(ActStick).LengthSquared() < 0.01f;
-        var stick = (ControlsEnabled && !handTrackingOnly) ? _leftHand.GetVector2(ActStick) : Vector2.Zero;
-        bool teleportMode = UI.DeviceProfile.Settings.VrTeleport;
+        var stick = ControlsEnabled ? StickOf(_leftHand, left: true) : Vector2.Zero;
 
-        if (teleportMode)
+        if (UI.DeviceProfile.Settings.VrTeleport)
         {
             v.X = 0; v.Z = 0;
-            if (!handTrackingOnly) UpdateTeleport(stick);
+            UpdateTeleport(stick);
         }
         else
         {
@@ -610,8 +646,7 @@ void fragment() {
             if (move != Vector2.Zero)
             {
                 var (fwd, right) = HeadBasis();
-                bool sprinting = _leftHand.GetFloat(ActGrip) > 0.7f;
-                float speed = sprinting ? SprintSpeed : WalkSpeed;
+                float speed = IsSprinting(stick) ? SprintSpeed : WalkSpeed;
                 var dir = (fwd * -move.Y + right * move.X) * speed;
                 v.X = dir.X;
                 v.Z = dir.Z;
@@ -626,6 +661,16 @@ void fragment() {
         MoveAndSlide();
         return new Vector2(Velocity.X, Velocity.Z).Length();
     }
+
+    /// Sprint by pushing the stick to its rim, rather than by squeezing the left grip.
+    ///
+    /// Grip is how props are picked up (`UpdateHand`, threshold 0.6), and sprint used to read the
+    /// same axis at 0.7 — so grabbing anything with your left hand also made you run. A stick
+    /// magnitude past `SprintThreshold` conflicts with no binding at all, needs no new action, and
+    /// is the ordinary convention for stick-driven VR locomotion.
+    private static bool IsSprinting(Vector2 stick) => stick.Length() >= SprintThreshold;
+
+    private const float SprintThreshold = 0.9f;
 
     /// Head-relative forward/right, flattened to the ground plane.
     private (Vector3 fwd, Vector3 right) HeadBasis()
@@ -650,10 +695,7 @@ void fragment() {
     /// Snap turning is the default because continuous rotation is the biggest sickness trigger.
     private void HandleTurn(float dt)
     {
-        bool handTrackingOnly = IsOpticalHandTrackingActive() && _rightHand.GetVector2(ActStick).LengthSquared() < 0.01f;
-        if (handTrackingOnly) return; // Optical hand tracking: room-scale turning only
-
-        float x = _rightHand.GetVector2(ActStick).X;
+        float x = StickOf(_rightHand, left: false).X;
 
         if (UI.DeviceProfile.Settings.VrSnapTurn)
         {
@@ -771,10 +813,16 @@ void fragment() {
 
     private void HandleButtons()
     {
-        // Jump on the primary face button (A/X), edge-triggered via the floor check. Suppressed
-        // while a menu is up — the same button is the menu's select.
-        if (ControlsEnabled && _rightHand.IsButtonPressed(ActPrimaryBtn) && IsOnFloor())
+        // Jump on the primary face button (A/X). Suppressed while a menu is up — the same button
+        // is the menu's select.
+        //
+        // Explicitly latched. The floor check was never an edge trigger, whatever the old comment
+        // claimed: holding A while grounded re-applied jump velocity on every single frame, so the
+        // player pogoed continuously instead of jumping once.
+        bool jump = ControlsEnabled && JumpButton(_rightHand);
+        if (jump && !_jumpLatch && IsOnFloor())
             Velocity = Velocity with { Y = JumpVelocity };
+        _jumpLatch = jump;
 
         // Menu — latch so a held button opens the menu once.
         bool menu = _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu);
@@ -813,7 +861,7 @@ void fragment() {
         }
         _lastHandPos[i] = pos;
 
-        bool gripped = hand.GetFloat(ActGrip) > 0.6f;
+        bool gripped = GripOf(hand, left: i == 0) > 0.6f;
 
         if (gripped && !_gripLatch[i])
         {
@@ -1057,7 +1105,10 @@ void fragment() {
         if (_fbtNodes.TryGetValue("right_foot", out var rfNode) && rfNode.GetHasTrackingData())
             rightFootPos = rfNode.GlobalPosition;
 
-        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition, hipPos, leftFootPos, rightFootPos);
+        // While a nod or shake is running the gesture owns the head bone; re-solving it from the
+        // headset every frame would overwrite the gesture before anyone could see it.
+        _ik?.Solve(headTransform, _leftHand.GlobalPosition, _rightHand.GlobalPosition,
+                   hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive);
     }
 
     /// Dynamically discover and update Full Body Tracking (FBT) trackers.
@@ -1140,13 +1191,23 @@ void fragment() {
 
     // ---------------------------------------------------------------- networking
 
-    /// The transform we broadcast: the headset's world position with body yaw. Remote peers
-    /// position the avatar from this, and the bone pose rides alongside it.
+    /// The transform we broadcast: where the avatar's FEET are, facing the way the body faces.
+    /// Remote peers position the avatar from this, and the bone pose rides alongside it.
+    ///
+    /// This used to send `_camera.GlobalPosition` — the headset, roughly 1.6 m up. The root of a
+    /// pose frame is the avatar's origin, and `RemoteAvatar` plants the rig's feet on it, so
+    /// every peer saw VR players floating a head-height above the floor and sliding around as
+    /// they leaned. `LocalPlayer` has always sent its feet; this now matches.
+    ///
+    /// The avatar mount is the right source rather than `GlobalPosition`: the mount is literally
+    /// where this client draws the avatar (headset XZ at body height, see `UpdateAvatar`), so
+    /// peers see it standing exactly where its owner sees it. Facing is the smoothed `_bodyYaw`
+    /// for the same reason — the raw head yaw would whip the broadcast avatar around on every
+    /// glance, which is precisely what the smoothing exists to prevent locally.
     public Transform3D PoseTransform()
     {
-        var pos = _camera.GlobalPosition;
-        var (fwd, _) = HeadBasis();
-        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), pos);
+        var fwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
+        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), _avatarMount.GlobalPosition);
     }
 
     /// Zero all momentum — used by respawn, matching `LocalPlayer.ResetMotion`.

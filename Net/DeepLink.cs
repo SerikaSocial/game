@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using Godot;
 
 namespace SerikaSocial;
@@ -72,13 +74,9 @@ public static class DeepLink
     /// Register this binary as the serikasocial:// handler for the current user. Best-effort,
     /// idempotent, and silent on failure. Called once at startup.
     ///
-    /// Runs on a background thread. `OS.Execute` is *blocking* — it waits for the child to
-    /// exit — and the Windows path spawns three `reg.exe` processes. Process creation on
-    /// Windows is far more expensive than on Linux (made worse by on-access AV scanning), so
-    /// doing this inline in `_Ready` stalled the main thread before the first frame and the
-    /// window came up as "Not Responding". None of this work touches the scene tree, so it
-    /// is safe off-thread; the only Godot call that wants the main thread is
-    /// `OS.GetExecutablePath`, which we read here and capture.
+    /// Runs on a background thread because process creation is blocking. None of this work
+    /// touches the scene tree, so it is safe off-thread; the only Godot call that wants the
+    /// main thread is `OS.GetExecutablePath`, which we read here and capture.
     public static void RegisterHandler()
     {
         string exe;
@@ -111,20 +109,45 @@ public static class DeepLink
         });
     }
 
+    /// Run a process with proper argument quoting. OS.Execute joins arguments with spaces
+    /// on Windows, which breaks values containing spaces (e.g. "URL:Serika Social Protocol").
+    /// ProcessStartInfo.ArgumentList handles quoting correctly per-argument.
+    private static int RunProcess(string file, params string[] args)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = file,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            foreach (var a in args) psi.ArgumentList.Add(a);
+            var p = Process.Start(psi);
+            p?.WaitForExit();
+            return p?.ExitCode ?? -1;
+        }
+        catch (Exception e)
+        {
+            GD.Print($"deep-link: {file} failed: {e.Message}");
+            return -1;
+        }
+    }
+
     private static void RegisterWindows(string exe)
     {
         // HKCU\Software\Classes\serikasocial → shell\open\command "exe" "%1"
-        void Reg(params string[] a) => OS.Execute("reg", a);
         string root = @"HKCU\Software\Classes\" + Scheme;
-        Reg("add", root, "/ve", "/d", "URL:Serika Social Protocol", "/f");
-        Reg("add", root, "/v", "URL Protocol", "/d", "", "/f");
-        Reg("add", root + @"\shell\open\command", "/ve", "/d", $"\"{exe}\" \"%1\"", "/f");
+        RunProcess("reg", "add", root, "/ve", "/d", "URL:Serika Social Protocol", "/f");
+        RunProcess("reg", "add", root, "/v", "URL Protocol", "/d", "", "/f");
+        RunProcess("reg", "add", root + @"\shell\open\command", "/ve", "/d", $"\"{exe}\" \"%1\"", "/f");
+        GD.Print("deep-link: Windows URL scheme registered");
     }
 
     private static void RegisterLinux(string exe)
     {
         string apps = OS.GetEnvironment("HOME") + "/.local/share/applications";
-        DirAccess.MakeDirRecursiveAbsolute(apps);
+        Directory.CreateDirectory(apps);
         string desktopPath = apps + "/serika-social.desktop";
         string contents =
             "[Desktop Entry]\n" +
@@ -134,10 +157,10 @@ public static class DeepLink
             "Terminal=false\n" +
             "Categories=Game;\n" +
             "MimeType=x-scheme-handler/" + Scheme + ";\n";
-        using (var f = FileAccess.Open(desktopPath, FileAccess.ModeFlags.Write))
-            f?.StoreString(contents);
+        File.WriteAllText(desktopPath, contents);
         // Point the scheme at our .desktop and refresh the desktop database.
-        OS.Execute("xdg-mime", new[] { "default", "serika-social.desktop", "x-scheme-handler/" + Scheme });
-        OS.Execute("update-desktop-database", new[] { apps });
+        RunProcess("xdg-mime", "default", "serika-social.desktop", "x-scheme-handler/" + Scheme);
+        RunProcess("update-desktop-database", apps);
+        GD.Print("deep-link: Linux URL scheme registered");
     }
 }

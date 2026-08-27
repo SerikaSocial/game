@@ -26,6 +26,15 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
     /// If true, this prop syncs over the network. Single-player worlds can leave this off.
     [Export] public bool Networked { get; set; } = true;
 
+    /// Group every prop joins, so `Main` can register a whole world's props for network sync in
+    /// one sweep after the world builds.
+    ///
+    /// Registration used to be a manual call at each spawn site, and only the marker-pen site
+    /// ever made it: the six throwable boxes in the Items Lab were built, added to the tree and
+    /// never registered, so each client simulated them independently and no two players saw a
+    /// box in the same place. A group sweep cannot be forgotten by the next world builder.
+    public const string Group = "serika_physics_prop";
+
     public string PromptText => _held ? "Drop" : PropName;
     public float Range => InteractionRange;
     public Vector3 FocusPoint => GlobalPosition + new Vector3(0, 0.3f, 0);
@@ -51,6 +60,7 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
     public override void _Ready()
     {
         AddToGroup(Interactable.Group);
+        AddToGroup(Group);
         _restPosition = GlobalPosition;
         _restRotation = Quaternion.FromEuler(GlobalRotation);
         _targetPos = GlobalPosition;

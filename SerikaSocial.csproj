@@ -22,5 +22,6 @@
   <ItemGroup>
     <Compile Remove="Net/Codec/Tests/**/*.cs" />
     <Compile Remove="proto/**/*.cs" />
+    <Compile Remove="Launcher/**/*.cs" />
   </ItemGroup>
 </Project>

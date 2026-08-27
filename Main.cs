@@ -134,10 +134,32 @@ public partial class Main : Node3D
         }
 
         var args = ParseArgs();
+        // Audio-device prefs are machine-global state. A diagnostic run under xvfb shares the
+        // developer's live PulseAudio server, so only real interactive boots get to re-route
+        // sound (see Settings.ApplyAudioDevices — this guard is why test runs stopped nuking it).
+        bool diagnosticRun = System.Linq.Enumerable.Any(args.Keys, k => k.StartsWith("serika-"));
+        if (!diagnosticRun && DisplayServer.GetName() != "headless")
+            UI.DeviceProfile.Settings.ApplyAudioDevices();
         if (args.ContainsKey("serika-animtest"))
         {
             AnimDiagnostic.Run(this, args.GetValueOrDefault("clip", "Walk"),
                 args.GetValueOrDefault("ska", null));
+            return;
+        }
+        if (args.ContainsKey("serika-vrtest"))
+        {
+            Player.VrDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
+            return;
+        }
+        if (args.ContainsKey("serika-aimtest"))
+        {
+            Avatar.AimDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("clip", "Idle"));
+            return;
+        }
+        if (args.ContainsKey("serika-fptest"))
+        {
+            Avatar.EyeProbeDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
             return;
         }
         if (args.ContainsKey("serika-phystest"))
@@ -153,10 +175,29 @@ public partial class Main : Node3D
                 args.GetValueOrDefault("shader", null));
             return;
         }
+        if (args.ContainsKey("serika-shadowtest"))
+        {
+            Avatar.ShadowDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null));
+            return;
+        }
+        if (args.ContainsKey("serika-camshot"))
+        {
+            Player.CamShotDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null));
+            return;
+        }
         if (args.ContainsKey("serika-worldtest"))
         {
             WorldDiagnostic.Run(this, _worldRoot, args.GetValueOrDefault("world", null),
-                args.GetValueOrDefault("ogv", null), args.GetValueOrDefault("shot", null));
+                args.GetValueOrDefault("ogv", null), args.GetValueOrDefault("shot", null),
+                args.GetValueOrDefault("wait", null));
+            return;
+        }
+        if (args.ContainsKey("serika-mirrortest"))
+        {
+            World.MirrorDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null));
             return;
         }
         if (args.ContainsKey("serika-smoke"))
@@ -456,7 +497,30 @@ public partial class Main : Node3D
         // but The Commons and other multiplayer worlds broadcast them over ObjectSync.
         _strokeCanvas = new StrokeCanvas();
         _worldRoot.AddChild(_strokeCanvas);
+        RegisterWorldProps();
         SetupVideoForWorld();
+    }
+
+    /// Register every physics prop the new world brought, for network sync.
+    ///
+    /// Props arrive from three different places — a C# fallback builder, a `SERIKA_PROP` marker
+    /// in a cloud bundle, and `SpawnMarkerPens` — and only the last one ever remembered to
+    /// register itself. Sweeping the group covers all three and cannot be forgotten by the next
+    /// one. The registry is per-world, so it is cleared first: prop ids are only unique within a
+    /// world, and a stale entry from the previous world would take sync updates meant for the
+    /// new world's prop of the same id.
+    private void RegisterWorldProps()
+    {
+        _props.Clear();
+        if (_worldRoot == null) return;
+        int n = 0;
+        foreach (var node in GetTree().GetNodesInGroup(SerikaSocial.World.PhysicsProp.Group))
+        {
+            if (node is not SerikaSocial.World.PhysicsProp prop || !prop.Networked) continue;
+            RegisterPhysicsProp(prop);
+            n++;
+        }
+        if (n > 0) GD.Print($"world props: registered {n} for sync");
     }
 
     private SerikaSocial.World.Video.VideoManager _videoManager;

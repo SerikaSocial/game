@@ -23,7 +23,7 @@ namespace SerikaSocial.World;
 public static partial class WorldDiagnostic
 {
     public static void Run(Node host, Node3D worldRoot, string path,
-                           string ogv = null, string shot = null)
+                           string ogv = null, string shot = null, string wait = null)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -84,6 +84,21 @@ public static partial class WorldDiagnostic
                      $" .. {seats.Max(s => s.GlobalPosition.Y):0.00} m");
         GD.Print($"WORLDTEST: mesh instances = {Descendants(worldRoot).OfType<MeshInstance3D>().Count()}");
 
+        // Props are the only marker whose correctness is invisible in a screenshot: a crate at
+        // the wrong scale still renders as a crate, and a duplicate net id still renders as two
+        // crates. Both are only findable as numbers.
+        var props = Descendants(worldRoot).OfType<PhysicsProp>().ToList();
+        GD.Print($"WORLDTEST: physics props = {props.Count}");
+        var seenIds = new HashSet<ushort>();
+        foreach (var p in props)
+        {
+            var box = p.FindChildren("*", "CollisionShape3D", true, false)
+                       .OfType<CollisionShape3D>().FirstOrDefault()?.Shape as BoxShape3D;
+            string dup = seenIds.Add(p.NetId) ? "" : "  ← DUPLICATE NetId";
+            GD.Print($"WORLDTEST:   {p.Name} netId {p.NetId}, networked {p.Networked}, " +
+                     $"size {(box != null ? Fmt(box.Size) : "none")} at {Fmt(p.GlobalPosition)}{dup}");
+        }
+
         // Lights, post-normalisation. Energy alone says nothing about how bright a room ends
         // up: an omni's *range* is what decides whether it lights its corner or the whole
         // building, and glTF carries no range, so a light that looks tame by energy can still
@@ -122,7 +137,17 @@ public static partial class WorldDiagnostic
         }
         else
         {
-            cam.GlobalPosition = (spawn ?? Vector3.Zero) + new Vector3(0, 1.6f, 0);
+            // No screen to frame. Standing at the spawn facing default-forward photographs
+            // whichever wall happens to be there, which is how the Items Lab's first shot came
+            // back as a flat grey rectangle. Back off and look at the geometry's centre.
+            // Stay *at* the spawn — most of these worlds are enclosed rooms, so backing off to
+            // frame them just puts the camera outside photographing the roof. Only the aim
+            // changes: look at the geometry's centre rather than default-forward, which is how
+            // the Items Lab's first shot came back as a flat grey wall.
+            var eye = (spawn ?? Vector3.Zero) + new Vector3(0, 1.6f, 0);
+            var centre = Centre(worldRoot);
+            cam.GlobalPosition = eye;
+            if (eye.DistanceSquaredTo(centre) > 0.01f) cam.LookAt(centre, Vector3.Up);
         }
         cam.Current = true;
 
@@ -134,7 +159,10 @@ public static partial class WorldDiagnostic
             foreach (var s in screens) s.Play("diag://local", ogv, "ogv", "theora");
         }
 
-        host.AddChild(new ShotTaker(shot, screenMeshes.FirstOrDefault(), worldRoot));
+        double waitSeconds = 2.5;
+        if (!string.IsNullOrEmpty(wait) && double.TryParse(wait, out var w)) waitSeconds = w;
+        GD.Print($"WORLDTEST: capturing after {waitSeconds:0.0}s");
+        host.AddChild(new ShotTaker(shot, screenMeshes.FirstOrDefault(), worldRoot, waitSeconds));
     }
 
     /// Waits for the decoder to produce frames, reports whether the screen texture is real,
@@ -144,19 +172,25 @@ public static partial class WorldDiagnostic
         private readonly string _path;
         private readonly MeshInstance3D _screen;
         private readonly Node _worldRoot;
-        private int _frames;
+        private readonly double _wait;
+        private double _elapsed;
 
-        public ShotTaker(string path, MeshInstance3D screen, Node worldRoot)
+        public ShotTaker(string path, MeshInstance3D screen, Node worldRoot, double wait)
         {
             _path = path;
             _screen = screen;
             _worldRoot = worldRoot;
+            _wait = wait;
         }
 
         public override void _Process(double delta)
         {
-            _frames++;
-            if (_frames < 150) return; // ~2.5 s at 60 fps for the decoder to spin up
+            // Wall-clock, not a frame count. The old version waited 150 frames "≈2.5 s at 60
+            // fps", which is exactly the assumption that does not hold in the software
+            // rasteriser this diagnostic usually runs under — and the house-light fade it now
+            // has to outlast is measured in seconds, not frames.
+            _elapsed += delta;
+            if (_elapsed < _wait) return;
 
             // Report what actually ended up on the screen material. A pure-white screen is the
             // signature of the emissive material being shown with no video texture bound.
@@ -210,6 +244,19 @@ public static partial class WorldDiagnostic
             GD.Print($"WORLDTEST: light [{when}] {l.Name} energy {l.LightEnergy:0.00}, {extent}, " +
                      $"visible {l.Visible}, shadows {l.ShadowEnabled}");
         }
+    }
+
+    /// Centre of every visible mesh in the world, for framing a shot.
+    private static Vector3 Centre(Node root)
+    {
+        Aabb? total = null;
+        foreach (var mi in Descendants(root).OfType<MeshInstance3D>())
+        {
+            if (mi.Mesh == null) continue;
+            var world = mi.GlobalTransform * mi.GetAabb();
+            total = total.HasValue ? total.Value.Merge(world) : world;
+        }
+        return total?.GetCenter() ?? Vector3.Zero;
     }
 
     private static IEnumerable<Node> Descendants(Node n)

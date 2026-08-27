@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.6.1"
+config/version="1.6.2"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
@@ -103,7 +103,16 @@ anti_aliasing/quality/use_debanding=true
 [xr]
 
 openxr/enabled=true
-openxr/form_factor="head_mounted"
-openxr/reference_space="local"
+; Both of these are ENUMS, not strings. They were written here as strings, which Godot coerces
+; through String→int — i.e. to 0. form_factor 0 is Head Mounted, so that one was right by
+; accident; reference_space 0 is LOCAL, a SEATED space whose origin is wherever the headset
+; happened to be at startup, at HEADSET height rather than floor height. That broke VR outright:
+; VrPlayer.TryAutoCalibrate reads the camera's local Y as the floor-to-headset distance and
+; rejects anything outside 0.3–2.5 m, so it never calibrated, and ApplyHeightOffset then parked
+; the play space from a 1.65 m constant with the viewpoint down near the floor.
+; 2 = Local Floor: floor-height origin that still honours recentering (VrPlayer.Recenter), which
+; Godot emulates when XR_EXT_local_floor is unavailable.
+openxr/form_factor=0
+openxr/reference_space=2
 openxr/submit_depth_buffer=true
 openxr/extensions/hand_tracking=true

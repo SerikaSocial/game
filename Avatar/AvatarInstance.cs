@@ -138,6 +138,10 @@ public sealed partial class AvatarInstance : Node3D
         inst._roleToBone["rightUpperLeg"] = rUpLeg;
         inst._roleToBone["rightLowerLeg"] = rLeg;
 
+        // The bean is a full first-class citizen of the eye-tracking first-person camera, which
+        // needs the head→eyes probe resolved just like an imported rig.
+        inst.ResolveEyeOffset();
+
         // Attach primitive meshes to bones via BoneAttachment3D so they follow bone rotations.
         var mat = new StandardMaterial3D
         {
@@ -234,25 +238,143 @@ public sealed partial class AvatarInstance : Node3D
     /// when the rig has them, so it scales with the avatar rather than being a fixed nudge.
     public float EyeOffsetY { get; private set; } = 0.08f;
 
+    // The rest-pose offset from the head bone's origin to the eye midpoint, measured in
+    // *skeleton* space, plus the head bone's index for per-frame queries.
+    private Vector3 _eyeRestOffsetSkeleton = new(0f, 0.08f, 0f);
+    private int _headBoneIdx = -1;
+    private int _leftEyeBone = -1;
+    private int _rightEyeBone = -1;
+    private bool _eyeProbeReady;
+
+    /// Whether this rig carries real eye bones, so the first-person viewpoint is sampled from
+    /// them rather than reconstructed from the head bone. Reported by the eye diagnostics.
+    public bool HasEyeBones => _leftEyeBone >= 0 || _rightEyeBone >= 0;
+
+    /// World-space position of this rig's eye midpoint, sampled from the ANIMATED pose.
+    ///
+    /// When the rig has eye bones — nearly every VRM does — this is literally the midpoint of the
+    /// two of them in their animated pose: exactly where the avatar is looking from, and what
+    /// anyone watching the avatar would point at as its viewpoint. No offset, no reconstruction.
+    ///
+    /// The fallback below is for rigs with no eye bones, and for the one way the direct sample can
+    /// go wrong. The head bone ORIGIN rides the animation in full — that's what makes the camera
+    /// follow a run cycle's bob and a crouch's drop — but a retargeted clip can drive the head
+    /// somewhere the rest pose never anticipated, and eye bones parented under it go along for the
+    /// ride. `EyesPlausible` catches that; the reconstruction it falls back to rotates the measured
+    /// rest offset by the head's animated YAW only, which keeps the viewpoint inside the skull no
+    /// matter how hard a clip leans it (a pitch-rotated offset swings out the BACK of the skull and
+    /// leaves the camera staring at the avatar's own scalp).
+    public bool TryGetEyeGlobal(out Transform3D xf)
+    {
+        xf = Transform3D.Identity;
+        if (Skeleton == null || !_eyeProbeReady || _headBoneIdx < 0) return false;
+        if (!TryGetHeadGlobal(out var head)) return false;
+
+        var sInv = Skeleton.GlobalTransform.AffineInverse();
+        Vector3 headSkel = sInv * head.Origin;
+
+        Vector3 eyeSkel = TryGetAnimatedEyeMidpoint(out var measured) && EyesPlausible(measured, headSkel)
+            ? measured
+            : headSkel + CurrentEyeOffsetSkeleton();
+
+        xf = new Transform3D(Basis.Identity, Skeleton.GlobalTransform * eyeSkel);
+        return true;
+    }
+
+    /// Midpoint of the animated left and right eye bones, in skeleton space. One eye is enough —
+    /// a cyclops rig is still better sampled than reconstructed.
+    private bool TryGetAnimatedEyeMidpoint(out Vector3 midpoint)
+    {
+        midpoint = Vector3.Zero;
+        var sum = Vector3.Zero;
+        int n = 0;
+        if (_leftEyeBone >= 0) { sum += Skeleton.GetBoneGlobalPose(_leftEyeBone).Origin; n++; }
+        if (_rightEyeBone >= 0) { sum += Skeleton.GetBoneGlobalPose(_rightEyeBone).Origin; n++; }
+        if (n == 0) return false;
+        midpoint = sum / n;
+        return true;
+    }
+
+    /// Guard on the direct sample: the eyes must sit roughly where the rest pose says they do,
+    /// relative to the head. Generous — this exists to catch a rig or clip driving the eye bones
+    /// somewhere absurd, not to second-guess an animator.
+    private bool EyesPlausible(Vector3 eyeSkel, Vector3 headSkel)
+    {
+        float rest = _eyeRestOffsetSkeleton.Length();
+        return eyeSkel.DistanceTo(headSkel) <= rest * 2.5f + 0.05f;
+    }
+
+    /// The rest offset with only the head's animated YAW (relative to rest) applied.
+    private Vector3 CurrentEyeOffsetSkeleton()
+    {
+        var headRest = Skeleton.GetBoneGlobalRest(_headBoneIdx);
+        var headAnim = Skeleton.GetBoneGlobalPose(_headBoneIdx);
+
+        // Rest-forward of the head, carried through the animated rotation, flattened to the
+        // horizontal plane: its angle against the flat rest-forward is the lean's yaw.
+        Vector3 restFwd = headRest.Basis * Vector3.Forward; restFwd.Y = 0;
+        if (restFwd.LengthSquared() < 1e-6f) return _eyeRestOffsetSkeleton;
+        restFwd = restFwd.Normalized();
+
+        Quaternion qAnim = headAnim.Basis.GetRotationQuaternion();
+        Quaternion qRest = headRest.Basis.GetRotationQuaternion();
+        Vector3 animFwd = qAnim * qRest.Inverse() * restFwd; animFwd.Y = 0;
+        if (animFwd.LengthSquared() < 1e-6f) return _eyeRestOffsetSkeleton;
+
+        float yaw = restFwd.SignedAngleTo(animFwd.Normalized(), Vector3.Up);
+        return new Quaternion(Vector3.Up, yaw) * _eyeRestOffsetSkeleton;
+    }
+
     private void ResolveEyeOffset()
     {
         int head = BoneOf("head");
         if (Skeleton == null || head < 0) return;
+        _headBoneIdx = head;
 
-        float headY = Skeleton.GetBoneGlobalRest(head).Origin.Y;
+        var headRest = Skeleton.GetBoneGlobalRest(head);
+        float headY = headRest.Origin.Y;
 
         int le = BoneOf("leftEye"), re = BoneOf("rightEye");
-        if (le >= 0 && re >= 0)
+        _leftEyeBone = le;
+        _rightEyeBone = re;
+        Vector3 offset;
+        if (le >= 0 || re >= 0)
         {
-            float eyeY = (Skeleton.GetBoneGlobalRest(le).Origin.Y +
-                          Skeleton.GetBoneGlobalRest(re).Origin.Y) * 0.5f;
-            EyeOffsetY = Mathf.Clamp(eyeY - headY, 0.02f, 0.25f);
-            return;
+            var sum = Vector3.Zero;
+            int n = 0;
+            if (le >= 0) { sum += Skeleton.GetBoneGlobalRest(le).Origin; n++; }
+            if (re >= 0) { sum += Skeleton.GetBoneGlobalRest(re).Origin; n++; }
+            offset = sum / n - headRest.Origin;
+
+            // The eye bones give all three axes; keep them as long as the result looks like a
+            // skull-sized displacement and not like mis-authored bones on the other end of town.
+            // Bones that fail this are disowned outright — if their REST pose is nonsense there is
+            // no reason to trust their animated pose as a viewpoint either.
+            if (offset.Length() > 0.5f)
+            {
+                GD.PrintErr($"avatar: eye bones sit {offset.Length():F2} m from the head bone — " +
+                            "ignoring them and reconstructing the viewpoint from the head.");
+                offset = new Vector3(0, 0.08f, 0);
+                _leftEyeBone = _rightEyeBone = -1;
+            }
+
+            EyeOffsetY = Mathf.Clamp(offset.Y, 0.02f, 0.25f);
+        }
+        else
+        {
+            // No eye bones — fall back to the metadata's eye height. It's the avatar's height
+            // less a constant rather than a measurement, so clamp it to a plausible skull's
+            // worth of offset. Vertical only: guessing a forward axis too risks poking the
+            // camera through faces whose head bones aren't oriented like ours.
+            float y = Mathf.Clamp(EyeHeight - headY, 0.03f, 0.18f);
+            offset = new Vector3(0, y, 0);
+            EyeOffsetY = y;
         }
 
-        // No eye bones — fall back to the metadata's eye height. It's the avatar's height less a
-        // constant rather than a measurement, so clamp it to a plausible skull's worth of offset.
-        EyeOffsetY = Mathf.Clamp(EyeHeight - headY, 0.03f, 0.18f);
+        _eyeRestOffsetSkeleton = offset;
+        _eyeProbeReady = true;
+        GD.Print($"avatar: first-person viewpoint = {(HasEyeBones ? "eye-bone midpoint (sampled)" : "head bone + reconstructed offset")}" +
+                 $", rest offset {offset} ({offset.Length() * 100f:F1} cm)");
     }
 
     /// Measure the hip bone height from the skeleton's rest pose so seats can place the
@@ -343,6 +465,7 @@ public sealed partial class AvatarInstance : Node3D
         }
 
         double headWeight = 0, totalWeight = 0;
+        var perBone = new Dictionary<int, double>();
         for (int s = 0; s < am.GetSurfaceCount(); s++)
         {
             var arrays = am.SurfaceGetArrays(s);
@@ -364,11 +487,42 @@ public sealed partial class AvatarInstance : Node3D
                 float w = weights[i];
                 totalWeight += w;
                 if (headBones.Contains(bone)) headWeight += w;
+                perBone[bone] = (perBone.TryGetValue(bone, out var cur) ? cur : 0) + w;
             }
         }
 
-        // Strictly head. Anything with real body weight in it stays visible.
-        return totalWeight > 0 && headWeight / totalWeight > 0.95;
+        if (totalWeight <= 0) return false;
+
+        double headFrac = headWeight / totalWeight;
+        int dominant = -1;
+        double dominantW = 0;
+        foreach (var kv in perBone)
+            if (kv.Value > dominantW) { dominantW = kv.Value; dominant = kv.Key; }
+        double domFrac = dominantW / totalWeight;
+
+        // Mesh-classification telemetry: SERIKA_DEBUG_MESHES=1 dumps each mesh's head-weight
+        // numbers once, so the hide thresholds below can be tuned against real rigs instead of
+        // guessed at (a wrong threshold either engulfs the camera in hair or deletes the body).
+        if (System.Environment.GetEnvironmentVariable("SERIKA_DEBUG_MESHES") == "1")
+        {
+            string boneName = dominant >= 0 ? Skeleton.GetBoneName(dominant) : "(none)";
+            GD.Print($"MESHCLASS {mesh.Name}: headFrac={headFrac:F3} dominant='{boneName}' " +
+                     $"domFrac={domFrac:F3} surfaces={am.GetSurfaceCount()} " +
+                     $"aabbY={mesh.GetAabb().Size.Y:F2}");
+        }
+
+        // ANY meaningful head weight ⇒ head-attached. This is the rule that actually clears
+        // first person on real rigs: strand planes draped over the chest commonly hold 70-85%
+        // of their weight on chest/shoulder bones with the rest on the skull, so strict tests
+        // leave them visible — and they engulf the camera exactly when a crouch tucks the head
+        // or a sprint leans it back toward the viewpoint. Hiding them costs only your own view
+        // of your back hair; everyone else, mirrors and the shadow map still see every strand
+        // (render layers + light masks).
+        if (headFrac > 0.95) return true;
+
+        // Dominant-bone rule: a mesh LED by a head bone is head geometry wearing a
+        // body-shaped hem, even when head weight is a minority overall.
+        return headBones.Contains(dominant) && domFrac > 0.4;
     }
 
     private static Skeleton3D FindSkeleton(Node node)
@@ -434,8 +588,17 @@ public sealed partial class AvatarInstance : Node3D
     public MoveDirection MoveDir { get; set; } = MoveDirection.Forward;
 
     /// Play an emote animation. Pass Emote.None to return to normal.
+    ///
+    /// `Yes` and `Reject` are routed to the additive head gesture instead of their authored
+    /// full-body clips (see `PlayHeadGesture`): a nod that cancels your walk and drags your gaze
+    /// off whoever you are nodding at is the wrong shape for a social space, and the clip path
+    /// suppresses itself above 0.5 m/s anyway. The enum members and the retargeter's `Yes`/
+    /// `Reject` clips are left in place — they remain reachable through `AnimRetargeter.State`.
     public void PlayEmote(Emote e)
     {
+        if (e == Emote.Yes) { PlayHeadGesture(HeadGesture.Nod); return; }
+        if (e == Emote.Reject) { PlayHeadGesture(HeadGesture.Shake); return; }
+
         // A built-in emote overrides any custom clip — otherwise the two would drive the skeleton
         // at once and the avatar would twitch between them.
         if (_customClipActive) StopCustomEmote();
@@ -1054,10 +1217,11 @@ public sealed partial class AvatarInstance : Node3D
         Swing("rightLowerArm", lowerArmBend);
         Swing("chest", breathe);
         Swing("spine", breathe * 0.5f);
-        // Head: gentle wander while idle, damped out during emotes.
-        SwingQuat("head",
-            new Quaternion(Vector3.Right, Mathf.Sin(t * 0.9f) * 0.025f * idle * (1f - eb)) *
-            new Quaternion(Vector3.Up, Mathf.Sin(t * 0.6f) * 0.05f * idle * (1f - eb)));
+        // Head: deliberately STEADY. The old while-idle sine wander (nod + turn) streamed to
+        // every peer, mirrored in every reflection and baked into every shadow as a continuously
+        // wobbling skull — a social app reads that as a glitchy avatar, not life. Head motion
+        // now comes solely from authored locomotion clips (run bounce etc.), which reads as real
+        // movement instead of shaking.
         // Hips: bob with the walk, and roll side-to-side with the idle weight shift.
         SwingQuat("hips",
             new Quaternion(Vector3.Right, Mathf.Abs(Mathf.Sin(_walkPhase)) * -0.04f * b * (1f - eb)) *
@@ -1074,6 +1238,12 @@ public sealed partial class AvatarInstance : Node3D
             float fw = hasClip ? 0f : 1f;
             _retargeter.Update(delta, fw);
         }
+
+        // ── Head aim ────────────────────────────────────────────────────────────────
+        // LAST, because the retargeter owns `neck` and would overwrite an earlier write. See
+        // Avatar/HeadAim.cs. Nothing happens here unless the player is looking around or has
+        // asked for a gesture — this is not the free-running head sway that was removed above.
+        ApplyHeadAim(dt);
     }
 
     /// Map movement + emote state to a retargeter animation state.

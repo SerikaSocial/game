@@ -12,11 +12,12 @@ namespace SerikaSocial.World;
 ///
 /// Two halves, and both are needed to read as a cinema:
 ///
-///   1. **The house goes down.** Every `Light3D` the world shipped fades to black over
-///      `FadeSeconds`. Only real lights are touched — the emissive aisle strips, step lights,
-///      cove and exit signs are materials, not lights, so they stay lit. That is the correct
-///      outcome rather than a limitation: a real auditorium keeps its safety lighting on during
-///      the film and kills everything else, which is exactly what falls out of this split.
+///   1. **The house goes down.** Three different things light one of these rooms and all three
+///      have to go, or the result is merely dimmer rather than dark. `Light3D`s fade to black;
+///      the emissive fittings (aisle strips, cove, step lights, exit signs) fade to a marker
+///      glow, since they are *materials* and no amount of dimming lights touches them; and the
+///      environment's ambient fill goes out, because a flat directionless fill is the one thing
+///      that can never be made to look like it comes from the screen.
 ///
 ///   2. **The screen takes over.** A single omni in front of the picture, its colour and
 ///      brightness sampled from the frame being decoded, so a bright snow scene washes the front
@@ -33,24 +34,38 @@ public partial class HouseLights : Node
     /// How far the world's own lights drop while a picture is on. Zero — a cinema is dark.
     private const float DimTo = 0.0f;
     /// How far the *emissive* fittings drop — the aisle strips, step lights, cove and exit
-    /// signs. Not to zero: these are the safety lighting, and a real auditorium keeps them on
-    /// through the film. Low enough that they no longer light the room or cross the glow
-    /// threshold (so their bloom halos go with them) but still read as markers in the dark.
-    private const float EmissiveDimTo = 0.10f;
+    /// signs. Out entirely: at 10% they were still the brightest thing in the room and still
+    /// lit the side walls well enough to see them, which is the opposite of the point. The
+    /// screen is the only light source in here.
+    private const float EmissiveDimTo = 0.0f;
     /// Ambient goes out entirely. It is a flat fill with no direction, so any of it at all is
     /// the one thing that cannot be made to look like it comes from the screen.
     private const float AmbientDimTo = 0.0f;
 
     /// Lights fade rather than switch: an instant cut reads as a bug, a fade reads as a cinema.
+    /// Long, because the fade *is* the effect — at a couple of seconds it reads as a glitch you
+    /// half-noticed rather than the house going down, and the point is to watch it happen.
     /// Slower going down (the film is starting) than coming back up.
-    private const float FadeDownSeconds = 2.2f;
-    private const float FadeUpSeconds = 1.4f;
+    private const float FadeDownSeconds = 7.0f;
+    private const float FadeUpSeconds = 4.5f;
+
+    /// Longest frame allowed to advance the fade.
+    ///
+    /// The fade is driven by `delta`, and the two moments it runs are exactly the two moments
+    /// the frame time spikes: a decoder spinning up, and a clip ending and tearing down. A
+    /// single 2-second hitch would otherwise consume half the fade in one frame and the lights
+    /// would appear to snap — which is precisely what "restore is instant" looked like. Capping
+    /// the step makes a stall cost real time rather than fade progress.
+    private const float MaxFadeStep = 1f / 20f;
 
     /// Peak energy of the screen bounce, for a fully white frame.
     private const float BounceEnergy = 3.2f;
-    /// How fast the bounce chases the sampled frame colour. Low enough that a cut to black does
-    /// not slam the room off, high enough that it still tracks the picture.
-    private const float BounceResponse = 4.0f;
+    /// How fast the bounce chases the sampled frame colour, in e-folds per second. Low enough
+    /// that a cut to black does not slam the room off, high enough that it still tracks the
+    /// picture. This is also what made the *restore* look instant even while the lamps were
+    /// still fading: the only light in the room died in a quarter of a second and the eye read
+    /// that as the whole transition being over.
+    private const float BounceResponse = 1.2f;
 
     private readonly System.Collections.Generic.List<(Light3D Light, float Base)> _house = new();
     private readonly System.Collections.Generic.List<(BaseMaterial3D Mat, float Base)> _emissive = new();
@@ -85,7 +100,8 @@ public partial class HouseLights : Node
 
         bool playing = AnyScreenPlaying(out var screen);
 
-        float rate = (float)delta / (playing ? FadeDownSeconds : FadeUpSeconds);
+        float step = Mathf.Min((float)delta, MaxFadeStep);
+        float rate = step / (playing ? FadeDownSeconds : FadeUpSeconds);
         _dim = Mathf.Clamp(_dim + (playing ? rate : -rate), 0f, 1f);
 
         float scale = Mathf.Lerp(1f, DimTo, _dim);
@@ -129,7 +145,13 @@ public partial class HouseLights : Node
 
         // The bounce is parented to the screen quad, so it follows a screen wherever the world
         // put it, and inherits nothing else. Placed a little in front along the quad's facing
-        // (a QuadMesh points down its local +Z) and reaching about a screen-width into the room.
+        // (a QuadMesh points down its local +Z).
+        //
+        // Range and attenuation are deliberately tight. A wide, slow falloff lit the whole
+        // auditorium evenly — including the far wall — which reads as "someone left a light on",
+        // not as spill from a screen. Reaching about one and a half screen-widths with a square
+        // falloff puts the front rows in the picture's light and leaves the back of the house
+        // genuinely black, which is what a cinema looks like.
         if (FirstScreen() is { Surface: { } surface })
         {
             float width = (surface.Mesh as QuadMesh)?.Size.X ?? 6f;
@@ -139,8 +161,8 @@ public partial class HouseLights : Node
                 // two identically named lights in one diagnostic dump is a trap.
                 Name = "VideoBounce",
                 Position = new Vector3(0, 0, width * 0.25f),
-                OmniRange = Mathf.Clamp(width * 2.5f, 8f, 40f),
-                OmniAttenuation = 1.2f,
+                OmniRange = Mathf.Clamp(width * 1.6f, 8f, 30f),
+                OmniAttenuation = 2.0f,
                 LightEnergy = 0f,
                 Visible = false,
                 // The picture already casts no shadow (the quad is unshaded); making its bounce
@@ -223,8 +245,8 @@ public partial class HouseLights : Node
             target = _sampled;
         }
 
-        // Chase, don't snap — see BounceResponse.
-        float k = Mathf.Min(1f, (float)delta * BounceResponse);
+        // Chase, don't snap — see BounceResponse. Capped like the fade, so a hitch cannot jump it.
+        float k = Mathf.Min(1f, Mathf.Min((float)delta, MaxFadeStep) * BounceResponse);
         _bounceColour = _bounceColour.Lerp(target, k);
 
         // The bounce is only allowed to be as bright as the house is dark, so it fades up with

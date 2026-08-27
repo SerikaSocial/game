@@ -435,9 +435,19 @@ public static class WorldLoader
     //   SERIKA_MIRROR  a real Mirror        (scale.X = width, scale.Z = height)
     //   SERIKA_SEAT    a sittable SeatNode
     //   SERIKA_VIDEO   the video screen     (scale.X = width, scale.Z = height)
+    //   SERIKA_PROP    a grabbable PhysicsProp (scale = box extents)
     private const string MarkerMirror = "SERIKA_MIRROR";
     private const string MarkerSeat   = "SERIKA_SEAT";
     private const string MarkerVideo  = "SERIKA_VIDEO";
+    private const string MarkerProp   = "SERIKA_PROP";
+
+    /// First network id handed to a marker-spawned prop.
+    ///
+    /// The prop id range is shared with the marker pens `Main` spawns at 100-104, so authored
+    /// props start at 200 to stay clear of them. Ids are assigned in tree-walk order, which is
+    /// stable for a given bundle — every client loading the same `.serikaworld` therefore
+    /// numbers the props identically, which is the whole requirement for sync to work.
+    private const ushort PropNetIdBase = 200;
 
     /// Replace every marker node with the live node it stands for. Returns the SPAWN
     /// marker's position when the world declares one, and how many video screens it built —
@@ -446,7 +456,7 @@ public static class WorldLoader
     private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens)
     {
         Vector3? spawn = null;
-        int mirrors = 0, seats = 0, videos = 0;
+        int mirrors = 0, seats = 0, videos = 0, props = 0;
 
         // Snapshot first: we mutate the tree while walking it.
         var markers = new System.Collections.Generic.List<Node3D>();
@@ -506,6 +516,35 @@ public static class WorldLoader
                 parent.AddChild(new SerikaSocial.World.Video.VideoScreen(screen));
                 videos++;
             }
+            else if (name.StartsWith(MarkerProp, StringComparison.Ordinal))
+            {
+                // Marker scale is the box's full extents, floored so a marker left at the
+                // default scale of 1 does not become a 1 m crate nobody can lift.
+                var size = new Vector3(Mathf.Max(0.1f, scale.X), Mathf.Max(0.1f, scale.Y),
+                                       Mathf.Max(0.1f, scale.Z));
+                var prop = new PhysicsProp
+                {
+                    Name = name.Replace(MarkerProp, "Prop"),
+                    NetId = (ushort)(PropNetIdBase + props),
+                    Networked = true,
+                    PropName = "Pick up",
+                };
+                prop.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = size } });
+                prop.AddChild(new MeshInstance3D
+                {
+                    Mesh = new BoxMesh { Size = size },
+                    MaterialOverride = new StandardMaterial3D
+                    {
+                        AlbedoColor = new Color(0.50f, 0.45f, 0.55f),
+                        Roughness = 0.6f,
+                        Metallic = 0.2f,
+                    },
+                });
+                parent.AddChild(prop);
+                prop.GlobalPosition = pos;
+                prop.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
+                props++;
+            }
             else // SPAWN
             {
                 spawn = pos;
@@ -514,8 +553,9 @@ public static class WorldLoader
             m.QueueFree();
         }
 
-        if (mirrors + seats + videos > 0)
-            GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), {videos} video screen(s)");
+        if (mirrors + seats + videos + props > 0)
+            GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), " +
+                     $"{videos} video screen(s), {props} prop(s)");
 
         videoScreens = videos;
         return spawn;

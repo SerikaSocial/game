@@ -156,13 +156,18 @@ public sealed class VrAvatarIk
     /// Solve one frame. All targets are world-space. `headBasis` orients the head bone;
     /// hand positions drive the arm chains. Optional hip and foot targets enable Full Body Tracking.
     /// Call this *after* `AvatarInstance.Animate` so the IK overrides the procedural walk cycle.
+    ///
+    /// `solveHead` exists so a head gesture can own the head bone for its duration. The headset
+    /// pose is written every frame, so an additive nod would be overwritten the instant it was
+    /// applied and the gesture would be invisible in VR.
     public void Solve(
-        Transform3D headWorld, 
-        Vector3 leftHandWorld, 
+        Transform3D headWorld,
+        Vector3 leftHandWorld,
         Vector3 rightHandWorld,
         Vector3? hipWorld = null,
         Vector3? leftFootWorld = null,
-        Vector3? rightFootWorld = null
+        Vector3? rightFootWorld = null,
+        bool solveHead = true
     )
     {
         if (!_valid) return;
@@ -181,7 +186,7 @@ public sealed class VrAvatarIk
 
         // 2. Upper body posture / spine lean.
         SolveSpineLean(headLocal, leftHandLocal, rightHandLocal);
-        SolveHead(headLocal);
+        if (solveHead) SolveHead(headLocal);
 
         // 3. Solve Arm IK.
         if (_leftArm.Ok) SolveArm(_leftArm, leftHandLocal, poleSign: +1f);

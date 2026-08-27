@@ -25,6 +25,32 @@ public static class DeviceProfile
     public static float MirrorRange = 12f;    // how close before a mirror re-renders
     public static bool BloomEnabled = true;
 
+    /// How many mirrors may render a live reflection in the same frame.
+    ///
+    /// Each live mirror is a SECOND FULL RENDER of the scene, and worlds do not ration them —
+    /// the Mirror Gallery hangs eight in one room, all comfortably inside `MirrorRange`, which
+    /// uncapped is eight extra scene renders every frame. Mirrors past the budget fall back to
+    /// dark glass, nearest kept first, so the one you are actually looking into is always live.
+    public static int MirrorBudget => Current switch
+    {
+        Tier.Low => 1,
+        Tier.Medium => 2,
+        _ => 3,
+    };
+
+    /// A mirror's reflection resolution, as a fraction of the main viewport's pixel size.
+    ///
+    /// The mirror shader samples its texture by SCREEN_UV, so the reflection is a screen-space
+    /// image: it is sharp only when the render target matches the screen's pixel dimensions.
+    /// Sizing it from the mirror's physical metres instead — which is what it used to do — left
+    /// a 2.2 m mirror rendering 660 px tall and then upscaled ~1.6× on a 1080p display.
+    public static float MirrorResolutionScale => Current switch
+    {
+        Tier.Low => 0.6f,
+        Tier.Medium => 0.8f,
+        _ => 1.0f,
+    };
+
     /// Cel/toon shading for avatars and worlds. The banded look is core to Serika's style, so
     /// it stays on across tiers; only the outline (a second draw of every avatar surface, which
     /// matters on a tile GPU) drops on the Quest-Low tier.
@@ -188,6 +214,14 @@ public static class DeviceProfile
         {
             if (node is not Light3D light) continue;
             light.ShadowEnabled = Shadows;
+            // Avatars reserve visual layers 3/4 for the first-person head/body split. A light
+            // only casts shadows from objects whose layers intersect BOTH of its masks, and
+            // that lookup is per-light — hiding the head from a camera never excuses it from
+            // the shadow map, but only while lights keep these bits. Worlds import with their
+            // own mask notions, so this is re-stamped on every load: without it your ground
+            // silhouette loses its hair (and reads as headless) exactly when first person is on.
+            light.LightCullMask |= Player.LocalPlayer.AvatarRenderLayers;
+            light.ShadowCasterMask |= Player.LocalPlayer.AvatarRenderLayers;
             // Directional shadows are the expensive ones. Pulling the split distance in is a much
             // bigger win on a tile GPU than lowering resolution, and barely visible in a social
             // space where the interesting geometry is all within a few metres.
@@ -264,6 +298,25 @@ public static class DeviceProfile
 
         private static bool _loading;
 
+        /// Route audio to the saved devices. ONLY a real interactive boot may call this —
+        /// never diagnostics, UI-shot runs or anything under a virtual display. Those share
+        /// the developer's live PulseAudio server, and silently rerouting system-wide sound
+        /// from a test run is exactly how "the build nuked my audio prefs" happens. The
+        /// settings menu applies its own changes immediately, so boot was the one caller that
+        /// mattered.
+        public static void ApplyAudioDevices()
+        {
+            if (_loading) return;
+            try
+            {
+                if (!string.IsNullOrEmpty(OutputDevice) && OutputDevice != "Default")
+                    AudioServer.OutputDevice = OutputDevice;
+                if (!string.IsNullOrEmpty(InputDevice) && InputDevice != "Default")
+                    AudioServer.InputDevice = InputDevice;
+            }
+            catch { }
+        }
+
         public static void Load()
         {
             var cfg = new ConfigFile();
@@ -295,15 +348,6 @@ public static class DeviceProfile
             VrTeleport = (bool)cfg.GetValue("vr", "teleport", VrTeleport);
             VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
             VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
-
-            try
-            {
-                if (!string.IsNullOrEmpty(OutputDevice) && OutputDevice != "Default")
-                    AudioServer.OutputDevice = OutputDevice;
-                if (!string.IsNullOrEmpty(InputDevice) && InputDevice != "Default")
-                    AudioServer.InputDevice = InputDevice;
-            }
-            catch { }
 
             _loading = false;
         }

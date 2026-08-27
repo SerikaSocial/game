@@ -30,6 +30,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public Vector2 ExternalMove { get; set; } = Vector2.Zero;
     /// One-shot jump request from a touch button.
     public bool ExternalJump { get; set; }
+    /// Held crouch request from touch controls (or diagnostics); OR-ed with the Ctrl key.
+    public bool ExternalCrouch { get; set; }
+    /// Held sprint request from touch controls (or diagnostics); OR-ed with the Shift key.
+    public bool ExternalSprint { get; set; }
     private Vector2 _pendingLook; // accumulated touch look delta (pixels), applied next physics tick
 
     /// Feed a look delta (in pixels) from touch drag; applied like mouse-look.
@@ -58,7 +62,14 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     private float _currentHeight = StandHeight;
     private float _currentCameraY = StandCameraY;
     private float _bobTimer;
-    private float _smoothedHeadY; // low-pass filtered head bone Y for first-person camera
+
+    // ── First-person eye tracking ────────────────────────────────────────────────
+    // While in first person with an avatar equipped, the camera is detached from the yaw/pitch
+    // arm (TopLevel): its POSITION is the avatar's animated eye point each tick and its
+    // ORIENTATION is purely mouse look. Animations therefore move the viewpoint — a run cycle's
+    // chest lean, a crouch's drop, a sit clip's height — instead of the body visibly bouncing
+    // away underneath a fixed-height camera, which is what the previous Y-only filter did.
+    private bool _fpTopLevel;       // camera is currently riding the skeleton, off the rig arm
 
     public override void _Ready()
     {
@@ -147,12 +158,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _nameTag.Position = new Vector3(0, avatar.Height + 0.3f, 0);
         _standEyeY = avatar.EyeHeight;
         if (!_isCrouching) _currentCameraY = _standEyeY;
-        _smoothedHeadY = _currentCameraY;
-        // Place avatar visuals on render layers: head meshes go on FpHeadLayer (culled in
-        // first-person), body meshes go on FpAvatarLayer (visible in all modes). This gives
-        // a VRChat-style first-person view where you can see your hands, torso, and legs
-        // but not the inside of your own head.
-        SetAvatarVisualLayers(avatar, FpAvatarLayer, FpHeadLayer);
+        // Split the avatar into its three render representations. Nothing here mutates the
+        // original meshes — third person, mirrors and shadows keep the complete avatar, while
+        // first person gets a separate copy with every head triangle filtered out.
+        FirstPersonProxy.Apply(avatar, AvatarOthersLayer, AvatarFpLayer, AvatarShadowLayer);
         ApplyCameraMode();
     }
 
@@ -197,9 +206,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // to hide the head in first person. This preserves the mirror reflection and shadow.
         _avatar?.SetHeadVisible(true);
 
-        // In first person: cull only the head layer (FpHeadLayer) so the player sees their
-        // hands, torso, and legs — VRChat-style. In third person: render everything.
-        _camera.CullMask = isFP ? 1048575u & ~FpHeadLayer : 1048575u;
+        // Which of the avatar's three representations this camera sees. First person renders the
+        // head-filtered proxy and nothing else of the avatar; every other mode renders the
+        // untouched originals and must not also draw the proxy on top of them.
+        _camera.CullMask = 1048575u & ~(isFP ? FpCullLayers : NonFpCullLayers);
 
         // Near clip: tight in first person so the forward-pushed camera doesn't clip the face;
         // default otherwise.
@@ -215,25 +225,96 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // Snap rather than glide when the player deliberately switches view.
         _camDistance = isFP ? 0f : _thirdPersonDistance;
 
+        // First person's range is narrower than the orbit's, so entering it from a steep orbit
+        // has to pull the pivot back inside a neck's reach.
+        ClampPitch();
+
         // The local player's own card is always hidden — only other players' cards are shown.
         _nameTag.SetShown(false);
     }
 
-    // First-person eye placement. The camera is pushed forward from the head bone toward where
-    // the eyes are, so it sits in front of the face. The avatar's body (hands, torso, legs) is
-    // visible in first-person — like VRChat — while the head is hidden via a separate render
-    // layer (FpHeadLayer). The mirror camera renders all layers, so the reflection shows the
-    // full avatar including the head.
-    private const float FpEyeForward = 0.10f;
-    private const float FpNear = 0.04f;
+    // First-person near clip. Tight, because the camera sits exactly where the eyes are —
+    // inside the skull — and anything within a few centimetres (lashes, fringe tips) must be
+    // clipped rather than seen.
+    private const float FpNear = 0.03f;
 
-    // Render layer for the local player's avatar body (hands, torso, legs). Visible in ALL modes
-    // including first-person, so the player can see their own body — VRChat-style.
-    private const uint FpAvatarLayer = 1u << 2; // visual layer 3
+    /// Owns camera placement while in first person with an avatar equipped. Runs every physics
+    /// tick from both the free-move and the seated paths, AFTER Animate() has posed the skeleton,
+    /// so the sample reflects this frame's final animation state.
+    ///
+    /// Rotation stays mouse-driven (yaw node × pitch node, composed by hand here because the
+    /// camera no longer hangs beneath them). Position is the avatar's exact animated eye point
+    /// from AvatarInstance.TryGetEyeGlobal — assigned DIRECTLY, never smoothed. That is the
+    /// whole fix for "the camera goes out of the head": any filter, however fast, lags the
+    /// sprint bob by a frame or two, and a lagging eye point sits behind the skull looking at
+    /// the avatar's neck. Direct tracking keeps the camera inside the head through every
+    /// animation, which is also what lets the hair stay visible — it frames the view from
+    /// around the head instead of walling off a camera stranded in the hair mass behind it.
+    private void UpdateFirstPersonCamera()
+    {
+        if (!_firstPerson || _avatar?.TryGetEyeGlobal(out var eyeXf) != true)
+        {
+            DetachFirstPersonCamera();
+            return; // capsule mode / degenerate rig falls back to the static rig + bob below
+        }
 
-    // Render layer for the local player's avatar head mesh only. Culled in first-person so the
-    // inside of the skull doesn't block the camera; visible in third-person and mirror.
-    private const uint FpHeadLayer = 1u << 3; // visual layer 4
+        // Mouse look, recomposed: world rotation = yaw around Y then pitch around X — exactly
+        // what the yaw→pitch node chain produced when the camera still hung off it.
+        var look = new Quaternion(Vector3.Up, _yaw.Rotation.Y)
+                 * new Quaternion(Vector3.Right, _pitch.Rotation.X);
+        var basis = new Basis(look);
+
+        if (!_fpTopLevel)
+        {
+            _camera.TopLevel = true;
+            _fpTopLevel = true;
+        }
+
+        _camera.GlobalTransform = new Transform3D(basis, eyeXf.Origin);
+    }
+
+    /// Return the camera to the third-person rig arm. ApplyCameraMode re-runs to restore the
+    /// mode's rotation/near/cull settings idempotently — it may have executed while the camera
+    /// was TopLevel and wrote properties (e.g. the selfie flip) that only make sense once the
+    /// camera is re-parented behaviourally.
+    private void DetachFirstPersonCamera()
+    {
+        if (!_fpTopLevel) return;
+        _fpTopLevel = false;
+        _camera.TopLevel = false;
+        _camera.Position = Vector3.Zero;
+        ApplyCameraMode();
+    }
+
+    // Legacy avatar render layers: whole meshes split into "body" and "strictly head". Still used
+    // by the shadow diagnostic's fixture; the live rigs use the three-representation layers below.
+    public const uint FpAvatarLayer = 1u << 2; // visual layer 3
+    public const uint FpHeadLayer = 1u << 3;   // visual layer 4
+
+    // The local avatar's three representations (see Avatar/FirstPersonProxy.cs). Every camera
+    // renders exactly one of the first two; the third is ShadowsOnly and never appears in a
+    // colour pass at all.
+    /// The untouched original meshes — third person, mirrors, and every shadow pass.
+    public const uint AvatarOthersLayer = 1u << 5; // visual layer 6
+    /// The head-filtered proxy — only the local player's own first-person camera.
+    public const uint AvatarFpLayer = 1u << 6;     // visual layer 7
+    /// The complete ShadowsOnly copy — keeps the silhouette whole in the FP camera's shadow pass.
+    public const uint AvatarShadowLayer = 1u << 7; // visual layer 8
+
+    /// Every layer a shadow-casting light must keep for avatars. Shadow lookup is per-LIGHT
+    /// (mask ∩ shadow_caster_mask), never per-camera, so lights keeping these bits keep hair
+    /// and face present in your cast shadow even while no first-person camera renders them.
+    /// DeviceProfile.ApplyToScene stamps this onto all lights on every world load.
+    public const uint AvatarRenderLayers =
+        FpAvatarLayer | FpHeadLayer | AvatarOthersLayer | AvatarFpLayer | AvatarShadowLayer;
+
+    /// What a local first-person camera must NOT render: the originals (their head is intact) and
+    /// the legacy head layer. The proxy on AvatarFpLayer takes their place.
+    public const uint FpCullLayers = AvatarOthersLayer | FpHeadLayer;
+
+    /// What every OTHER camera — third person, mirrors, diagnostics — must not render: the
+    /// first-person proxy, which is a headless duplicate of geometry they already show.
+    public const uint NonFpCullLayers = AvatarFpLayer;
 
     // Camera collision. The camera used to sit at a hard-coded offset behind the player, so it
     // happily sank into walls and through the floor whenever the player backed into something.
@@ -328,9 +409,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         // a seat while already mid-Sit emote would have cancelled the pose instead of holding it.
         _avatar?.PlayEmote(spot.Pose);
 
-        // Lower camera height so first- and third-person perspectives sit at seated eye level
+        // Lower camera height so third-person orbits at seated eye level. First person reads
+        // the real seated pose out of the Sit clip's skeleton instead (UpdateFirstPersonCamera).
         _currentCameraY = _standEyeY * 0.72f;
-        _smoothedHeadY = _currentCameraY;
     }
 
     /// Release the current seat/bed. Safe to call when already standing.
@@ -343,7 +424,6 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _avatar?.PlayEmote(AvatarInstance.Emote.None);
 
         _currentCameraY = _standEyeY;
-        _smoothedHeadY = _currentCameraY;
 
         // Step clear of the anchor, otherwise we're still inside the seat's trigger volume and
         // the prompt immediately offers to sit back down. The anchor is at hip height, so
@@ -372,6 +452,28 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             _avatar.PlayEmote(emote);
     }
 
+    // Pitch limits. In first person the camera IS the avatar's head, so it may only travel as
+    // far as a neck does. Past roughly 60° of flexion the viewpoint clears the chin, and with the
+    // head geometry filtered out of this view there is nothing left to stop it looking straight
+    // down the collar into the chest — a shot no human head can take. Extension (looking up) is
+    // the tighter of the two on a real neck. Third person is an orbit around the body rather than
+    // a head, so it keeps the old, wider range.
+    private const float FpPitchDown = 1.05f;    // 60° — cervical flexion
+    private const float FpPitchUp = 0.96f;      // 55° — cervical extension
+    private const float OrbitPitchLimit = 1.4f; // 80° — free orbit
+
+    /// Hold the look pivot inside the active mode's pitch range. Called from both look paths and
+    /// from ApplyCameraMode, so dropping out of a steep third-person orbit into first person
+    /// lands inside the neck's range instead of starting outside it.
+    private void ClampPitch()
+    {
+        var r = _pitch.Rotation;
+        r.X = _firstPerson
+            ? Mathf.Clamp(r.X, -FpPitchDown, FpPitchUp)
+            : Mathf.Clamp(r.X, -OrbitPitchLimit, OrbitPitchLimit);
+        _pitch.Rotation = r;
+    }
+
     private const float ThirdPersonCameraY = 0.35f;
     private const float ThirdPersonMin = 1.2f;
     private const float ThirdPersonMax = 6.0f;
@@ -384,9 +486,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         {
             _yaw.RotateY(-m.Relative.X * MouseSensitivity);
             _pitch.RotateX(-m.Relative.Y * MouseSensitivity);
-            var r = _pitch.Rotation;
-            r.X = Mathf.Clamp(r.X, -1.4f, 1.4f);
-            _pitch.Rotation = r;
+            ClampPitch();
         }
 
         // Scroll wheel zooms the third-person camera.
@@ -413,9 +513,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         {
             _yaw.RotateY(-_pendingLook.X * MouseSensitivity);
             _pitch.RotateX(-_pendingLook.Y * MouseSensitivity);
-            var cr = _pitch.Rotation;
-            cr.X = Mathf.Clamp(cr.X, -1.4f, 1.4f);
-            _pitch.Rotation = cr;
+            ClampPitch();
         }
         _pendingLook = Vector2.Zero;
 
@@ -440,8 +538,10 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             {
                 Velocity = Vector3.Zero;
                 GlobalPosition = _occupying.AnchorPosition;
+                UpdateLookAim();
                 _avatar?.Animate(delta, 0f, true, false, false);
                 SolveCamera(delta);
+                UpdateFirstPersonCamera();
                 UpdateCameraOffset(delta, moving: false, sprinting: false);
                 return;
             }
@@ -454,15 +554,15 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         ExternalJump = false;
 
         // Crouch toggle
-        bool wantCrouch = ControlsEnabled && Input.IsPhysicalKeyPressed(Key.Ctrl);
+        bool wantCrouch = ControlsEnabled && (Input.IsPhysicalKeyPressed(Key.Ctrl) || ExternalCrouch);
         if (wantCrouch != _isCrouching)
         {
             _isCrouching = wantCrouch;
             _currentHeight = _isCrouching ? CrouchHeight : StandHeight;
-            // Crouched eye height scales with the avatar rather than using a fixed 0.8 m, which
-            // sat above a short avatar's head and below a tall one's shoulders.
+            // Crouched pivot height scales with the avatar rather than using a fixed 0.8 m.
+            // Third-person only these days: in first person the CrouchIdle/CrouchWalk clips
+            // drop the head bone themselves and the tracked eye follows them.
             _currentCameraY = _isCrouching ? _standEyeY * (CrouchHeight / StandHeight) : _standEyeY;
-            _smoothedHeadY = _currentCameraY;
             _capsuleShape.Height = _currentHeight;
             _collision.Position = new Vector3(0, _currentHeight * 0.5f, 0);
             if (_bodyMesh.Mesh is CapsuleMesh cm) cm.Height = _currentHeight;
@@ -477,28 +577,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             _avatarMount.Rotation = rot;
         }
 
-        // Eye height. In first person, follow the rig's actual head bone rather than a computed
-        // constant: the crouch clip drops the pelvis by an amount only the animation knows, so a
-        // fixed crouch height left the camera buried inside the avatar's own shoulders.
-        // A low-pass filter on the head Y smooths out rapid oscillations from run/walk cycles
-        // (which dipped the camera into the torso) while still tracking the slower crouch drop.
-        float targetCamY = _currentCameraY;
-        if (_firstPerson && _avatar != null && _avatar.TryGetHeadGlobal(out var headXf))
-        {
-            // The head *bone* sits at the base of the skull, not at the eyes, so sitting the
-            // camera exactly on it puts the viewpoint around jaw height — inside the collar,
-            // where looking down showed the interior of the avatar's own chest. Lift by the
-            // rig's measured eye offset so first person is actually at eye level.
-            float localHeadY = ToLocal(headXf.Origin).Y + _avatar.EyeOffsetY;
-            if (localHeadY > 0.2f)
-            {
-                _smoothedHeadY = Mathf.Lerp(_smoothedHeadY, localHeadY, (float)delta * 3f);
-                targetCamY = _smoothedHeadY;
-            }
-        }
-
+        // Orbit pivot height — third person, the interaction ray and the name tag all hang off
+        // the yaw node, so it keeps a computed standing/crouched/seated eye level. First person
+        // no longer reads it: UpdateFirstPersonCamera rides the animated skeleton instead,
+        // which is what keeps a run cycle's lean or a crouch's drop from detaching the view
+        // from the body.
         var yawPos = _yaw.Position;
-        yawPos.Y = Mathf.Lerp(yawPos.Y, targetCamY, (float)delta * 10f);
+        yawPos.Y = Mathf.Lerp(yawPos.Y, _currentCameraY, (float)delta * 10f);
         _yaw.Position = yawPos;
 
         // Movement is relative to where we're looking (yaw only). Zeroed while controls are off
@@ -515,7 +600,8 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         if (dir.LengthSquared() > 0) dir = dir.Normalized();
 
         float speed = _isCrouching ? CrouchSpeed : WalkSpeed;
-        bool sprinting = Input.IsPhysicalKeyPressed(Key.Shift) && !_isCrouching && input.Y < 0;
+        bool sprinting = (Input.IsPhysicalKeyPressed(Key.Shift) || ExternalSprint)
+                         && !_isCrouching && input.Y < 0;
         if (sprinting) speed = SprintSpeed;
 
         v.X = dir.X * speed;
@@ -536,17 +622,26 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
                 input.X > 0.3f ? AvatarInstance.MoveDirection.Right :
                 input.X < -0.3f ? AvatarInstance.MoveDirection.Left :
                 AvatarInstance.MoveDirection.Forward;
+            UpdateLookAim();
             _avatar.Animate(delta, planar.Length(), IsOnFloor(), _isCrouching, sprinting);
         }
 
         SolveCamera(delta);
+        UpdateFirstPersonCamera();
         UpdateCameraOffset(delta, input.LengthSquared() > 0.01f && IsOnFloor(), sprinting);
     }
 
     /// Place the camera on the solved arm, plus head bob. Bob is first-person only — in third
     /// person it just makes the whole frame wobble.
+    ///
+    /// First person with an avatar is owned by UpdateFirstPersonCamera and skips everything
+    /// here. This method still serves two first-person cases: the capsule stand-in (no avatar),
+    /// where synthetic bob is all the life the view has, and a rig whose eye probe never became
+    /// ready — a broken avatar must degrade to the old static camera rather than to no camera.
     private void UpdateCameraOffset(double delta, bool moving, bool sprinting)
     {
+        if (_firstPerson && _fpTopLevel) return;
+
         float baseCamY = _firstPerson ? 0f : ThirdPersonCameraY;
         float targetY;
 
@@ -563,9 +658,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
         if (_firstPerson)
         {
-            // Forward is -Z; push the eye ahead of the head bone so we look out of the face,
-            // not out of the middle of the skull.
-            _camera.Position = new Vector3(0, targetY, -FpEyeForward);
+            _camera.Position = new Vector3(0, targetY, 0);
             return;
         }
 
@@ -573,24 +666,21 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         _camera.Position = new Vector3(0, targetY, _camDistance * sign);
     }
 
-    /// Recursively assign render layers to avatar visuals: head meshes → headLayer (culled in
-    /// first-person), all other visuals → bodyLayer (visible in all modes).
-    private void SetAvatarVisualLayers(Node root, uint bodyLayer, uint headLayer)
-    {
-        if (root is MeshInstance3D mesh)
-        {
-            bool isHead = _avatar != null && _avatar.IsHeadMesh(mesh);
-            mesh.Layers = isHead ? headLayer : bodyLayer;
-        }
-        else if (root is VisualInstance3D vi)
-        {
-            vi.Layers = bodyLayer;
-        }
-        foreach (var child in root.GetChildren())
-            SetAvatarVisualLayers(child, bodyLayer, headLayer);
-    }
+    /// Hand the mouse's look angle to the avatar so the head bone points where the player is
+    /// looking. Call immediately before `Animate`, which applies it as its last stage.
+    ///
+    /// This is what closes the desktop half of head aim. The broadcast transform still carries
+    /// body yaw only (see `PoseTransform`) — the pitch reaches peers through the head and neck
+    /// bones, which `HumanoidBones.Lod1` already streams, so no wire change is involved.
+    ///
+    /// Yaw offset is zero: the body snaps to the mouse yaw every tick a few lines above, so the
+    /// head has nothing left to make up. It is a parameter rather than a constant because a
+    /// future body-lag pass would need exactly this to keep the head on target while the torso
+    /// catches up.
+    private void UpdateLookAim() => _avatar?.SetLookAim(0f, _pitch.Rotation.X);
 
-    /// The transform we broadcast: body position, facing = yaw. Pitch stays local (head).
+    /// The transform we broadcast: body position, facing = yaw. Pitch reaches peers through the
+    /// head/neck bones in the pose frame, not through this basis.
     public Transform3D PoseTransform()
     {
         var basis = new Basis(_yaw.Basis.GetRotationQuaternion());
