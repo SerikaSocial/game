@@ -163,6 +163,7 @@ public partial class VideoQueuePanel : CanvasLayer
     public void Open()
     {
         if (_manager == null) return;
+        Visible = true; // the layer itself — see the note in Hud.HideAll
         _card.Visible = true;
         Redraw();
         InputMode.Hold(InputMode.Video);
@@ -172,6 +173,7 @@ public partial class VideoQueuePanel : CanvasLayer
     {
         if (!_card.Visible) return;
         _card.Visible = false;
+        Visible = false;
         InputMode.Release(InputMode.Video);
         Closed?.Invoke();
     }

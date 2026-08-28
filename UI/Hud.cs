@@ -25,7 +25,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.6.6";
+    public const string ClientVersion = "1.6.7";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -507,7 +507,12 @@ public partial class Hud : CanvasLayer
     /// Hide every HUD panel — the playable state (walking around Home or a world).
     public void HideAll()
     {
-        Visible = true;
+        // `false`, not `true`. On a monitor a visible layer with every child hidden draws
+        // nothing, so this read as harmless — but in VR `VrUiSurface` decides whether to show
+        // the whole floating panel (and light the laser pointer) from exactly this flag, so a
+        // permanently-visible layer pinned a 2 m slab in front of the player for the entire
+        // session. A layer that is showing nothing must say so.
+        Visible = false;
         _scrim.Visible = false;
         _loginScreen.Visible = false;
         _homePanel.Visible = false;

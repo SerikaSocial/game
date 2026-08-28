@@ -134,6 +134,12 @@ public partial class ChatOverlay : CanvasLayer
 
     public override void _Process(double delta)
     {
+        // In VR the layer's visibility is what decides whether the whole floating UI panel is
+        // drawn (see Hud.HideAll), and this layer used to be visible from boot — so an empty
+        // chat log alone was enough to keep a slab in front of the player forever. Show the
+        // layer only while there is a message on screen or the input box is open.
+        Visible = IsTyping || _lines.Count > 0;
+
         for (int i = 0; i < _lines.Count; i++)
         {
             var (label, age) = _lines[i];

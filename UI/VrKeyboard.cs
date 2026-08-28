@@ -56,7 +56,13 @@ public partial class VrKeyboard : CanvasLayer
 
     public override void _Ready()
     {
-        Layer = 70; // above chat (60) and other UI layers
+        // Above EVERY screen that can hold a text field, which is the whole point of it.
+        // At 70 it sat *under* the login screen (Hud, layer 100) — and that screen paints a
+        // full-viewport 0.96-alpha backdrop, so the keyboard rendered perfectly and was covered
+        // completely. Same for the chat input under the pause hub (105) and the main menu (106).
+        // 150 clears Tutorial (120) and stays below the Updater (200), which is a hard modal with
+        // no text entry of its own.
+        Layer = 150;
 
         _panel = new Panel
         {
@@ -132,12 +138,14 @@ public partial class VrKeyboard : CanvasLayer
 
     public new void Show()
     {
+        Visible = true; // the layer, not just the panel — see the note in Hud.HideAll
         _panel.Visible = true;
         Rebuild();
     }
 
     public new void Hide()
     {
+        Visible = false;
         _panel.Visible = false;
         _target = null;
     }

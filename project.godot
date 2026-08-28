@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.6.6"
+config/version="1.6.7"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)

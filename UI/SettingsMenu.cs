@@ -364,6 +364,7 @@ public partial class SettingsMenu : CanvasLayer
     public void Open()
     {
         RebuildValues();
+        Visible = true; // the layer itself — see the note in Hud.HideAll
         _scrim.Visible = true;
         _card.Visible = true;
         InputMode.Hold(InputMode.Settings);
@@ -374,6 +375,7 @@ public partial class SettingsMenu : CanvasLayer
         if (!_card.Visible) return;
         _scrim.Visible = false;
         _card.Visible = false;
+        Visible = false;
         InputMode.Release(InputMode.Settings);
         Closed?.Invoke();
     }

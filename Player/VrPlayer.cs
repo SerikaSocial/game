@@ -605,6 +605,11 @@ void fragment() {
     /// changes, since `ApplyHeightOffset` otherwise only runs on avatar swaps and calibration.
     public void ReapplyHeightOffset() => ApplyHeightOffset();
 
+    /// Raised by `Recenter`, so `Main` can also snap the floating UI panel back in front of the
+    /// player. Recentring the play space without moving the panel leaves the menu hanging off at
+    /// an angle, which is the opposite of what "recentre" is asked for.
+    public event System.Action Recentred;
+
     /// Re-centre the play space so the player faces world-forward from where they stand.
     /// Bound to the secondary button held with the trigger — an accidental recenter mid-session
     /// is disorienting, so it deliberately needs two hands.
@@ -613,6 +618,7 @@ void fragment() {
         XRServer.CenterOnHmd(XRServer.RotationMode.ResetButKeepTilt, true);
         Pulse(_leftHand, 0.4f, 0.08f);
         Pulse(_rightHand, 0.4f, 0.08f);
+        Recentred?.Invoke();
     }
 
     // ---------------------------------------------------------------- frame loop

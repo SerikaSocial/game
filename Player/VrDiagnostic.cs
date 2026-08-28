@@ -362,6 +362,15 @@ public static partial class VrDiagnostic
                          $"menu open → interactive={panelMenu}, laser while idle drawn={!laserIdle}  " +
                          $"{(ok ? "ok — the panel and pointer track real menus only" : "FAIL — HUD chrome still counts as a menu")}");
             });
+
+            // ── KEYBD ────────────────────────────────────────────────────────────────
+            // The VR keyboard only appears while a LineEdit holds focus, and the only way to
+            // focus one in a headset is a synthetic mouse click pushed into the panel viewport
+            // by the controller ray. That link had never been tested.
+            //
+            // Deliberately last: it has to put a visible field on the panel, which would poison
+            // the "idle with only chrome" measurement above if it ran first.
+            Add("keybd-click", PushClickAtField, 5, CheckFieldFocused);
         }
 
         private float _dashTravel;
@@ -369,6 +378,66 @@ public static partial class VrDiagnostic
         private bool _panelIdle;
         private UI.VrUiSurface _surface;
         private CanvasLayer _menuLayer;
+
+        private LineEdit _testField;
+
+        /// Put a text field on the panel and click it the way the controller ray would.
+        private void PushClickAtField()
+        {
+            if (_surface == null || _menuLayer == null) return;
+            _menuLayer.Visible = true;
+
+            var root = new Control { Name = "FieldRoot" };
+            root.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+            _menuLayer.AddChild(root);
+
+            _testField = new LineEdit
+            {
+                Name = "TestField",
+                Position = new Vector2(100, 100),
+                Size = new Vector2(400, 48),
+            };
+            root.AddChild(_testField);
+
+            // Centre of the field, in the panel's LOGICAL coordinates — the same space
+            // `VrUiSurface.WorldToViewport` produces and `VrPlayer.UpdatePointer` pushes.
+            var at = _testField.Position + _testField.Size * 0.5f;
+            foreach (bool down in new[] { true, false })
+            {
+                _surface.Viewport.PushInput(new InputEventMouseButton
+                {
+                    Position = at,
+                    GlobalPosition = at,
+                    ButtonIndex = MouseButton.Left,
+                    ButtonMask = down ? MouseButtonMask.Left : 0,
+                    Pressed = down,
+                }, true);
+            }
+        }
+
+        private void CheckFieldFocused()
+        {
+            if (_testField == null) { GD.Print("VRTEST KEYBD  no panel — SKIPPED"); return; }
+
+            var focused = _surface.Viewport.GuiGetFocusOwner();
+            bool ok = focused == _testField;
+            _ok &= ok;
+            GD.Print($"VRTEST KEYBD  click at the field → focus owner is " +
+                     $"{(focused == null ? "nothing" : focused.Name.ToString())}  " +
+                     $"{(ok ? "ok — a laser click focuses a text field, so the keyboard triggers"
+                            : "FAIL — text fields never take focus, so the VR keyboard can never appear")}");
+
+            // The keyboard must also outrank every screen that can hold a text field, or it
+            // renders correctly and is covered. Hud (the login screen) is the tallest at 100 and
+            // paints an opaque full-viewport backdrop.
+            var kb = new UI.VrKeyboard();
+            AddChild(kb);
+            bool above = kb.Layer > 100 && kb.Layer > 106;
+            _ok &= above;
+            GD.Print($"VRTEST KEYBD  keyboard layer {kb.Layer} vs login screen 100 / main menu 106  " +
+                     $"{(above ? "ok — draws on top" : "FAIL — the keyboard renders beneath the screen it serves")}");
+            kb.QueueFree();
+        }
 
         /// A panel carrying one always-visible chrome layer and one menu layer that starts hidden.
         /// This is the exact arrangement that used to pin the panel on: `InWorldHud` is visible for

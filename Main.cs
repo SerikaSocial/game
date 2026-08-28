@@ -609,9 +609,23 @@ public partial class Main : Node3D
     {
         if (_vrMode && chrome)
         {
-            // No wrist panel yet (it is built with the player rig) — park the layer until then.
-            if (_vrWristHud != null) _vrWristHud.Viewport.AddChild(layer);
-            else _pendingChrome.Add(layer);
+            if (_vrWristHud != null) { _vrWristHud.Viewport.AddChild(layer); return; }
+
+            // No wrist panel yet — it is built with the player rig, which does not exist until
+            // after login. Park the layer in the main tree rather than holding it detached.
+            //
+            // This *must* be in some tree. A CanvasLayer that is not in the scene never receives
+            // `_Ready()`, so every Control it builds there stays null while the object itself is
+            // perfectly non-null — so `_inWorldHud?.Leave()` sails past the null check and then
+            // throws inside. That is what happened: `ShowLoginScreen` calls `Leave()` before
+            // `_hud.ShowLogin()`, the NullReferenceException killed the deferred call mid-way,
+            // and the login screen never appeared at all on Quest.
+            //
+            // Parenting here costs nothing visually: a CanvasLayer draws into the XR viewport's
+            // 2D canvas, which Godot never composites into the eye buffers (the whole reason
+            // VrUiSurface exists), and this layer is hidden until `SetWorld` anyway.
+            AddChild(layer);
+            _pendingChrome.Add(layer);
             return;
         }
 
@@ -654,6 +668,10 @@ public partial class Main : Node3D
         {
             if (viewport.GetChild(i) is not CanvasLayer layer) continue;
             viewport.RemoveChild(layer);
+            // Straight back into the main tree, never left detached: these are long-lived
+            // singletons that keep receiving calls while the rig is being rebuilt, and a
+            // CanvasLayer outside the tree has null Controls that throw on the first touch.
+            AddChild(layer);
             _pendingChrome.Add(layer);
         }
 
@@ -839,8 +857,20 @@ public partial class Main : Node3D
             vr.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
             _actionMenu?.SetCustomEmotes(vr.Avatar?.CustomEmotes);
             // The headset has no Esc key, so the controller face buttons are the only way in.
-            vr.MenuPressed += () => { _quickMenu?.Open(_username); SyncMenuHold(); };
-            vr.ActionMenuPressed += () => { _actionMenu?.Open(); SyncMenuHold(); };
+            // Pressing menu ALWAYS re-anchors the panel in front of the player, not just on the
+            // first open. There was previously no way at all to bring a drifted panel back: the
+            // only re-anchor fired when the menu hold was first taken, so a panel left behind by
+            // walking or turning stayed behind you until every menu was closed and reopened.
+            // Reusing the button the player already presses beats teaching them a new gesture.
+            vr.MenuPressed += () =>
+            {
+                RecentreVrPanel();
+                _quickMenu?.Open(_username);
+                SyncMenuHold();
+            };
+            vr.ActionMenuPressed += () => { RecentreVrPanel(); _actionMenu?.Open(); SyncMenuHold(); };
+            // The two-handed recentre gesture moves the play space; bring the UI with it.
+            vr.Recentred += RecentreVrPanel;
 
             // One interactor per hand, so VR can finally use seats, lay spots, interaction points
             // and video screens — none of which grip can reach, and all of which were desktop-only.
@@ -2088,6 +2118,17 @@ public partial class Main : Node3D
     }
 
     private void OnPauseClosed() => SyncMenuHold();
+
+    /// Snap the floating UI panel back to directly in front of the player.
+    ///
+    /// Safe to call when there is no panel or no camera yet — before login the boot rig owns the
+    /// only XRCamera3D, and after login the player rig does.
+    private void RecentreVrPanel()
+    {
+        if (!_vrMode || _vrUi == null) return;
+        _vrUi.FaceCamera(_localVr?.HeadCamera
+                         ?? _bootXrOrigin?.GetNodeOrNull<XRCamera3D>("BootXrCamera"));
+    }
 
     /// Reconcile the menu hold with what's actually on screen. Called after every open and
     /// close: the six overlay screens can open each other, so "did I open or close" isn't

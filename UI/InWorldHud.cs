@@ -96,6 +96,7 @@ public partial class InWorldHud : CanvasLayer
     /// Show a short-lived status message centred near the bottom of the screen.
     public void Toast(string message, double seconds = 2.0)
     {
+        if (_toast == null) return;
         _toast.Text = message;
         _toast.Visible = true;
         _toastTimer = seconds;
@@ -104,26 +105,36 @@ public partial class InWorldHud : CanvasLayer
     /// Naming a world is what makes the player "somewhere", so it is also what reveals the HUD.
     public void SetWorld(string name)
     {
+        if (_worldName == null) return;
         _worldName.Text = name;
         Visible = true;
     }
 
     /// Back to a screen with no world behind it (the login screen). Put the HUD away and drop
     /// any toast still counting down, so it can't reappear over the login form.
+    ///
+    /// Null-guarded on `_toast` as a backstop. `_Ready()` only runs once this layer is in the
+    /// scene tree, and callers reach it through `_inWorldHud?.Leave()` — a null-conditional that
+    /// checks the *layer*, not its children, so it happily calls into a live object whose Controls
+    /// were never built. That threw here and aborted `Main.ShowLoginScreen` before it could show
+    /// the login screen. The real fix is that the layer is always parented now (see `Main.AddUi`);
+    /// this makes the failure survivable rather than session-ending if it ever recurs.
     public void Leave()
     {
         Visible = false;
-        _toast.Visible = false;
+        if (_toast != null) _toast.Visible = false;
         _toastTimer = 0;
     }
 
     public void SetPlayerCount(int count)
     {
+        if (_playerCount == null) return;
         _playerCount.Text = $"{count} player{(count == 1 ? "" : "s")}";
     }
 
     public void SetPing(int ms)
     {
+        if (_ping == null) return;
         _ping.Visible = ms > 0;
         _ping.Text = $"{ms} ms";
     }
@@ -143,7 +154,7 @@ public partial class InWorldHud : CanvasLayer
             _pingTimer = 0;
         }
 
-        if (_toast.Visible)
+        if (_toast is { Visible: true })
         {
             _toastTimer -= delta;
             if (_toastTimer <= 0) _toast.Visible = false;
