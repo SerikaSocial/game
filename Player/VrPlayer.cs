@@ -646,6 +646,7 @@ void fragment() {
         UpdatePointer();
 
         var planarSpeed = HandleLocomotion(dt);
+        LogLocomotionDebug(dt, planarSpeed);
 
         UpdateVignette(dt, planarSpeed);
         UpdateAvatar(dt, planarSpeed);
@@ -837,6 +838,34 @@ void fragment() {
         _barePinchLatch = false;
         _teleportArc.Visible = false;
         _teleportPad.Visible = false;
+    }
+
+    // ── Locomotion telemetry ─────────────────────────────────────────────────────────
+    // "I can't walk" has no visible cause in a headset: the stick is either not reaching the app,
+    // or controls are suspended, or the body is being blocked, and all three look identical from
+    // inside. This prints the three of them together for the first minute after spawn, which is
+    // long enough to try walking and short enough not to be a permanent log tax.
+    private double _locoLogTimer;
+    private double _locoLogAge;
+    private const double LocoLogWindowSeconds = 90;
+
+    private void LogLocomotionDebug(float dt, float planarSpeed)
+    {
+        _locoLogAge += dt;
+        if (_locoLogAge > LocoLogWindowSeconds) return;
+
+        _locoLogTimer -= dt;
+        if (_locoLogTimer > 0) return;
+        _locoLogTimer = 1.0;
+
+        var left = _leftHand.GetVector2(ActStick);
+        var right = _rightHand.GetVector2(ActStick);
+        GD.Print($"VRLOCO controls={ControlsEnabled} leftStick=({left.X:0.00},{left.Y:0.00}) " +
+                 $"rightStick=({right.X:0.00},{right.Y:0.00}) " +
+                 $"leftTracked={_leftHand.GetHasTrackingData()} " +
+                 $"mode={UI.DeviceProfile.Settings.VrLocomotion} " +
+                 $"speed={planarSpeed:0.00} onFloor={IsOnFloor()} " +
+                 $"pos=({GlobalPosition.X:0.0},{GlobalPosition.Y:0.0},{GlobalPosition.Z:0.0})");
     }
 
     /// The basis stick input is interpreted against, per the movement-orientation setting.
