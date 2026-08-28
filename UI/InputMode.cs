@@ -146,6 +146,7 @@ public static class InputMode
         }
 
         ControlsSink?.Invoke(ControlsLive);
+        LogHoldsIfChanged();
 
         if (free != _lastFree)
         {
@@ -155,4 +156,31 @@ public static class InputMode
     }
 
     private static bool _lastFree = true;
+
+    /// Say out loud which holds are outstanding whenever the set changes.
+    ///
+    /// `ControlsLive` requires *zero* holds, so a single screen that forgets to release one
+    /// silently takes away the player's ability to move — with nothing on screen to explain it
+    /// and no way to recover. That has now happened twice (the tutorial hold, and menus that
+    /// could not be closed in VR because the menu button did not toggle), and both times the only
+    /// way to find it was to reason backwards from "I can't walk".
+    ///
+    /// One line per change, so the log answers "why can't I move" directly.
+    private static string _lastHoldSignature = "";
+
+    private static void LogHoldsIfChanged()
+    {
+        string signature;
+        if (Holds.Count == 0) signature = "(none)";
+        else
+        {
+            var names = new List<string>(Holds.Keys);
+            names.Sort();
+            signature = string.Join(",", names);
+        }
+
+        if (signature == _lastHoldSignature) return;
+        _lastHoldSignature = signature;
+        GD.Print($"InputMode: holds={signature} playable={_playable} controlsLive={ControlsLive}");
+    }
 }
