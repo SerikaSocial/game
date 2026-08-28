@@ -371,6 +371,15 @@ public static partial class VrDiagnostic
             // Deliberately last: it has to put a visible field on the panel, which would poison
             // the "idle with only chrome" measurement above if it ran first.
             Add("keybd-click", PushClickAtField, 5, CheckFieldFocused);
+            // The layout is rebuilt on every shift / 123 / symbols press, and the frees it issues
+            // only take effect at end of frame — so a second Show() must land on a LATER frame to
+            // catch a rebuild that deleted something it then reuses.
+            // Each Show() must land on its own frame. `QueueFree` does not take effect until the
+            // end of the frame it is called in, so a rebuild that frees the preview and re-adds it
+            // in the same tick looks fine; the object only becomes disposed once a frame boundary
+            // passes, and the throw lands on the NEXT rebuild or the next `_Process`.
+            Add("keybd-build2", () => SafeShow("second"), 10);
+            Add("keybd-build3", () => SafeShow("third"), 10, ReportKeyboardRebuild);
         }
 
         private float _dashTravel;
@@ -430,14 +439,57 @@ public static partial class VrDiagnostic
             // The keyboard must also outrank every screen that can hold a text field, or it
             // renders correctly and is covered. Hud (the login screen) is the tallest at 100 and
             // paints an opaque full-viewport backdrop.
-            var kb = new UI.VrKeyboard();
-            AddChild(kb);
-            bool above = kb.Layer > 100 && kb.Layer > 106;
+            _keyboard = new UI.VrKeyboard();
+            AddChild(_keyboard);
+            bool above = _keyboard.Layer > 100 && _keyboard.Layer > 106;
             _ok &= above;
-            GD.Print($"VRTEST KEYBD  keyboard layer {kb.Layer} vs login screen 100 / main menu 106  " +
+            GD.Print($"VRTEST KEYBD  keyboard layer {_keyboard.Layer} vs login screen 100 / main menu 106  " +
                      $"{(above ? "ok — draws on top" : "FAIL — the keyboard renders beneath the screen it serves")}");
-            kb.QueueFree();
+            _keyboard.Show(); // first layout build
         }
+
+        private UI.VrKeyboard _keyboard;
+
+        /// Rebuild the layout, one build per frame, recording anything that throws.
+        ///
+        /// `Rebuild` used to free the preview label along with the key rows and then re-add it.
+        /// Within a single frame that is invisible — `QueueFree` only takes effect at end of
+        /// frame — so the failure needs real frame boundaries between builds, which is why these
+        /// are separate phases rather than three calls in a row.
+        private void SafeShow(string which)
+        {
+            if (_keyboard == null || !GodotObject.IsInstanceValid(_keyboard))
+            {
+                _keyboardError ??= $"keyboard vanished before the {which} build";
+                return;
+            }
+            try { _keyboard.Show(); }
+            catch (Exception e) { _keyboardError ??= $"{which} build threw {e.GetType().Name}: {e.Message}"; }
+        }
+
+        private void ReportKeyboardRebuild()
+        {
+            // A throw inside the node's own `_Process` never reaches this try/catch — Godot logs
+            // it and carries on — so also confirm the preview label is still a live object.
+            bool previewAlive = false;
+            if (_keyboard != null && GodotObject.IsInstanceValid(_keyboard))
+            {
+                foreach (var label in _keyboard.FindChildren("*", "Label", true, false))
+                    if (GodotObject.IsInstanceValid(label)) { previewAlive = true; break; }
+            }
+
+            bool ok = _keyboardError == null && previewAlive;
+            _ok &= ok;
+            GD.Print($"VRTEST KEYBD  three layout rebuilds on separate frames, preview alive={previewAlive}" +
+                     $"{(_keyboardError == null ? "" : $" — {_keyboardError}")}  " +
+                     $"{(ok ? "ok — the preview survives a rebuild"
+                            : "FAIL — rebuilding the layout frees something it reuses")}");
+
+            if (_keyboard != null && GodotObject.IsInstanceValid(_keyboard)) _keyboard.QueueFree();
+            _keyboard = null;
+        }
+
+        private string _keyboardError;
 
         /// A panel carrying one always-visible chrome layer and one menu layer that starts hidden.
         /// This is the exact arrangement that used to pin the panel on: `InWorldHud` is visible for

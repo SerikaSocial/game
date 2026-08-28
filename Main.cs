@@ -324,11 +324,18 @@ public partial class Main : Node3D
         };
 
         _interactPrompt = new UI.InteractionPrompt { Name = "InteractionPrompt" };
-        // In VR the interaction hint is drawn on the hand instead (`VrInteractLabel`, wired in
-        // SetupVrInteractors) — right next to the thing it is describing, rather than composited
-        // onto a panel somewhere else entirely. Mounting the flat prompt too would show the same
-        // hint twice, once in the wrong place.
-        if (!_vrMode) AddUi(_interactPrompt);
+        // Mounted in VR too, even though the hint is drawn on the hand there (`VrInteractLabel`,
+        // wired in SetupVrInteractors).
+        //
+        // Skipping the mount is what broke VR startup: an un-parented CanvasLayer never receives
+        // `_Ready()`, so its Controls stayed null while the object itself was non-null, and
+        // `_interactPrompt?.Clear()` sailed past the null check and threw inside. That killed
+        // `SpawnLocalPlayer` from `EnterHome`, which never reached `HideLoading()` — the player
+        // sat on "Loading your avatar…" forever. Exactly the same trap as InWorldHud.
+        //
+        // Mounting it costs nothing: in VR this layer goes on the UI panel, and `Clear()` keeps
+        // it hidden unless something calls `Show()`, which only the desktop interactor does.
+        AddUi(_interactPrompt);
 
         _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
         AddUi(_videoQueuePanel);
@@ -363,6 +370,8 @@ public partial class Main : Node3D
             AddUi(_vrKeyboard);
             GD.Print("VR: virtual keyboard enabled");
         }
+
+        AssertUiLayersMounted();
 
         if (_uiShotMode)
             StartUiShots(args.GetValueOrDefault("out", null), args.GetValueOrDefault("screens", null),
@@ -635,6 +644,41 @@ public partial class Main : Node3D
             GD.Print($"VR UI: mounted {layer.Name} on panel ({_vrUi.Viewport.GetChildCount()} layers)");
         }
         else AddChild(layer);
+    }
+
+    /// Every UI layer this class holds must be inside the scene tree.
+    ///
+    /// This invariant has been broken twice, both times in VR, both times with the same shape and
+    /// both times costing a whole session: a `CanvasLayer` that is constructed but never parented
+    /// does not receive `_Ready()`, so every Control it would have built stays null — while the
+    /// layer object itself is perfectly non-null. Call sites all reach these through `_field?.X()`,
+    /// which null-checks the *layer* and not its children, so the call goes through and throws
+    /// inside. `InWorldHud.Leave()` took out the login screen that way, and
+    /// `InteractionPrompt.Clear()` took out `SpawnLocalPlayer`, stranding the player on the
+    /// loading screen with no error at all.
+    ///
+    /// Both were one-line omissions that looked deliberate. A loud line at boot is much cheaper
+    /// than reading a Quest logcat to find the next one.
+    private void AssertUiLayersMounted()
+    {
+        (string name, CanvasLayer layer)[] layers =
+        {
+            (nameof(_hud), _hud), (nameof(_loading), _loading), (nameof(_updater), _updater),
+            (nameof(_quickMenu), _quickMenu), (nameof(_mainMenu), _mainMenu),
+            (nameof(_actionMenu), _actionMenu), (nameof(_cameraMenu), _cameraMenu),
+            (nameof(_avatarSelector), _avatarSelector), (nameof(_interactPrompt), _interactPrompt),
+            (nameof(_videoQueuePanel), _videoQueuePanel), (nameof(_settingsMenu), _settingsMenu),
+            (nameof(_inWorldHud), _inWorldHud), (nameof(_chat), _chat),
+            (nameof(_vrKeyboard), _vrKeyboard),
+        };
+
+        foreach (var (name, layer) in layers)
+        {
+            if (layer == null || layer.IsInsideTree()) continue;
+            GD.PushError($"UI layer {name} was constructed but never added to the tree — it will " +
+                         "never run _Ready(), so its Controls are null and the first call into it " +
+                         "will throw. Route it through AddUi().");
+        }
     }
 
     /// Chrome layers constructed before the wrist panel exists. Drained by `AttachWristHud`.

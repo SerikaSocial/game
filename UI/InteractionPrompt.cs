@@ -59,6 +59,7 @@ public partial class InteractionPrompt : CanvasLayer, IInteractPrompt
     /// verb, so the 10 Hz scan doesn't rebuild the label every tick.
     public void Show(string verb)
     {
+        if (_panel == null) return; // never initialised — see the note in Main.AddUi
         if (_current == verb && _panel.Visible) return;
         _current = verb;
         _label.Text = string.IsNullOrEmpty(KeyHint) ? verb : $"[{KeyHint}]   {verb}";
@@ -67,6 +68,7 @@ public partial class InteractionPrompt : CanvasLayer, IInteractPrompt
 
     public void Clear()
     {
+        if (_panel == null) return; // never initialised — see the note in Main.AddUi
         if (!_panel.Visible) return;
         _current = null;
         _panel.Visible = false;

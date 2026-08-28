@@ -83,13 +83,27 @@ public partial class VrKeyboard : CanvasLayer
         _panel.AddThemeStyleboxOverride("panel", style);
         AddChild(_panel);
 
-        _rows = new VBoxContainer
+        // The preview label and the key grid are siblings, not parent-and-child.
+        //
+        // `Rebuild` clears the key grid every time the layout changes (shift, 123, symbols), and
+        // the preview used to live inside that grid — so the rebuild queued the preview itself
+        // for deletion and then re-added the very object it had just freed. The second rebuild
+        // therefore threw ObjectDisposedException on every frame, from both `Show()` and
+        // `_Process`, and the keyboard died as soon as anyone pressed shift.
+        var stack = new VBoxContainer
         {
             AnchorLeft = 0, AnchorTop = 0, AnchorRight = 1, AnchorBottom = 1,
             Alignment = BoxContainer.AlignmentMode.Center,
         };
+        stack.AddThemeConstantOverride("separation", KeyGap);
+        _panel.AddChild(stack);
+
+        _rows = new VBoxContainer
+        {
+            Alignment = BoxContainer.AlignmentMode.Center,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
         _rows.AddThemeConstantOverride("separation", KeyGap);
-        _panel.AddChild(_rows);
 
         // Preview of what's typed so the user sees text without looking at the LineEdit.
         _preview = new Label
@@ -98,6 +112,8 @@ public partial class VrKeyboard : CanvasLayer
         };
         _preview.AddThemeFontSizeOverride("font_size", 16);
         _preview.AddThemeColorOverride("font_color", Brand.TextMid);
+        stack.AddChild(_preview);
+        stack.AddChild(_rows);
     }
 
     public new bool IsVisible => _panel.Visible;
@@ -153,12 +169,12 @@ public partial class VrKeyboard : CanvasLayer
     private void Rebuild()
     {
         foreach (var child in _rows.GetChildren())
+        {
+            _rows.RemoveChild(child);
             child.QueueFree();
+        }
 
         string[][] layout = _symbols ? LayoutSym : _numbers ? LayoutNum : (_shifted ? LayoutShift : Layout);
-
-        // Preview row at top.
-        _rows.AddChild(_preview);
 
         foreach (var row in layout)
         {
