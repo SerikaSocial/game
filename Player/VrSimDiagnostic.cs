@@ -32,6 +32,10 @@ public static partial class VrSimDiagnostic
     /// deliberately damped and would otherwise be caught mid-transit in every shot.
     private const int SettleFrames = 24;
 
+    /// Height of the table the headset is lying on before anyone picks it up. Matches the 1.15 m
+    /// the device log showed being accepted as a player's eye height.
+    private const float DeskHeight = 1.15f;
+
     public static void Run(Node host, string skaPath, string outPrefix)
     {
         outPrefix ??= "/tmp/vrsim";
@@ -60,6 +64,10 @@ public static partial class VrSimDiagnostic
         vr.SetAvatar(avatar);
 
         var device = new VrSimDevice();
+        // The headset starts on a desk, because that is where a real one is when an app launches.
+        // Starting the simulation with it already worn is what let the height-calibration bug ship:
+        // the harness never presented the state the bug needed.
+        device.Head.Origin = device.Head.Origin with { Y = DeskHeight };
         device.Install();
 
         host.AddChild(new Driver(vr, ui, root, device, outPrefix));
@@ -178,6 +186,7 @@ public static partial class VrSimDiagnostic
         /// phase: a jump is a brief arc, and by the time the settle period is over the player is
         /// back on the ground and indistinguishable from one who never jumped.
         private bool _jumped;
+        private float _jumpPeak;
 
         // ── phase plumbing ───────────────────────────────────────────────────────────
 
@@ -230,6 +239,41 @@ public static partial class VrSimDiagnostic
 
         private void BuildPhases()
         {
+            // ── height calibration ────────────────────────────────────────────────────
+            //
+            // This is the sequence that actually happens every time anyone launches the app, and
+            // the one the first version of this harness never simulated: the headset is lying on a
+            // desk when the scene loads, and gets picked up and put on some seconds later. The
+            // shipped code latched the first plausible-looking reading and never looked again, so
+            // it calibrated the player at the height of the table — 1.15 m on the device log — and
+            // every tracked thing was then placed relative to a body half a metre too short. It
+            // reads as broken tracking while tracking is perfect.
+            Add("calib_desk", () =>
+            {
+                _dev.ClearInputs();
+                _dev.LookAt(0);
+                // Nothing to set up: the run already starts with the headset on the table.
+                _dev.RestHands();
+            }, () =>
+            {
+                Note("calib-desk", _vr.HeightCalibrated
+                    ? $"calibrated to {_vr.MeasuredEyeHeight:0.00}m" : "not calibrated (correct)");
+                Expect(!_vr.HeightCalibrated,
+                       "CALIB: a headset sitting still on a desk is not accepted as the player's height");
+            }, shoot: false, frames: 120);
+
+            Add("calib_worn", () =>
+            {
+                _headStill = false;             // picked up and put on
+                _baseHeadY = 1.65f;
+            }, () =>
+            {
+                Note("calib-worn", $"{_vr.MeasuredEyeHeight:0.00}m");
+                Expect(_vr.HeightCalibrated, "CALIB: a worn, moving headset is accepted");
+                Expect(Mathf.Abs(_vr.MeasuredEyeHeight - 1.65f) < 0.06f,
+                       "CALIB: the measured height is the height it is actually worn at");
+            }, shoot: false, frames: 150);
+
             Add("boot", () =>
             {
                 _dev.ClearInputs();
@@ -361,17 +405,26 @@ public static partial class VrSimDiagnostic
                 _dev.RestHands();
                 _vr.GlobalPosition = new Vector3(0, 0.05f, 0);
                 _jumped = false;
+                _jumpPeak = 0f;
             }, () =>
             {
+                Note("jump", $"pressed={_dev.PrimaryButton[1]} onFloor={_vr.IsOnFloor()} " +
+                              $"controls={_vr.ControlsEnabled} y={_vr.GlobalPosition.Y:0.00} " +
+                              $"peak={_jumpPeak:0.00} vy={_vr.Velocity.Y:0.00}");
                 Expect(_jumped, "BIND: A on the right controller jumps");
                 _dev.ClearInputs();
-            }, shoot: false, update: frame =>
+            // Long enough to fall the 5 cm the phase teleports up, land, press, and reach apex.
+            // At the default 24 frames this was marginal and passed only sometimes — a flaky
+            // assertion is worse than no assertion, because it teaches you to ignore it.
+            }, shoot: false, frames: 72, update: frame =>
             {
-                // Press only once the rig has settled onto the floor. Jump is edge-triggered *and*
-                // ground-gated, so a press that begins in mid-air latches and is then ignored for
-                // as long as it is held — correct behaviour, and a test that presses on the
-                // teleport frame reports it as a dead button.
-                if (frame == 6) _dev.PrimaryButton[1] = true;   // A, right hand
+                // Press only once the rig is genuinely standing on the floor. Jump is edge-triggered
+                // *and* ground-gated, so a press that begins in mid-air latches and is then ignored
+                // for as long as it is held — correct behaviour, and a fixed frame number is not
+                // good enough to avoid it: the phase teleports the rig 5 cm up and how long it
+                // takes to land depends on the avatar's collider, which changes with the rig.
+                if (!_dev.PrimaryButton[1] && _vr.IsOnFloor()) _dev.PrimaryButton[1] = true; // A
+                _jumpPeak = Mathf.Max(_jumpPeak, _vr.GlobalPosition.Y);
                 if (_vr.GlobalPosition.Y > 0.15f) _jumped = true;
             });
 
@@ -635,15 +688,38 @@ public static partial class VrSimDiagnostic
             if (want.LengthSquared() < 1e-6f || got.LengthSquared() < 1e-6f) { Fail($"IK[{label}]: {side} degenerate"); return; }
 
             float angle = Mathf.RadToDeg(want.Normalized().AngleTo(got.Normalized()));
-            // The same estimate `VrPlayer.PlayerArmReach` makes, from the simulated head height.
-            float playerReach = _dev.Head.Origin.Y / 0.93f * 0.36f;
-            float wantExt = Mathf.Min(1f, want.Length() / playerReach);
-            float gotExt = Mathf.Min(1f, got.Length() / avatarReach);
 
-            Note($"ik-{label}[{side}]", $"aim off by {angle:0.0}°, extension {gotExt:0.00} vs player {wantExt:0.00}");
+            // Aim is the one thing that must hold under either setting: the avatar's arm points
+            // where the player's arm points, or nothing else about the pose matters.
             Expect(angle < 12f, $"IK[{label}]: the {side} arm points where the player's arm points");
-            Expect(Mathf.Abs(gotExt - wantExt) < 0.15f,
-                   $"IK[{label}]: the {side} arm is extended as far as the player's");
+
+            if (UI.DeviceProfile.Settings.VrArmScaling)
+            {
+                // Scaled: the hand deliberately does NOT sit on the controller, so co-location is
+                // the wrong assertion. What must hold is proportional extension — full player
+                // extension is full avatar extension.
+                float playerReach = _dev.Head.Origin.Y / 0.93f * 0.36f;
+                float wantExt = Mathf.Min(1f, want.Length() / playerReach);
+                float gotExt = Mathf.Min(1f, got.Length() / avatarReach);
+                Note($"ik-{label}[{side}]", $"aim off by {angle:0.0}°, extension {gotExt:0.00} vs player {wantExt:0.00}");
+                Expect(Mathf.Abs(gotExt - wantExt) < 0.15f,
+                       $"IK[{label}]: the {side} arm is extended as far as the player's");
+                return;
+            }
+
+            // Unscaled — the default. The hand must land ON the controller whenever the arm is
+            // long enough to get there, because that co-location is what the player sees in first
+            // person. Where the target is genuinely out of reach the arm may fall short, but it
+            // must be fully extended toward it rather than hanging somewhere convenient.
+            float err = bone.DistanceTo(target);
+            float shortfall = Mathf.Max(0f, want.Length() - avatarReach);
+            Note($"ik-{label}[{side}]", $"aim off by {angle:0.0}°, hand {err * 100f:0.0} cm from the " +
+                                       $"controller, unreachable by {shortfall * 100f:0.0} cm");
+            if (shortfall < 0.02f)
+                Expect(err < 0.05f, $"IK[{label}]: the {side} hand sits on the controller when it can reach");
+            else
+                Expect(got.Length() > avatarReach - 0.04f,
+                       $"IK[{label}]: the {side} arm extends fully toward an out-of-reach target");
         }
 
         /// The avatar's shoulder in world space, and how far that arm can physically reach.
@@ -687,8 +763,28 @@ public static partial class VrSimDiagnostic
 
         // ── the loop ─────────────────────────────────────────────────────────────────
 
+        /// A worn headset is never still — a head micro-bobs constantly, and that motion is one of
+        /// the two signals height calibration uses to tell a head from a table. Every phase
+        /// therefore gets a little life by default; `_headStill` opts out, which is how the desk
+        /// case is simulated.
+        private bool _headStill = true;
+        private float _headBobPhase;
+
+        private void ApplyHeadLife(float dt)
+        {
+            if (_headStill) return;
+            _headBobPhase += dt * 3.1f;
+            // Just over a centimetre peak to peak, which is what quiet standing really looks
+            // like — and comfortably above the liveness floor that distinguishes a head from a table.
+            _dev.Head.Origin = _dev.Head.Origin with { Y = _baseHeadY + Mathf.Sin(_headBobPhase) * 0.012f };
+        }
+
+        /// The height the current phase wants the headset at, before the bob is added.
+        private float _baseHeadY = DeskHeight;
+
         public override void _Process(double delta)
         {
+            ApplyHeadLife((float)delta);
             _dev.Commit();
 
             if (_index >= _phases.Count) { Finish(); return; }

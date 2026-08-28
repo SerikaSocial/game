@@ -15,4 +15,14 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
+  <!--
+    No debug symbols in a Release launcher. `dist/windows/SerikaLauncher.pdb` was being published
+    and shipped alongside the exe; see the longer note in SerikaSocial.csproj for what a portable
+    PDB discloses. Debug builds keep symbols.
+  -->
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
 </Project>

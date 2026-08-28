@@ -67,7 +67,7 @@ public partial class Tutorial : CanvasLayer
         panel.AddChild(vbox);
 
         _title = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-        _title.AddThemeFontSizeOverride("font_size", 26);
+        _title.AddThemeFontSizeOverride("font_size", Brand.Fs(26));
         _title.AddThemeColorOverride("font_color", new Color(0.95f, 0.85f, 0.6f));
         vbox.AddChild(_title);
 
@@ -77,7 +77,7 @@ public partial class Tutorial : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             CustomMinimumSize = new Vector2(560, 90),
         };
-        _body.AddThemeFontSizeOverride("font_size", 16);
+        _body.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _body.AddThemeColorOverride("font_color", new Color(0.85f, 0.88f, 0.94f));
         vbox.AddChild(_body);
 

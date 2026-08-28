@@ -64,22 +64,35 @@ public partial class VrKeyboard : CanvasLayer
         // no text entry of its own.
         Layer = 150;
 
+        // The *layer*, not only the inner panel.
+        //
+        // A `CanvasLayer` is created visible, and `_Process` only calls `Hide()` when it has a
+        // target to drop — at boot there is none, so nothing ever hid this layer and it stayed
+        // visible for the entire session with an invisible panel inside it.
+        // `VrUiSurface.HasInteractiveUi` asks whether any layer on the panel is visible, and it
+        // gates both the panel render and the laser pointer, so this pinned a 2 m slab and a lit
+        // laser in front of the player from the moment VR started. That is the fourth layer to do
+        // this (mic indicator, InteractionPrompt, ChatOverlay); it is caught here by
+        // `--serika-uivr`, which reports a layer that is visible while drawing nothing as BLANK.
+        Visible = false;
+
         _panel = new Panel
         {
+            // Lifted off the very bottom edge. The panel's logical space is only 640 px tall, and
+            // a 252 px keyboard hard against the bottom put its space/enter row on the panel's
+            // border, where the curve makes it the hardest row to hit with a ray.
             AnchorLeft = 0.5f, AnchorTop = 1f, AnchorRight = 0.5f, AnchorBottom = 1f,
-            OffsetLeft = -340, OffsetTop = -260, OffsetRight = 340, OffsetBottom = -8,
+            OffsetLeft = -340, OffsetTop = -272, OffsetRight = 340, OffsetBottom = -20,
             Visible = false,
         };
-        var style = new StyleBoxFlat
-        {
-            BgColor = new Color(0.05f, 0.06f, 0.09f, 0.92f),
-            BorderWidthLeft = 1, BorderWidthTop = 1, BorderWidthRight = 1, BorderWidthBottom = 1,
-            BorderColor = Brand.Border,
-            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
-            CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
-            ContentMarginLeft = 8, ContentMarginTop = 8,
-            ContentMarginRight = 8, ContentMarginBottom = 8,
-        };
+        // On-brand and opaque. The old backing was a hand-mixed blue-grey at 0.92 alpha, which is
+        // the one piece of chrome in the client that is not violet — and on the VR panel, which
+        // is itself translucent, a 0.92 backing let the room show through the gaps between keys.
+        // Keys are the smallest targets in the whole UI; they need the most contrast, not the
+        // least.
+        var style = Brand.Panel(Brand.Bg0, 12, 1.5f, Brand.Border);
+        style.ContentMarginLeft = 10; style.ContentMarginRight = 10;
+        style.ContentMarginTop = 10; style.ContentMarginBottom = 10;
         _panel.AddThemeStyleboxOverride("panel", style);
         AddChild(_panel);
 
@@ -110,7 +123,7 @@ public partial class VrKeyboard : CanvasLayer
         {
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _preview.AddThemeFontSizeOverride("font_size", 16);
+        _preview.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _preview.AddThemeColorOverride("font_color", Brand.TextMid);
         stack.AddChild(_preview);
         stack.AddChild(_rows);
@@ -118,25 +131,36 @@ public partial class VrKeyboard : CanvasLayer
 
     public new bool IsVisible => _panel.Visible;
 
-    /// Attach to a viewport's focus signals so the keyboard auto-shows when a LineEdit gains
-    /// focus and auto-hides when it loses focus.
+    /// Additional viewports to watch for a focused text field.
+    ///
+    /// Focus is per-viewport, and this keyboard lives on the menu panel — so `GetViewport()` only
+    /// ever sees fields on the menu panel. The chat input does not live there: `ChatOverlay` is
+    /// mounted as chrome, which routes it to `VrWristHud`'s own SubViewport, so focusing it could
+    /// never raise this keyboard and there was no other way to type in VR at all. Delivering the
+    /// keystroke is not the problem — `OnKey` writes straight into the target `LineEdit` and works
+    /// across viewports — only *finding* the target was.
+    private readonly System.Collections.Generic.List<Viewport> _watched = new();
+
+    /// Also watch `vp` for a focused `LineEdit`. Call once per viewport that can hold a text
+    /// field; the keyboard's own viewport is always watched and does not need registering.
     public void Attach(SubViewport vp)
     {
         // Poll for focus changes — Godot doesn't expose a focus-changed signal on SubViewport.
         // The poll runs only while the keyboard layer is added (VR mode), and is cheap.
         SetProcess(true);
+        if (vp != null && !_watched.Contains(vp)) _watched.Add(vp);
     }
 
     public override void _Process(double delta)
     {
         if (!VrUiSurface.Active) return;
 
-        // Find the currently focused Control in our viewport.
-        var vp = GetViewport();
-        if (vp == null) return;
+        // Our own viewport first, then any registered elsewhere.
+        LineEdit focusedField = FocusedField(GetViewport());
+        for (int i = 0; focusedField == null && i < _watched.Count; i++)
+            focusedField = FocusedField(_watched[i]);
 
-        var focused = vp.GuiGetFocusOwner();
-        if (focused is LineEdit le && le.IsVisibleInTree())
+        if (focusedField is { } le && le.IsVisibleInTree())
         {
             if (_target != le)
             {
@@ -151,6 +175,9 @@ public partial class VrKeyboard : CanvasLayer
             Hide();
         }
     }
+
+    private static LineEdit FocusedField(Viewport vp) =>
+        vp != null && GodotObject.IsInstanceValid(vp) && vp.GuiGetFocusOwner() is LineEdit le ? le : null;
 
     public new void Show()
     {
@@ -211,7 +238,7 @@ public partial class VrKeyboard : CanvasLayer
             Text = label,
             CustomMinimumSize = new Vector2(w, KeyH),
         };
-        btn.AddThemeFontSizeOverride("font_size", 18);
+        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
         btn.AddThemeConstantOverride("h_separation", 0);
 
         // Style keys

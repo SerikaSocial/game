@@ -275,6 +275,13 @@ public static class DeviceProfile
     {
         private const string Path = "user://settings.cfg";
 
+        /// Schema version of the settings file. Bump this whenever a DEFAULT changes in a way that
+        /// existing users must pick up, and guard that key's read with `storedVersion >= N` in
+        /// `Load`. A settings file records what the value *was*, not whether the user chose it, so
+        /// a changed default is invisible to everyone who has already run the app — which is
+        /// exactly the people whose habits the change is meant to correct.
+        private const int SettingsVersion = 1;
+
         // Non-graphics settings that the settings menu also owns, kept here so there's one file.
         public static float MouseSensitivity = 0.003f;
         public static float MasterVolume = 1.0f;
@@ -343,12 +350,25 @@ public static class DeviceProfile
 
         /// Scale the reach of the avatar's arms to the player's own.
         ///
-        /// Stylised avatars have short limbs — a 1.57 m rig reaches ~43 cm from shoulder to wrist
-        /// against an adult's ~60 cm — so without this the avatar's hands sit permanently behind
-        /// the player's and the elbows stay locked straight through the outer half of the working
-        /// volume. See `VrAvatarIk.ScaleToArm`. Off is the literal, unscaled behaviour, which is
-        /// worth keeping for anyone wearing a realistically proportioned avatar.
-        public static bool VrArmScaling = true;
+        /// **Off by default, and the reason is worth stating because the trade-off is not obvious.**
+        /// Stylised avatars have short limbs — a 1.57 m rig reaches ~43 cm shoulder to wrist against
+        /// an adult's ~60 cm — so unscaled, the avatar's hands sit ~15 cm behind the player's on any
+        /// real reach, with the elbows locked straight through the whole outer half of the working
+        /// volume. Scaling fixes that, and it makes the avatar look right to everyone else.
+        ///
+        /// But it fixes the wrong view. Scaling preserves *direction* and compresses *distance*
+        /// about the shoulder, which necessarily moves the avatar's hands closer to its body than
+        /// the player's hands are to theirs. In third person and on every peer's screen that reads
+        /// as correct proportion. In first person — the view the player is actually in — it breaks
+        /// co-location: you look down and your hands are not where your hands are. That is a worse
+        /// failure than short arms, because hand co-location is most of what presence in VR *is*,
+        /// and it was reported from a headset as the tracking feeling broken.
+        ///
+        /// The real fix for a mismatched body is to scale the play space so the player *is* the
+        /// avatar's size, which preserves co-location and reach together at the cost of changing
+        /// perceived world scale. Until that exists and can be tested on a headset, the default is
+        /// literal 1:1 tracking, which is at worst stiff rather than wrong.
+        public static bool VrArmScaling = false;
 
         /// The wrist-anchored info panel (world, players, clock). Off puts nothing at all in the
         /// player's view while they are just standing in a world, which some people want.
@@ -389,6 +409,11 @@ public static class DeviceProfile
             if (cfg.Load(Path) != Error.Ok) return; // first run: keep detected defaults
             _loading = true;
 
+            // Which schema this file was written by. Anything older than `SettingsVersion` predates
+            // a deliberate change of default, and the keys listed in `MigrateFrom` below are reset
+            // rather than read.
+            int storedVersion = (int)cfg.GetValue("meta", "settings_version", 0);
+
             Current = (Tier)(int)cfg.GetValue("graphics", "tier", (int)Current);
             RenderScale = (float)cfg.GetValue("graphics", "render_scale", RenderScale);
             Shadows = (bool)cfg.GetValue("graphics", "shadows", Shadows);
@@ -418,10 +443,20 @@ public static class DeviceProfile
             VrMoveOrientation = (MoveOrientation)(int)cfg.GetValue("vr", "move_orientation", (int)VrMoveOrientation);
             VrDashTeleport = (bool)cfg.GetValue("vr", "dash_teleport", VrDashTeleport);
             VrInvertForward = (bool)cfg.GetValue("vr", "invert_forward", VrInvertForward);
-            VrMoveOnRightStick = (bool)cfg.GetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
+            // Migrated in v1: the default moved from the right stick to the left to match VRChat.
+            // A stored `true` is indistinguishable from "the user chose this" and from "this was
+            // simply the old default", and on every existing install it is the latter — so before
+            // v1 the value is discarded and the new default stands. Without this the changed
+            // default reaches nobody who has ever launched the app, which is the whole audience
+            // that had already learned the wrong layout.
+            if (storedVersion >= 1)
+                VrMoveOnRightStick = (bool)cfg.GetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
             VrHandTracking = (bool)cfg.GetValue("vr", "hand_tracking", VrHandTracking);
             VrFingerPosing = (bool)cfg.GetValue("vr", "finger_posing", VrFingerPosing);
-            VrArmScaling = (bool)cfg.GetValue("vr", "arm_scaling", VrArmScaling);
+            // Migrated in v1 for the same reason: arm scaling shipped on for one build, broke
+            // first-person hand co-location, and now defaults off.
+            if (storedVersion >= 1)
+                VrArmScaling = (bool)cfg.GetValue("vr", "arm_scaling", VrArmScaling);
             VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
             VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
             VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
@@ -464,6 +499,7 @@ public static class DeviceProfile
             cfg.SetValue("vr", "wrist_hud", VrWristHud);
             cfg.SetValue("vr", "haptics", VrHaptics);
             cfg.SetValue("vr", "height_offset", VrHeightOffset);
+            cfg.SetValue("meta", "settings_version", SettingsVersion);
             cfg.Save(Path);
         }
     }

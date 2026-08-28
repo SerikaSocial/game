@@ -19,6 +19,10 @@ namespace SerikaSocial.UI;
 /// The panel is slightly curved (a shallow cylinder section) so its edges stay equidistant from
 /// the eye. It carries no chrome of its own — see `_Ready` for why the decorative shadow and
 /// glow quads were removed.
+/// Marks a panel layer that is drawn but never clicked — a readout that still belongs in front of
+/// the player rather than on their wrist. See the note in `VrUiSurface._Process`.
+public interface IVrPassiveLayer { }
+
 public partial class VrUiSurface : Node3D
 {
     /// Backing resolution of the panel. 4:3-ish at a size that stays legible through the Quest's
@@ -44,12 +48,33 @@ public partial class VrUiSurface : Node3D
     /// floor for comfortable VR reading).
     ///
     /// Shrinking the *logical* space magnifies everything on the panel without touching a
-    /// single screen's layout code. The floor is set by the largest screen: the big menu needs
-    /// 1100×700 plus 2×16 px of margin, so 1200×760 is as tight as this can go while still
-    /// fitting every screen.
+    /// single screen's layout code.
+    ///
+    /// This was 1200×760, and the note here said that was "as tight as this can go" because the
+    /// big menu needs 1100×700. That reasoning had the dependency backwards: the big menu's size
+    /// is a number in `MainMenu.cs`, not a constraint from physics, and letting it set the floor
+    /// meant the *smallest* text in the client — 10 and 11 px tag pills and instance rows — came
+    /// out at 0.40°, well under the ~0.5° needed to read in a headset. At 1200 px across a 60.9°
+    /// panel the scale is 19.7 logical px per degree; at 1000 it is 16.4, which lifts every
+    /// remaining `font_size: 12` to 0.53° and the common 15 to 0.66°.
+    ///
+    /// The big menu now clamps itself through `Brand.Card`, so nothing needs 1100 px any more.
+    /// Measured by `--serika-uivr`, which unprojects the panel's own corners rather than trusting
+    /// the constants below.
     public Vector2I LogicalSize { get; private set; }
 
-    private static readonly Vector2I PreferredLogicalSize = new(1200, 760);
+    private static readonly Vector2I PreferredLogicalSize = new(1000, 640);
+
+    /// The largest a screen's card may be and still sit *inside* the panel with its border and
+    /// shadow visible. Content laid out beyond `LogicalSize` is not full-bleed — the SubViewport
+    /// clips it at the panel edge, silently. See `Brand.Card`.
+    ///
+    /// Static, and not derived from a live instance, because screens are constructed before any
+    /// surface exists (that is why `Active` is a static too).
+    public static Vector2I UsableLogicalSize =>
+        new(PreferredLogicalSize.X - 2 * PanelMargin, PreferredLogicalSize.Y - 2 * PanelMargin);
+
+    private const int PanelMargin = 24;
 
     /// Panel size in metres, and how far in front of the camera it floats. Wider than a desktop
     /// monitor would be, because angular size is the whole game here: at 1.7 m away a 2 m panel
@@ -222,14 +247,25 @@ public partial class VrUiSurface : Node3D
         if (_visibilityPoll > 0) return;
         _visibilityPoll = 0.05;
 
-        bool anyVisible = false;
+        // Two different questions, and conflating them lit a laser at a screen with no controls.
+        //
+        //   "Is anything drawn?"   → whether to render the panel at all.
+        //   "Can it be clicked?"   → whether to arm the pointer.
+        //
+        // The loading screen is the case that separates them: it belongs on the panel (it must be
+        // big and in front of you while you travel) but it has nothing to point at, so a laser
+        // hung in the player's face for the whole load. A layer implementing `IVrPassiveLayer`
+        // still draws and still keeps the panel alive; it just does not arm the pointer.
+        bool anyVisible = false, anyClickable = false;
         for (int i = 0, n = Viewport.GetChildCount(); i < n; i++)
         {
-            if (Viewport.GetChild(i) is CanvasLayer { Visible: true }) { anyVisible = true; break; }
+            if (Viewport.GetChild(i) is not CanvasLayer { Visible: true } layer) continue;
+            anyVisible = true;
+            if (layer is not IVrPassiveLayer) { anyClickable = true; break; }
         }
 
         Panel.Visible = anyVisible;
-        HasInteractiveUi = anyVisible;
+        HasInteractiveUi = anyClickable;
         Viewport.RenderTargetUpdateMode = anyVisible
             ? SubViewport.UpdateMode.Always
             : SubViewport.UpdateMode.Disabled;

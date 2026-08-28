@@ -28,6 +28,10 @@ public partial class QuickMenu : CanvasLayer
     public event Action OpenSettings;
     public event Action CopyInvitePressed;
     public event Action MicTogglePressed;
+    public event Action OpenSocial;
+    public event Action ReportWorldPressed;
+    /// A remote roster row was tapped — carries the account id + display name.
+    public event Action<string, string> PlayerSelected;
     // Emotes are reached through the radial menu (the "Emotes" pill → OpenRadialMenu), so the
     // hub no longer carries its own emote shortcuts.
 
@@ -41,6 +45,7 @@ public partial class QuickMenu : CanvasLayer
     private VBoxContainer _playerList;
     private Button _micBtn;
     private Button _inviteCard;
+    private Button _reportWorldBtn;
 
     private double _clockTimer;
 
@@ -56,7 +61,7 @@ public partial class QuickMenu : CanvasLayer
         center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(center);
 
-        _card = new PanelContainer { CustomMinimumSize = new Vector2(560, 600) };
+        _card = new PanelContainer { CustomMinimumSize = Brand.Card(560, 600) };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1.5f, Brand.Border));
         center.AddChild(_card);
 
@@ -77,7 +82,7 @@ public partial class QuickMenu : CanvasLayer
         var dot = new ColorRect { CustomMinimumSize = new Vector2(9, 9), Color = Brand.Success, SizeFlagsVertical = Control.SizeFlags.ShrinkCenter };
         header.AddChild(dot);
         _usernameLabel = new Label { Text = "Serika User" };
-        _usernameLabel.AddThemeFontSizeOverride("font_size", 16);
+        _usernameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _usernameLabel.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(_usernameLabel);
 
@@ -85,7 +90,7 @@ public partial class QuickMenu : CanvasLayer
         var chipWrap = new PanelContainer { SizeFlagsVertical = Control.SizeFlags.ShrinkCenter };
         chipWrap.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg2, 8, 1, Brand.BorderSoft));
         _trustChip = new Label { Text = "Visitor" };
-        _trustChip.AddThemeFontSizeOverride("font_size", 11);
+        _trustChip.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         _trustChip.AddThemeColorOverride("font_color", Brand.AccentSoft);
         chipWrap.AddChild(_trustChip);
         header.AddChild(chipWrap);
@@ -93,7 +98,7 @@ public partial class QuickMenu : CanvasLayer
         header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
         _clockLabel = new Label { Text = DateTime.Now.ToString("HH:mm") };
-        _clockLabel.AddThemeFontSizeOverride("font_size", 18);
+        _clockLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
         _clockLabel.AddThemeColorOverride("font_color", Brand.Accent);
         header.AddChild(_clockLabel);
 
@@ -102,7 +107,7 @@ public partial class QuickMenu : CanvasLayer
         subHeader.AddThemeConstantOverride("separation", 8);
         vbox.AddChild(subHeader);
         _locationLabel = new Label { Text = "Home", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        _locationLabel.AddThemeFontSizeOverride("font_size", 13);
+        _locationLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _locationLabel.AddThemeColorOverride("font_color", Brand.TextMid);
         subHeader.AddChild(_locationLabel);
         subHeader.AddChild(new TextureRect
@@ -111,15 +116,26 @@ public partial class QuickMenu : CanvasLayer
             StretchMode = TextureRect.StretchModeEnum.KeepCentered,
         });
         _playerCountLabel = new Label { Text = "1" };
-        _playerCountLabel.AddThemeFontSizeOverride("font_size", 13);
+        _playerCountLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _playerCountLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         subHeader.AddChild(_playerCountLabel);
+
+        // Report the current world — the one moderation action that belongs on the hub
+        // itself. Disabled in Home (no world to report).
+        _reportWorldBtn = Brand.Ghost_(new Button
+        {
+            CustomMinimumSize = new Vector2(30, 26),
+            TooltipText = "Report this world",
+            Icon = Icons.Get(Icons.Kind.Flag, 14, Brand.TextDim),
+        });
+        _reportWorldBtn.Pressed += () => ReportWorldPressed?.Invoke();
+        subHeader.AddChild(_reportWorldBtn);
 
         vbox.AddChild(new HSeparator());
 
         // ── Live player list ("more things" — who is actually in this instance) ──────────
         var listLbl = new Label { Text = "In this instance" };
-        listLbl.AddThemeFontSizeOverride("font_size", 12);
+        listLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         listLbl.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(listLbl);
 
@@ -157,6 +173,7 @@ public partial class QuickMenu : CanvasLayer
         pillRow.AddChild(ActionPill(Icons.Kind.Home, "Home", () => { Hide(); HomePressed?.Invoke(); }));
         pillRow.AddChild(ActionPill(Icons.Kind.Refresh, "Respawn", () => { Hide(); RespawnPressed?.Invoke(); }));
         pillRow.AddChild(ActionPill(Icons.Kind.Smile, "Emotes", () => { Hide(); OpenRadialMenu?.Invoke(); }));
+        pillRow.AddChild(ActionPill(Icons.Kind.Users, "Social", () => { Hide(); OpenSocial?.Invoke(); }));
 
         vbox.AddChild(new HSeparator());
 
@@ -203,7 +220,7 @@ public partial class QuickMenu : CanvasLayer
             Icon = Icons.Get(icon, 22, Brand.Accent),
         };
         Brand.Ghost_(btn);
-        btn.AddThemeFontSizeOverride("font_size", 14);
+        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         btn.AddThemeConstantOverride("h_separation", 10);
         btn.Pressed += onClick;
         return btn;
@@ -219,7 +236,7 @@ public partial class QuickMenu : CanvasLayer
             Icon = Icons.Get(icon, 18, Brand.Accent),
         };
         Brand.Ghost_(btn);
-        btn.AddThemeFontSizeOverride("font_size", 13);
+        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         btn.AddThemeConstantOverride("h_separation", 8);
         btn.Pressed += onClick;
         return btn;
@@ -227,15 +244,19 @@ public partial class QuickMenu : CanvasLayer
 
     // ── Data fed from Main ──────────────────────────────────────────────────────────────
 
-    /// Set the world name + whether we're in a joinable world (controls the Invite tile).
+    /// Set the world name + whether we're in a joinable world (controls the Invite and
+    /// Report-world controls).
     public void SetLocation(string worldName, bool invitable)
     {
         _locationLabel.Text = string.IsNullOrEmpty(worldName) ? "Home" : worldName;
         if (_inviteCard != null) _inviteCard.Disabled = !invitable;
+        if (_reportWorldBtn != null) _reportWorldBtn.Disabled = !invitable;
     }
 
-    /// Repopulate the instance roster. `you` is highlighted; the rest are remote peers.
-    public void SetPlayers(string you, IReadOnlyList<string> others)
+    /// Repopulate the instance roster. `you` is highlighted; remote rows are buttons that
+    /// fire `PlayerSelected` — a remote with no account id (relay edge case) renders as a
+    /// plain, non-clickable row rather than a dead button.
+    public void SetPlayers(string you, IReadOnlyList<(string userId, string name)> others)
     {
         if (_playerList == null) return;
         foreach (var c in _playerList.GetChildren()) c.QueueFree();
@@ -243,26 +264,46 @@ public partial class QuickMenu : CanvasLayer
         int total = 1 + (others?.Count ?? 0);
         _playerCountLabel.Text = $"{total}";
 
-        _playerList.AddChild(PlayerRow(string.IsNullOrEmpty(you) ? "You" : $"{you}  (you)", true));
-        if (others != null)
-            foreach (var name in others)
-                _playerList.AddChild(PlayerRow(name, false));
+        _playerList.AddChild(SelfRow(string.IsNullOrEmpty(you) ? "You" : $"{you}  (you)"));
+        if (others == null) return;
+        foreach (var (userId, name) in others)
+        {
+            if (string.IsNullOrEmpty(userId))
+            {
+                _playerList.AddChild(SelfRow(name));
+                continue;
+            }
+            var btn = Brand.Ghost_(new Button
+            {
+                Text = $"  {name}",
+                Alignment = HorizontalAlignment.Left,
+                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                CustomMinimumSize = new Vector2(0, 34),
+                TooltipText = "Friend, block or report",
+                Icon = Icons.Get(Icons.Kind.Person, 14, Brand.Success),
+            });
+            btn.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
+            btn.AddThemeColorOverride("font_color", Brand.TextMid);
+            string id = userId, n = name;
+            btn.Pressed += () => PlayerSelected?.Invoke(id, n);
+            _playerList.AddChild(btn);
+        }
     }
 
-    private static HBoxContainer PlayerRow(string name, bool self)
+    private static HBoxContainer SelfRow(string name)
     {
         var row = new HBoxContainer();
         row.AddThemeConstantOverride("separation", 8);
         var dot = new ColorRect
         {
             CustomMinimumSize = new Vector2(8, 8),
-            Color = self ? Brand.Accent : Brand.Success,
+            Color = Brand.Accent,
             SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
         };
         row.AddChild(dot);
         var lbl = new Label { Text = name };
-        lbl.AddThemeFontSizeOverride("font_size", 13);
-        lbl.AddThemeColorOverride("font_color", self ? Brand.TextHi : Brand.TextMid);
+        lbl.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
+        lbl.AddThemeColorOverride("font_color", Brand.TextHi);
         row.AddChild(lbl);
         return row;
     }

@@ -57,7 +57,7 @@ public partial class InWorldHud : CanvasLayer
         {
             HorizontalAlignment = HorizontalAlignment.Right,
         };
-        _worldName.AddThemeFontSizeOverride("font_size", 16);
+        _worldName.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _worldName.AddThemeColorOverride("font_color", new Color(0.9f, 0.92f, 0.95f));
         container.AddChild(_worldName);
 
@@ -65,7 +65,7 @@ public partial class InWorldHud : CanvasLayer
         {
             HorizontalAlignment = HorizontalAlignment.Right,
         };
-        _playerCount.AddThemeFontSizeOverride("font_size", 13);
+        _playerCount.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _playerCount.AddThemeColorOverride("font_color", new Color(0.6f, 0.64f, 0.72f));
         container.AddChild(_playerCount);
 
@@ -74,7 +74,7 @@ public partial class InWorldHud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Right,
             Visible = false,
         };
-        _ping.AddThemeFontSizeOverride("font_size", 11);
+        _ping.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         _ping.AddThemeColorOverride("font_color", new Color(0.5f, 0.54f, 0.6f));
         container.AddChild(_ping);
 
@@ -86,7 +86,7 @@ public partial class InWorldHud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Center,
             Visible = false,
         };
-        _toast.AddThemeFontSizeOverride("font_size", 15);
+        _toast.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         _toast.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 1f));
         _toast.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 0.7f));
         _toast.AddThemeConstantOverride("outline_size", 4);

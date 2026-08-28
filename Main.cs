@@ -53,6 +53,9 @@ public partial class Main : Node3D
     private UI.VrWristHud _vrWristHud;  // wrist-mounted chrome panel; built with the VR rig
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
     private readonly HashSet<string> _blockedUserIds = new();
+    /// Peers currently rendered as the anonymous bean (blocked). Mirrors the SpawnRemote
+    /// decision so a later unblock knows which remotes to respawn with their real avatar.
+    private readonly HashSet<uint> _beanedPeers = new();
     private readonly Dictionary<uint, string> _peerUserIds = new();
 
     private double _poseTimer;
@@ -74,6 +77,9 @@ public partial class Main : Node3D
     private CameraMenu _cameraMenu;
     private PhotoCamera _photoCam;
     private AvatarSelector _avatarSelector;
+    private UI.SocialPanel _socialPanel;
+    private UI.PlayerCard _playerCard;
+    private UI.ReportDialog _reportDialog;
     private InWorldHud _inWorldHud;
     private ChatOverlay _chat;
     private LoadingScreen _loading;
@@ -156,6 +162,12 @@ public partial class Main : Node3D
         {
             Player.VrSimDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
                 args.GetValueOrDefault("out", null));
+            return;
+        }
+        if (args.ContainsKey("serika-uivr"))
+        {
+            Player.VrUiShotDiagnostic.Run(this, args.GetValueOrDefault("out", null),
+                args.GetValueOrDefault("screens", null));
             return;
         }
         if (args.ContainsKey("serika-aimtest"))
@@ -295,7 +307,32 @@ public partial class Main : Node3D
         _quickMenu.OpenSettings += () => { _settingsMenu?.Open(); SyncMenuHold(); };
         _quickMenu.CopyInvitePressed += CopyInviteLink;
         _quickMenu.MicTogglePressed += () => { ToggleMic(); _quickMenu.SetMic(_micActive); };
+        _quickMenu.OpenSocial += () => { _socialPanel?.Configure(_api); _socialPanel?.Open(); SyncMenuHold(); };
+        _quickMenu.ReportWorldPressed += OpenReportWorld;
+        _quickMenu.PlayerSelected += OpenPlayerCard;
         _quickMenu.Closed += OnPauseClosed;
+
+        // Social: friends/requests/blocked/search panel, per-player actions from the
+        // roster, and the shared report dialog (users and worlds).
+        _socialPanel = new UI.SocialPanel { Name = "SocialPanel" };
+        AddUi(_socialPanel);
+        _socialPanel.BlocksChanged += RefreshBlockVisibility;
+        _socialPanel.Closed += OnPauseClosed;
+
+        _playerCard = new UI.PlayerCard { Name = "PlayerCard" };
+        AddUi(_playerCard);
+        _playerCard.BlocksChanged += RefreshBlockVisibility;
+        _playerCard.ReportRequested = (userId, name) =>
+        {
+            if (_reportDialog == null) return false;
+            _reportDialog.OpenForUser(userId, name);
+            return true;
+        };
+        _playerCard.Closed += OnPauseClosed;
+
+        _reportDialog = new UI.ReportDialog { Name = "ReportDialog" };
+        AddUi(_reportDialog);
+        _reportDialog.Filed += () => _inWorldHud?.Toast("Report filed — thank you", 4);
 
         // VRChat-style Main Menu (Big Menu)
         _mainMenu = new MainMenu { Name = "MainMenu" };
@@ -719,6 +756,8 @@ public partial class Main : Node3D
             (nameof(_videoQueuePanel), _videoQueuePanel), (nameof(_settingsMenu), _settingsMenu),
             (nameof(_inWorldHud), _inWorldHud), (nameof(_chat), _chat),
             (nameof(_vrKeyboard), _vrKeyboard),
+            (nameof(_socialPanel), _socialPanel), (nameof(_playerCard), _playerCard),
+            (nameof(_reportDialog), _reportDialog),
         };
 
         foreach (var (name, layer) in layers)
@@ -747,6 +786,18 @@ public partial class Main : Node3D
             _vrWristHud.Viewport.AddChild(layer);
         }
         _pendingChrome.Clear();
+
+        // The wrist is a SEPARATE SubViewport, and keyboard focus is per-viewport.
+        //
+        // `ChatOverlay` is chrome — the message log has to stay readable during play without
+        // pinning the menu panel — but it also owns the only text-entry field in a world.
+        // `VrKeyboard` lives on the menu panel and finds the field to type into by polling its own
+        // viewport's focus owner, so once chat moved to the wrist there was no viewport in which
+        // the keyboard could ever see it, and typing in VR became unreachable. Delivery already
+        // works across viewports (`OnKey` writes the target `LineEdit` directly); only the
+        // *watching* was single-viewport. Register the wrist so focus there is seen too.
+        _vrKeyboard?.Attach(_vrWristHud.Viewport);
+
         GD.Print($"VR UI: wrist HUD live ({_vrWristHud.Viewport.GetChildCount()} chrome layers)");
     }
 
@@ -1068,6 +1119,9 @@ public partial class Main : Node3D
 
     private ApiClient _api;
     private string _username = "traveller";
+    /// The local user's account id — the key every social action (friend/block/report)
+    /// addresses other users by, and needed to keep ourselves out of lists.
+    private string _localUserId;
     private string _localAvatarPath; // downloaded custom avatar (user://), else null → bundled default
 
     /// Fetch the logged-in user's current avatar (their chosen one or a default outfit) and cache
@@ -1182,6 +1236,7 @@ public partial class Main : Node3D
             SetLoadingStatus("Signing in…");
             var user = await _api.ExchangeAsync(code, pkce.Verifier);
             _username = user.GetProperty("username").GetString();
+            if (user.TryGetProperty("id", out var uid) && uid.ValueKind == JsonValueKind.String) _localUserId = uid.GetString();
             _currentAvatarId = ReadCurrentAvatarId(user);
             _localPfpUrl = ReadAvatarUrl(user);
             _localTrust = ReadTrust(user);
@@ -1217,6 +1272,7 @@ public partial class Main : Node3D
             ShowLoading("Signing in…");
             var user = await _api.LoginWithEmailAsync(email, password);
             _username = user.GetProperty("username").GetString();
+            if (user.TryGetProperty("id", out var uid) && uid.ValueKind == JsonValueKind.String) _localUserId = uid.GetString();
             _currentAvatarId = ReadCurrentAvatarId(user);
             _localPfpUrl = ReadAvatarUrl(user);
             _localTrust = ReadTrust(user);
@@ -1331,6 +1387,7 @@ public partial class Main : Node3D
             if (user.ValueKind == JsonValueKind.Object && user.TryGetProperty("id", out _))
             {
                 _username = user.GetProperty("username").GetString();
+                if (user.TryGetProperty("id", out var uid) && uid.ValueKind == JsonValueKind.String) _localUserId = uid.GetString();
                 _currentAvatarId = ReadCurrentAvatarId(user);
                 _localPfpUrl = ReadAvatarUrl(user);
                 _localTrust = ReadTrust(user);
@@ -1950,6 +2007,7 @@ public partial class Main : Node3D
     {
         foreach (var a in _remotes.Values) a.QueueFree();
         _remotes.Clear();
+        _beanedPeers.Clear();
     }
 
     private void ShowLoginError(string message)
@@ -2099,6 +2157,7 @@ public partial class Main : Node3D
     {
         if (_remotes.Remove(peerId, out var a)) a.QueueFree();
         _peerUserIds.Remove(peerId);
+        _beanedPeers.Remove(peerId);
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
         _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
@@ -2169,6 +2228,7 @@ public partial class Main : Node3D
         if (!string.IsNullOrEmpty(p.UserId) && _blockedUserIds.Contains(p.UserId))
         {
             a.ShowBean();   // blocked: never load their real model — and no pfp
+            _beanedPeers.Add(p.PeerId);
             return;
         }
         _ = EquipRemoteAvatar(p.PeerId, p.UserId);
@@ -2241,14 +2301,67 @@ public partial class Main : Node3D
     {
         if (_quickMenu == null) return;
         // Feed the hub live state: the instance roster, where we are, and the real mic status.
-        var others = new List<string>();
-        foreach (var kv in _peerNames) others.Add(kv.Value);
+        var others = new List<(string userId, string name)>();
+        foreach (var kv in _peerNames)
+            others.Add((_peerUserIds.GetValueOrDefault(kv.Key, ""), kv.Value));
         _quickMenu.SetLocation(_inHome ? "Home" : _worldName, invitable: _inWorld && !string.IsNullOrEmpty(_currentWorldId));
         _quickMenu.SetTrust(TrustLabel(_localTrust));
         _quickMenu.SetPlayers(_username, others);
         _quickMenu.SetMic(_micActive);
         _quickMenu.Open(_username);
         SyncMenuHold();
+    }
+
+    /// Open the per-player actions card (friend/block/report) for a roster entry.
+    private void OpenPlayerCard(string userId, string name)
+    {
+        if (_playerCard == null || string.IsNullOrEmpty(userId)) return;
+        _playerCard.Configure(_api);
+        _playerCard.OpenFor(new Serika.Net.ApiClient.SocialUser { Id = userId, Username = name, DisplayName = name });
+        SyncMenuHold();
+    }
+
+    /// Report the world we're currently in — the hub's flag button. Home has no world to
+    /// report; the button is disabled there, but keep the guard for safety.
+    private void OpenReportWorld()
+    {
+        if (_reportDialog == null || !_inWorld || string.IsNullOrEmpty(_currentWorldId)) return;
+        _reportDialog.Configure(_api);
+        _reportDialog.OpenForWorld(_currentWorldId, _worldName);
+    }
+
+    /// Blocks changed from the social panel or a player card: re-fetch the list and
+    /// re-apply visibility. A freshly blocked peer is beaned in place; a freshly
+    /// unblocked one is respawned so its real avatar and name tag load again.
+    private async void RefreshBlockVisibility()
+    {
+        await FetchBlockList();
+
+        List<uint> toRespawn = null;
+        foreach (var kv in _remotes)
+        {
+            string userId = _peerUserIds.GetValueOrDefault(kv.Key, "");
+            if (string.IsNullOrEmpty(userId)) continue;
+            bool blocked = _blockedUserIds.Contains(userId);
+            if (blocked && !_beanedPeers.Contains(kv.Key))
+            {
+                kv.Value.ShowBean();
+                _beanedPeers.Add(kv.Key);
+            }
+            else if (!blocked && _beanedPeers.Contains(kv.Key))
+            {
+                (toRespawn ??= new List<uint>()).Add(kv.Key);
+            }
+        }
+        if (toRespawn == null) return;
+        foreach (uint peerId in toRespawn)
+        {
+            string userId = _peerUserIds.GetValueOrDefault(peerId, "");
+            string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
+            if (_remotes.Remove(peerId, out var avatar)) avatar.QueueFree();
+            _beanedPeers.Remove(peerId);
+            SpawnRemote(new PeerInfo(peerId, name, userId));
+        }
     }
 
     /// Open the photo viewfinder, dropping the phantom camera at the player's eye so the first
@@ -2295,7 +2408,9 @@ public partial class Main : Node3D
         (_actionMenu?.IsOpen ?? false) || (_cameraMenu?.IsOpen ?? false) ||
         (_avatarSelector?.IsOpen ?? false) ||
         (_settingsMenu?.IsOpen ?? false) ||
-        (_videoQueuePanel?.IsOpen ?? false);
+        (_videoQueuePanel?.IsOpen ?? false) ||
+        (_socialPanel?.IsOpen ?? false) || (_playerCard?.IsOpen ?? false) ||
+        (_reportDialog?.IsOpen ?? false);
 
     /// Close every overlay screen. The VR menu button uses this as its "back out" action.
     private void CloseAllMenus()
@@ -2307,6 +2422,9 @@ public partial class Main : Node3D
         if (_avatarSelector?.IsOpen ?? false) _avatarSelector.Hide();
         if (_settingsMenu?.IsOpen ?? false) _settingsMenu.Hide();
         if (_videoQueuePanel?.IsOpen ?? false) _videoQueuePanel.Hide();
+        if (_socialPanel?.IsOpen ?? false) _socialPanel.Hide();
+        if (_playerCard?.IsOpen ?? false) _playerCard.Hide();
+        if (_reportDialog?.IsOpen ?? false) _reportDialog.Hide();
     }
 
     /// Push a live setting change onto whatever it affects.
@@ -2350,12 +2468,15 @@ public partial class Main : Node3D
             _actionMenu.Hide();
             return true;
         }
+        if (_reportDialog?.IsOpen ?? false) { _reportDialog.Hide(); return true; }
+        if (_playerCard?.IsOpen ?? false) { _playerCard.Hide(); return true; }
         if (_settingsMenu?.IsOpen ?? false) { _settingsMenu.Hide(); return true; }
         if (_quickMenu?.IsOpen ?? false) { _quickMenu.Hide(); return true; }
         if (_mainMenu?.IsOpen ?? false) { _mainMenu.Hide(); return true; }
         if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); return true; }
         if (_avatarSelector?.IsOpen ?? false) { _avatarSelector.Hide(); return true; }
         if (_videoQueuePanel?.IsOpen ?? false) { _videoQueuePanel.Hide(); return true; }
+        if (_socialPanel?.IsOpen ?? false) { _socialPanel.Hide(); return true; }
         return false;
     }
 

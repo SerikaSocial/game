@@ -52,8 +52,15 @@ public partial class ActionMenu : CanvasLayer
     private int _hoveredSlice = -1;
     private Vector2 _centerPos;
 
-    private const float OuterRadius = 190f;
-    private const float InnerRadius = 65f;
+    /// Larger on the VR panel.
+    ///
+    /// The wheel is drawn in logical pixels, so its angular size is fixed by these two numbers: at
+    /// 190 px against `VrUiSurface.LogicalSize` of 1000 across a 60.9° panel it subtends 23°, on a
+    /// surface with 61° to spend, and every wedge is a *ray* target aimed from 1.7 m away. 260 px
+    /// takes it to 32° and each of the six wedges to roughly 16° of arc, without the ring reaching
+    /// the panel edge where the curvature starts to skew the hit test.
+    private static float OuterRadius => VrUiSurface.Active ? 260f : 190f;
+    private static float InnerRadius => VrUiSurface.Active ? 88f : 65f;
     /// Follows the active ring so submenus of a different size still line up.
     private int SliceCount => _slices.Length;
 

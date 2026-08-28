@@ -48,7 +48,7 @@ public partial class MainMenu : CanvasLayer
 
         _card = new PanelContainer
         {
-            CustomMinimumSize = new Vector2(1100, 700),
+            CustomMinimumSize = Brand.Card(1100, 700),
         };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16, 1.5f, Brand.Border));
         center.AddChild(_card);
@@ -77,7 +77,7 @@ public partial class MainMenu : CanvasLayer
         };
         userBadge.AddChild(dot);
         _usernameLabel = new Label { Text = "VRChat User" };
-        _usernameLabel.AddThemeFontSizeOverride("font_size", 14);
+        _usernameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         _usernameLabel.AddThemeColorOverride("font_color", Brand.TextHi);
         userBadge.AddChild(_usernameLabel);
         header.AddChild(userBadge);
@@ -85,7 +85,7 @@ public partial class MainMenu : CanvasLayer
         header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
         _clockLabel = new Label { Text = DateTime.Now.ToString("HH:mm") };
-        _clockLabel.AddThemeFontSizeOverride("font_size", 18);
+        _clockLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
         _clockLabel.AddThemeColorOverride("font_color", Brand.Accent);
         header.AddChild(_clockLabel);
 
@@ -119,7 +119,7 @@ public partial class MainMenu : CanvasLayer
         bodyRow.AddChild(sidebar);
 
         var sideTitle = new Label { Text = "CATEGORIES" };
-        sideTitle.AddThemeFontSizeOverride("font_size", 11);
+        sideTitle.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         sideTitle.AddThemeColorOverride("font_color", Brand.TextDim);
         sidebar.AddChild(sideTitle);
 
@@ -138,12 +138,12 @@ public partial class MainMenu : CanvasLayer
         bodyRow.AddChild(contentVBox);
 
         _categoryTitle = new Label { Text = "WORLDS" };
-        _categoryTitle.AddThemeFontSizeOverride("font_size", 20);
+        _categoryTitle.AddThemeFontSizeOverride("font_size", Brand.Fs(20));
         _categoryTitle.AddThemeColorOverride("font_color", Brand.TextHi);
         contentVBox.AddChild(_categoryTitle);
 
         _statusLabel = new Label { Text = "" };
-        _statusLabel.AddThemeFontSizeOverride("font_size", 12);
+        _statusLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         _statusLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         contentVBox.AddChild(_statusLabel);
 
@@ -156,9 +156,18 @@ public partial class MainMenu : CanvasLayer
         scroll.AddThemeStyleboxOverride("panel", new StyleBoxEmpty());
         contentVBox.AddChild(scroll);
 
+        // Three columns on the VR panel, four on a monitor.
+        //
+        // This is what actually decides the big menu's width, not the `CustomMinimumSize` on the
+        // card: a `GridContainer`'s minimum width is the sum of its columns' minimums, cards here
+        // are 195 px wide, and 4 of them plus the 200 px sidebar and the chrome comes to ~1060 px
+        // — more than the panel's whole 1000 px logical width. `Brand.Card` clamped the card's
+        // *minimum* to 952, but a minimum cannot shrink content, so the card grew past the panel
+        // anyway and the SubViewport cut its left border, its right column and its close button
+        // clean off. Dropping one column is what makes the clamp reachable.
         _contentGrid = new GridContainer
         {
-            Columns = 4,
+            Columns = VrUiSurface.Active ? 3 : 4,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
         _contentGrid.AddThemeConstantOverride("h_separation", 10);
@@ -200,7 +209,7 @@ public partial class MainMenu : CanvasLayer
             Icon = Icons.Get(icon, 16, Brand.Accent),
         };
         Brand.Ghost_(b);
-        b.AddThemeFontSizeOverride("font_size", 13);
+        b.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         b.AddThemeConstantOverride("h_separation", 9);
         return b;
     }
@@ -326,11 +335,11 @@ public partial class MainMenu : CanvasLayer
         vb.AddThemeConstantOverride("separation", 6);
         pad.AddChild(vb);
         var t = new Label { Text = title };
-        t.AddThemeFontSizeOverride("font_size", 15);
+        t.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         t.AddThemeColorOverride("font_color", Brand.TextHi);
         vb.AddChild(t);
         var b = new Label { Text = body, AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        b.AddThemeFontSizeOverride("font_size", 12);
+        b.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         b.AddThemeColorOverride("font_color", Brand.TextDim);
         vb.AddChild(b);
         return panel;
@@ -374,7 +383,7 @@ public partial class MainMenu : CanvasLayer
             _ = LoadThumb(banner, thumbUrl);
 
         var titleLbl = new Label { Text = name, TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis };
-        titleLbl.AddThemeFontSizeOverride("font_size", 14);
+        titleLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         titleLbl.AddThemeColorOverride("font_color", Brand.TextHi);
         vbox.AddChild(titleLbl);
 
@@ -384,7 +393,7 @@ public partial class MainMenu : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             CustomMinimumSize = new Vector2(0, 36),
         };
-        descLbl.AddThemeFontSizeOverride("font_size", 11);
+        descLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         descLbl.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(descLbl);
 
@@ -400,7 +409,7 @@ public partial class MainMenu : CanvasLayer
                 StretchMode = TextureRect.StretchModeEnum.KeepCentered,
             });
             var capLbl = new Label { Text = $"{capacity}" };
-            capLbl.AddThemeFontSizeOverride("font_size", 11);
+            capLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
             capLbl.AddThemeColorOverride("font_color", Brand.Accent);
             footer.AddChild(capLbl);
             vbox.AddChild(footer);

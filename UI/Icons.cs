@@ -28,7 +28,7 @@ public static class Icons
         Users, Search, Bell, Calendar, Box, Close, Check, Trash, Doc, Person, Sit,
         Wave, Star, Flame, Gamepad, Flask, Pin, Cart, Bolt, Group, Timer, Trophy,
         Question, Film, Focus, Moon, Snowflake, Music, ThumbUp, ThumbDown,
-        Speaker, Display, Image,
+        Speaker, Display, Image, PersonAdd, Flag, Ban,
     }
 
     /// Stroke width, as a fraction of the icon box. Tuned so a 20 px icon lands near 2 px,
@@ -441,6 +441,23 @@ public static class Icons
             Circle(0.32f, 0.36f, 0.07f),
             // The classic "mountains inside a frame" — two peaks meeting the frame's floor.
             Line(0.08f, 0.72f, 0.36f, 0.46f, 0.55f, 0.64f, 0.68f, 0.52f, 0.92f, 0.74f),
+        },
+
+        Kind.PersonAdd => new() {
+            Circle(0.36f, 0.26f, 0.15f),
+            Arc(0.36f, 0.84f, 0.30f, 0.26f, Mathf.Pi, Mathf.Tau),
+            Line(0.66f, 0.42f, 0.94f, 0.42f),
+            Line(0.80f, 0.28f, 0.80f, 0.56f),
+        },
+
+        Kind.Flag => new() {
+            Line(0.22f, 0.08f, 0.22f, 0.94f),
+            Line(0.22f, 0.12f, 0.82f, 0.22f, 0.74f, 0.44f, 0.82f, 0.66f, 0.22f, 0.56f),
+        },
+
+        Kind.Ban => new() {
+            Circle(0.5f, 0.5f, 0.40f),
+            Line(0.22f, 0.22f, 0.78f, 0.78f),
         },
 
         _ => new() { Circle(0.5f, 0.5f, 0.36f) },

@@ -71,6 +71,15 @@ protocol to drift out of date.
   parses. Party size/max come from the live relay roster.
 - **Config**: `SERIKA_DISCORD_APP_ID` overrides the default application id;
   `SERIKA_DISCORD_LOG=verbose` raises SDK logging to Info.
+- **First-run authorization (portal + consent)**: the Social SDK will not authenticate a
+  tokenless client — connecting before applying a token is a guaranteed gateway `4004`. The
+  app therefore needs `http://127.0.0.1/callback` registered under **Developer Portal → your
+  app → OAuth2 → Redirects** (the SDK's built-in loopback redirect; without it authorize dies
+  with `OAuth2 Error: invalid_request: Missing "redirect_uri" in request` and no popup ever
+  shows). On first boot the manager runs the OAuth flow — saved token → refresh → fresh
+  `Authorize` — and Discord shows a **one-time consent popup** in the official client; click
+  it, the token is exchanged and persisted to `user://discord_token.json`, and every later
+  boot reuses/refreshes it silently.
 - **Android**: the SDK ships there as an AAR with Java glue — not wired; the manager
   disables itself on `OS.HasFeature("android")`.
 - **arRPC caveat**: an `arRPC` bridge (Vesktop/Vencord setups) answers the local IPC socket

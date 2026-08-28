@@ -25,7 +25,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.7.0";
+    public const string ClientVersion = "1.7.3";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -54,6 +54,7 @@ public partial class Hud : CanvasLayer
     private Label _detailStats;
     private VBoxContainer _detailInstanceList;
     private HBoxContainer _detailTagsRow;
+    private TextureRect _detailBanner;
     private Button _detailJoinButton;
     private string _detailWorldId;
 
@@ -93,7 +94,13 @@ public partial class Hud : CanvasLayer
 
         // Centered content panel (scales with viewport via anchor centering).
         var content = new VBoxContainer();
-        content.AddThemeConstantOverride("separation", 14);
+        // Tighter row spacing in VR. The login form is eleven rows tall — two fields, three
+        // buttons, a title, a subtitle, a status line, a version stamp and two spacers — and at
+        // 14 px of separation plus 34 px of card padding it came to 639 px against the panel's
+        // 640, so the card's own rounded corners were cut off top and bottom by the panel edge.
+        // Rows, not type: the font sizes are what make this readable at 1.7 m and none of them
+        // change.
+        content.AddThemeConstantOverride("separation", vr ? 8 : 14);
 
         if (vr)
         {
@@ -105,17 +112,17 @@ public partial class Hud : CanvasLayer
             centre.SetAnchorsPreset(Control.LayoutPreset.FullRect);
             _loginScreen.AddChild(centre);
 
-            // Large on purpose. The panel's logical space is 1200x760 (see `VrUiSurface`), and a
+            // Large on purpose. The panel's logical space is 1000x640 (see `VrUiSurface`), and a
             // 620-wide card used barely a quarter of its width — legible on a monitor, tiny
-            // through a headset lens. This fills most of the panel, so the existing font sizes
-            // land at a comfortable angular size without touching every screen's typography.
-            var card = new PanelContainer { CustomMinimumSize = new Vector2(940, 700) };
+            // through a headset lens. `Brand.Card` clamps this to what the panel can actually
+            // contain, border and shadow included.
+            var card = new PanelContainer { CustomMinimumSize = Brand.Card(940, 700) };
             card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1.5f, Brand.Border));
             centre.AddChild(card);
 
             var pad = new MarginContainer();
             foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
-                pad.AddThemeConstantOverride(side, 34);
+                pad.AddThemeConstantOverride(side, 24);
             card.AddChild(pad);
 
             content.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
@@ -135,7 +142,7 @@ public partial class Hud : CanvasLayer
         }
 
         _title = new Label { Text = "Serika Social", HorizontalAlignment = HorizontalAlignment.Center };
-        _title.AddThemeFontSizeOverride("font_size", 36);
+        _title.AddThemeFontSizeOverride("font_size", Brand.Fs(36));
         _title.AddThemeColorOverride("font_color", Brand.TextHi);
         content.AddChild(_title);
 
@@ -144,7 +151,7 @@ public partial class Hud : CanvasLayer
             Text = "Social VR for everyone",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _subtitle.AddThemeFontSizeOverride("font_size", 16);
+        _subtitle.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _subtitle.AddThemeColorOverride("font_color", Brand.TextDim);
         content.AddChild(_subtitle);
 
@@ -156,7 +163,7 @@ public partial class Hud : CanvasLayer
             PlaceholderText = "Email",
             CustomMinimumSize = new Vector2(0, 44),
         };
-        _emailInput.AddThemeFontSizeOverride("font_size", 16);
+        _emailInput.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         content.AddChild(_emailInput);
 
         // Password field
@@ -166,7 +173,7 @@ public partial class Hud : CanvasLayer
             Secret = true,
             CustomMinimumSize = new Vector2(0, 44),
         };
-        _passwordInput.AddThemeFontSizeOverride("font_size", 16);
+        _passwordInput.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         content.AddChild(_passwordInput);
 
         content.AddChild(new Control { CustomMinimumSize = new Vector2(0, 4) });
@@ -187,7 +194,7 @@ public partial class Hud : CanvasLayer
         dividerRow.AddThemeConstantOverride("separation", 8);
         content.AddChild(dividerRow);
         var dividerLabel = new Label { Text = "— or —" };
-        dividerLabel.AddThemeFontSizeOverride("font_size", 13);
+        dividerLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         dividerLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         dividerRow.AddChild(dividerLabel);
 
@@ -212,7 +219,7 @@ public partial class Hud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        _status.AddThemeFontSizeOverride("font_size", 15);
+        _status.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         _status.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
         content.AddChild(_status);
 
@@ -231,7 +238,7 @@ public partial class Hud : CanvasLayer
             Text = $"v{ClientVersion}  ·  © 2026 Serika.dev",
             HorizontalAlignment = HorizontalAlignment.Center,
         };
-        _versionLabel.AddThemeFontSizeOverride("font_size", 12);
+        _versionLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         _versionLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         content.AddChild(_versionLabel);
 
@@ -246,7 +253,7 @@ public partial class Hud : CanvasLayer
             OffsetTop = -52,
             OffsetBottom = -16,
         };
-        _toast.AddThemeFontSizeOverride("font_size", 15);
+        _toast.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         _toast.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
         AddChild(_toast);
 
@@ -258,6 +265,11 @@ public partial class Hud : CanvasLayer
     // A non-modal panel shown while in the personal Home: welcome + world list.
     private void BuildHomePanel()
     {
+        // Sized through `Brand.Card` rather than as raw offsets, because this panel is the world
+        // list — the screen the player spends the join flow looking at — and at 880x640 it was
+        // taller than the VR panel's whole logical space, so its bottom row of actions ("Join The
+        // Commons") sat under the panel edge.
+        var homeSize = Brand.Card(880, 640) * 0.5f;
         _homePanel = new Panel
         {
             Visible = false,
@@ -265,10 +277,10 @@ public partial class Hud : CanvasLayer
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -440,
-            OffsetTop = -320,
-            OffsetRight = 440,
-            OffsetBottom = 320,
+            OffsetLeft = -homeSize.X,
+            OffsetTop = -homeSize.Y,
+            OffsetRight = homeSize.X,
+            OffsetBottom = homeSize.Y,
         };
         _homePanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_homePanel);
@@ -282,7 +294,7 @@ public partial class Hud : CanvasLayer
         _homePanel.AddChild(vbox);
 
         _homeLabel = new Label { Text = "Home", HorizontalAlignment = HorizontalAlignment.Center };
-        _homeLabel.AddThemeFontSizeOverride("font_size", 24);
+        _homeLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(24));
         _homeLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 0.98f));
         vbox.AddChild(_homeLabel);
 
@@ -292,7 +304,7 @@ public partial class Hud : CanvasLayer
             HorizontalAlignment = HorizontalAlignment.Center,
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        hint.AddThemeFontSizeOverride("font_size", 13);
+        hint.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         hint.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
         vbox.AddChild(hint);
 
@@ -307,9 +319,18 @@ public partial class Hud : CanvasLayer
         scroll.AddThemeStyleboxOverride("panel", new StyleBoxFlat { BgColor = new Color(0, 0, 0, 0) });
         vbox.AddChild(scroll);
 
+        // Two columns on the VR panel, three on a monitor.
+        //
+        // The grid stretches its columns to the container width, so the column count is what sets
+        // a world card's size — and a card is also the *click target*, aimed at from 1.7 m away
+        // with a controller ray whose angular jitter is a degree or so. Three columns inside the
+        // VR card give ~270 px each, which is 16° wide and carries a 60-character description in
+        // 13 px type; two give ~410 px, and the same card is then a comfortable target and a
+        // readable one. There is room for it: the panel is 61° across, wider than a desktop
+        // monitor at arm's length, and this list previously left a third of its own height empty.
         _worldListContainer = new GridContainer
         {
-            Columns = 3,
+            Columns = VrUiSurface.Active ? 2 : 3,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
         _worldListContainer.AddThemeConstantOverride("h_separation", 12);
@@ -328,7 +349,7 @@ public partial class Hud : CanvasLayer
         var browse = new Button { Text = "Browse worlds ↗", CustomMinimumSize = new Vector2(160, 42) };
         browse.Flat = true;
         browse.AddThemeColorOverride("font_color", new Color(0.65f, 0.7f, 0.82f));
-        browse.AddThemeFontSizeOverride("font_size", 14);
+        browse.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         browse.Pressed += () => OS.ShellOpen(WorldsUrl);
         row.AddChild(browse);
 
@@ -342,6 +363,11 @@ public partial class Hud : CanvasLayer
     // ── World Detail panel ──────────────────────────────────────────────────────────
     private void BuildWorldDetailPanel()
     {
+        // Deliberately as wide as the world list it replaces. It used to be 680x560 against the
+        // list's 880x640, so stepping from a world card into its detail shrank the screen by a
+        // third — on a monitor that reads as a dialog, but on a floating panel the card is the
+        // only object there is and it simply got smaller and further away.
+        var detailSize = Brand.Card(880, 640) * 0.5f;
         _worldDetailPanel = new Panel
         {
             Visible = false,
@@ -349,10 +375,10 @@ public partial class Hud : CanvasLayer
             AnchorTop = 0.5f,
             AnchorRight = 0.5f,
             AnchorBottom = 0.5f,
-            OffsetLeft = -340,
-            OffsetTop = -280,
-            OffsetRight = 340,
-            OffsetBottom = 280,
+            OffsetLeft = -detailSize.X,
+            OffsetTop = -detailSize.Y,
+            OffsetRight = detailSize.X,
+            OffsetBottom = detailSize.Y,
         };
         _worldDetailPanel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
         AddChild(_worldDetailPanel);
@@ -379,7 +405,7 @@ public partial class Hud : CanvasLayer
         header.AddChild(backBtn);
 
         _detailName = new Label { Text = "" };
-        _detailName.AddThemeFontSizeOverride("font_size", 24);
+        _detailName.AddThemeFontSizeOverride("font_size", Brand.Fs(24));
         _detailName.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(_detailName);
 
@@ -388,6 +414,23 @@ public partial class Hud : CanvasLayer
         _detailTagsRow.AddThemeConstantOverride("separation", 6);
         vbox.AddChild(_detailTagsRow);
 
+        // A banner in the world's own colours, filling whatever vertical slack the card has.
+        //
+        // This screen's content is short — a description, four stats and a couple of instance rows
+        // — so on a card sized to hold a *busy* world it left a 250 px void between the server list
+        // and the Join button. On a monitor an empty half-dialog is unremarkable; on the VR panel
+        // the card is the only object in the room and the hole in the middle of it is the thing
+        // you look at. The gradient is the same `WorldHue` seed the list cards and the website use,
+        // so a world is recognisably the same colour everywhere.
+        _detailBanner = new TextureRect
+        {
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.Scale,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0, 90),
+        };
+        vbox.AddChild(_detailBanner);
+
         // Description
         _detailDesc = new Label
         {
@@ -395,13 +438,13 @@ public partial class Hud : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             CustomMinimumSize = new Vector2(0, 60),
         };
-        _detailDesc.AddThemeFontSizeOverride("font_size", 14);
+        _detailDesc.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         _detailDesc.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
         vbox.AddChild(_detailDesc);
 
         // Stats
         _detailStats = new Label { Text = "" };
-        _detailStats.AddThemeFontSizeOverride("font_size", 13);
+        _detailStats.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _detailStats.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(_detailStats);
 
@@ -409,14 +452,17 @@ public partial class Hud : CanvasLayer
 
         // Instance list heading
         var instanceLabel = new Label { Text = "Active Servers" };
-        instanceLabel.AddThemeFontSizeOverride("font_size", 14);
+        instanceLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         instanceLabel.AddThemeColorOverride("font_color", Brand.TextHi);
         vbox.AddChild(instanceLabel);
 
+        // `Fill`, not `ExpandFill`: the banner above takes the card's spare height now. Two
+        // siblings both claiming the slack split it, which put the hole back — half of it above
+        // the servers and half below.
         var instanceScroll = new ScrollContainer
         {
             CustomMinimumSize = new Vector2(0, 100),
-            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.Fill,
         };
         instanceScroll.AddThemeStyleboxOverride("panel", new StyleBoxFlat { BgColor = new Color(0, 0, 0, 0) });
         vbox.AddChild(instanceScroll);
@@ -450,6 +496,20 @@ public partial class Hud : CanvasLayer
 
         _detailWorldId = id;
         _detailName.Text = name;
+
+        // Same two-tone gradient as the world's list card, from the same hue seed.
+        float bannerHue = WorldHue(name ?? id);
+        var bannerGrad = new Gradient();
+        bannerGrad.SetColor(0, Color.FromHsv(bannerHue / 360f, 0.45f, 0.30f));
+        bannerGrad.SetColor(1, Color.FromHsv(((bannerHue + 40f) % 360f) / 360f, 0.40f, 0.20f));
+        _detailBanner.Texture = new GradientTexture2D
+        {
+            Gradient = bannerGrad,
+            Fill = GradientTexture2D.FillEnum.Linear,
+            FillFrom = new Vector2(0f, 0f),
+            FillTo = new Vector2(1f, 1f),
+            Width = 128, Height = 128,
+        };
         _detailDesc.Text = string.IsNullOrEmpty(desc) ? "No description provided." : desc;
 
         var statsText = $"Capacity: {capacity}  ·  Visits: {visitCount:N0}";
@@ -466,7 +526,7 @@ public partial class Hud : CanvasLayer
                 string tagStr = tag.GetString();
                 if (string.IsNullOrEmpty(tagStr)) continue;
                 var tagLabel = new Label { Text = tagStr };
-                tagLabel.AddThemeFontSizeOverride("font_size", 11);
+                tagLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
                 tagLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.6f, 0.9f));
                 // Tag pill background
                 var tagPanel = new PanelContainer();
@@ -511,13 +571,13 @@ public partial class Hud : CanvasLayer
                            $"{(mode < modeLabels.Length ? modeLabels[mode] : "—")}" +
                            (region != null ? $" · {region}" : ""),
                 };
-                infoLabel.AddThemeFontSizeOverride("font_size", 12);
+                infoLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
                 infoLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.74f, 0.82f));
                 infoLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
                 row.AddChild(infoLabel);
 
                 var countLabel = new Label { Text = $"{playerCount}/{instCap}" };
-                countLabel.AddThemeFontSizeOverride("font_size", 12);
+                countLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
                 countLabel.AddThemeColorOverride("font_color", Brand.TextDim);
                 row.AddChild(countLabel);
 
@@ -531,7 +591,7 @@ public partial class Hud : CanvasLayer
                 Text = "No active servers. Join to start one.",
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
-            noServers.AddThemeFontSizeOverride("font_size", 12);
+            noServers.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
             noServers.AddThemeColorOverride("font_color", Brand.TextDim);
             _detailInstanceList.AddChild(noServers);
         }
@@ -705,7 +765,7 @@ public partial class Hud : CanvasLayer
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
             empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.55f, 0.62f));
-            empty.AddThemeFontSizeOverride("font_size", 13);
+            empty.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
             _worldListContainer.AddChild(empty);
             return;
         }
@@ -775,7 +835,7 @@ public partial class Hud : CanvasLayer
             Text = name,
             TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis,
         };
-        nameLabel.AddThemeFontSizeOverride("font_size", 18);
+        nameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
         nameLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.98f));
         vbox.AddChild(nameLabel);
 
@@ -785,7 +845,7 @@ public partial class Hud : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             CustomMinimumSize = new Vector2(0, 30),
         };
-        descLabel.AddThemeFontSizeOverride("font_size", 11);
+        descLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         descLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.82f, 0.88f, 0.7f));
         vbox.AddChild(descLabel);
 
@@ -798,7 +858,7 @@ public partial class Hud : CanvasLayer
         if (!string.IsNullOrEmpty(author))
         {
             var authorLabel = new Label { Text = $"by {author}" };
-            authorLabel.AddThemeFontSizeOverride("font_size", 10);
+            authorLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(10));
             authorLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.72f, 0.8f, 0.6f));
             footer.AddChild(authorLabel);
         }
@@ -806,7 +866,7 @@ public partial class Hud : CanvasLayer
         footer.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
         var capLabel = new Label { Text = $"{capacity}" };
-        capLabel.AddThemeFontSizeOverride("font_size", 11);
+        capLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         capLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.82f, 0.88f, 0.6f));
         footer.AddChild(capLabel);
 

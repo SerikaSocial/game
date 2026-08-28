@@ -29,14 +29,25 @@ public partial class SettingsMenu : CanvasLayer
     {
         Layer = 92; // above the pause menu so Settings opened from it stacks correctly
 
-        _scrim = new ColorRect { Color = new Color(0.02f, 0.03f, 0.05f, 0.82f), AnchorRight = 1, AnchorBottom = 1, Visible = false };
+        // Hidden at the layer, not only at the card. `Open()` sets both and `Hide()` bails out
+        // when the card is already hidden, so from `_Ready` until the player first opened *and*
+        // closed Settings this layer was visible with nothing in it — which on the VR panel is
+        // exactly what `VrUiSurface.HasInteractiveUi` reads to keep the panel drawn and the laser
+        // pointer lit.
+        Visible = false;
+
+        // Through `Brand.Scrim`, not a hand-rolled ColorRect. Built inline at 0.82 alpha this one
+        // never saw the VR branch, so on the panel it was a near-opaque sheet over the whole
+        // 61° x 39° surface with the settings card floating in the middle of it.
+        _scrim = Brand.Scrim(0.82f);
+        _scrim.Visible = false;
         AddChild(_scrim);
 
         var center = new CenterContainer();
         center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(center);
 
-        _card = new PanelContainer { CustomMinimumSize = new Vector2(760, 560), Visible = false };
+        _card = new PanelContainer { CustomMinimumSize = Brand.Card(760, 560), Visible = false };
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16, 1, Brand.Border));
         center.AddChild(_card);
 
@@ -51,11 +62,11 @@ public partial class SettingsMenu : CanvasLayer
 
         var header = new HBoxContainer();
         var title = new Label { Text = "Settings", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        title.AddThemeFontSizeOverride("font_size", 22);
+        title.AddThemeFontSizeOverride("font_size", Brand.Fs(22));
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
         var detected = new Label { Text = $"Detected: {DeviceProfile.Current} tier" };
-        detected.AddThemeFontSizeOverride("font_size", 12);
+        detected.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         detected.AddThemeColorOverride("font_color", Brand.TextDim);
         header.AddChild(detected);
         root.AddChild(header);
@@ -223,7 +234,7 @@ public partial class SettingsMenu : CanvasLayer
                    "Tab free the mouse · T chat · P video queue · Esc menu",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        hint.AddThemeFontSizeOverride("font_size", 12);
+        hint.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         hint.AddThemeColorOverride("font_color", Brand.TextDim);
         v.AddChild(hint);
         return v;
@@ -351,7 +362,7 @@ public partial class SettingsMenu : CanvasLayer
                    "Hands: point and pinch to teleport · pinch to click · tap your other wrist for the menu",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        hint.AddThemeFontSizeOverride("font_size", 12);
+        hint.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         hint.AddThemeColorOverride("font_color", Brand.TextDim);
         v.AddChild(hint);
 

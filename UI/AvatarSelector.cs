@@ -68,7 +68,7 @@ public partial class AvatarSelector : CanvasLayer
 
         _card = new PanelContainer();
         _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16));
-        _card.CustomMinimumSize = new Vector2(920, 620);
+        _card.CustomMinimumSize = Brand.Card(920, 620);
         center.AddChild(_card);
 
         var pad = new MarginContainer();
@@ -86,7 +86,7 @@ public partial class AvatarSelector : CanvasLayer
         col.AddChild(header);
 
         var title = new Label { Text = "Choose your avatar" };
-        title.AddThemeFontSizeOverride("font_size", 22);
+        title.AddThemeFontSizeOverride("font_size", Brand.Fs(22));
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
 
@@ -165,12 +165,12 @@ public partial class AvatarSelector : CanvasLayer
         headerRow.AddChild(backBtn);
 
         _detailName = new Label { Text = "" };
-        _detailName.AddThemeFontSizeOverride("font_size", 24);
+        _detailName.AddThemeFontSizeOverride("font_size", Brand.Fs(24));
         _detailName.AddThemeColorOverride("font_color", Brand.TextHi);
         headerRow.AddChild(_detailName);
 
         _detailAuthor = new Label { Text = "" };
-        _detailAuthor.AddThemeFontSizeOverride("font_size", 14);
+        _detailAuthor.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         _detailAuthor.AddThemeColorOverride("font_color", Brand.TextDim);
         col.AddChild(_detailAuthor);
 
@@ -185,11 +185,11 @@ public partial class AvatarSelector : CanvasLayer
         void AddStat(string label, out Label valueLabel)
         {
             var lbl = new Label { Text = label };
-            lbl.AddThemeFontSizeOverride("font_size", 12);
+            lbl.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
             lbl.AddThemeColorOverride("font_color", Brand.TextDim);
             statsGrid.AddChild(lbl);
             valueLabel = new Label { Text = "—" };
-            valueLabel.AddThemeFontSizeOverride("font_size", 14);
+            valueLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
             valueLabel.AddThemeColorOverride("font_color", Brand.TextHi);
             statsGrid.AddChild(valueLabel);
         }
@@ -385,12 +385,12 @@ public partial class AvatarSelector : CanvasLayer
             TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis,
             CustomMinimumSize = new Vector2(160, 0),
         };
-        nameLabel.AddThemeFontSizeOverride("font_size", 14);
+        nameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         nameLabel.AddThemeColorOverride("font_color", Brand.TextHi);
         inner.AddChild(nameLabel);
 
         var authorLabel = new Label { Text = $"by {author}" };
-        authorLabel.AddThemeFontSizeOverride("font_size", 11);
+        authorLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         authorLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         inner.AddChild(authorLabel);
 

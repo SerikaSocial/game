@@ -326,6 +326,135 @@ public sealed class ApiClient
         return result;
     }
 
+    // ── Social graph: friends, requests, blocks ──────────────────────────────────
+
+    /// One entry of the social graph: enough to render a row anywhere in the client.
+    public sealed class SocialUser
+    {
+        public string Id;
+        public string Username;
+        public string DisplayName; // may be null server-side; Username then
+        public string AvatarUrl;
+        public string Name => string.IsNullOrEmpty(DisplayName) ? Username : DisplayName;
+    }
+
+    public sealed class SocialGraph
+    {
+        public List<SocialUser> Friends = new();
+        public List<SocialUser> Incoming = new();
+        public List<SocialUser> Outgoing = new();
+    }
+
+    private static SocialUser ParseUser(JsonElement j)
+    {
+        var u = new SocialUser
+        {
+            Id = j.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+            Username = j.TryGetProperty("username", out var un) && un.ValueKind == JsonValueKind.String ? un.GetString() : "?",
+            AvatarUrl = j.TryGetProperty("avatarUrl", out var au) && au.ValueKind == JsonValueKind.String ? au.GetString() : null,
+        };
+        if (j.TryGetProperty("displayName", out var dn) && dn.ValueKind == JsonValueKind.String)
+            u.DisplayName = dn.GetString();
+        return u;
+    }
+
+    /// Friends + pending incoming/outgoing requests for the social panel.
+    /// Returns an empty graph on error — the panel shows a retry.
+    public async Task<SocialGraph> GetSocialGraphAsync()
+    {
+        var g = new SocialGraph();
+        try
+        {
+            var res = await GetAuthedAsync("/v1/social/friends");
+            if (res.TryGetProperty("friends", out var f) && f.ValueKind == JsonValueKind.Array)
+                foreach (var u in f.EnumerateArray()) g.Friends.Add(ParseUser(u));
+            if (res.TryGetProperty("incoming", out var i) && i.ValueKind == JsonValueKind.Array)
+                foreach (var u in i.EnumerateArray()) g.Incoming.Add(ParseUser(u));
+            if (res.TryGetProperty("outgoing", out var o) && o.ValueKind == JsonValueKind.Array)
+                foreach (var u in o.EnumerateArray()) g.Outgoing.Add(ParseUser(u));
+        }
+        catch (Exception e) { GD.PrintErr($"social graph fetch failed: {e.Message}"); }
+        return g;
+    }
+
+    /// Send a friend request. Returns "pending" (sent), "accepted" (they had already
+    /// asked us), "already_friends" or "request_already_sent" (idempotent server states).
+    public async Task<string> SendFriendRequestAsync(string userId)
+    {
+        var j = await PostAuthedAsync($"/v1/social/friends/{userId}", "{}");
+        return j.TryGetProperty("status", out var s) ? s.GetString() : "pending";
+    }
+
+    public async Task AcceptFriendRequestAsync(string userId) =>
+        await PostAuthedAsync($"/v1/social/friends/{userId}/accept", "{}");
+
+    /// Remove a friend, or decline/cancel a request — same server endpoint.
+    public async Task RemoveFriendAsync(string userId) =>
+        await DeleteAuthedAsync($"/v1/social/friends/{userId}");
+
+    public async Task BlockUserAsync(string userId) =>
+        await PostAuthedAsync($"/v1/social/block/{userId}", "{}");
+
+    public async Task UnblockUserAsync(string userId) =>
+        await DeleteAuthedAsync($"/v1/social/block/{userId}");
+
+    /// The blocked list with names (the same endpoint GetBlockedUsersAsync reads, parsed
+    /// fully) — for the social panel's Blocked tab. Empty list on error.
+    public async Task<List<SocialUser>> GetBlockedUsersDetailedAsync()
+    {
+        var result = new List<SocialUser>();
+        try
+        {
+            var res = await GetAuthedAsync("/v1/social/blocks");
+            if (res.TryGetProperty("blocks", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                foreach (var b in arr.EnumerateArray()) result.Add(ParseUser(b));
+        }
+        catch (Exception e) { GD.PrintErr($"blocked list fetch failed: {e.Message}"); }
+        return result;
+    }
+
+    /// Search users by username prefix (min 2 chars). Returns candidates with online
+    /// flags; empty list on error or short query.
+    public async Task<List<SocialUser>> SearchUsersAsync(string query)
+    {
+        var result = new List<SocialUser>();
+        if (string.IsNullOrEmpty(query) || query.Trim().Length < 2) return result;
+        try
+        {
+            var res = await GetAuthedAsync($"/v1/social/users/search?q={Uri.EscapeDataString(query.Trim())}");
+            if (res.TryGetProperty("users", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                foreach (var u in arr.EnumerateArray()) result.Add(ParseUser(u));
+        }
+        catch (Exception e) { GD.PrintErr($"user search failed: {e.Message}"); }
+        return result;
+    }
+
+    // ── Abuse reports ────────────────────────────────────────────────────────────
+
+    /// File an abuse report. Categories 0..8 — must match REPORT_CATEGORIES in
+    /// server/api/src/routes/reports.ts. Returns null on success, or the server's
+    /// error code ("already_reported", "report_rate_limited", …).
+    public async Task<string> ReportAsync(bool world, string targetId, int category, string details)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            targetType = world ? "world" : "user",
+            targetId,
+            category,
+            details = details ?? "",
+        });
+        var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/v1/reports")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+        if (SessionToken != null)
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        var res = await _http.SendAsync(req);
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        if (res.IsSuccessStatusCode) return null;
+        return json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}";
+    }
+
     private async Task<JsonElement> GetAsync(string path)
     {
         var res = await _http.GetAsync($"{_baseUrl}{path}");
@@ -354,5 +483,18 @@ public sealed class ApiClient
         if (!res.IsSuccessStatusCode)
             throw new InvalidOperationException(json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}");
         return json;
+    }
+
+    private async Task DeleteAuthedAsync(string path)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Delete, $"{_baseUrl}{path}");
+        if (SessionToken != null)
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        var res = await _http.SendAsync(req);
+        if (!res.IsSuccessStatusCode)
+        {
+            var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+            throw new InvalidOperationException(json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}");
+        }
     }
 }

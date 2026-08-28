@@ -118,7 +118,7 @@ public partial class ChatOverlay : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
-        label.AddThemeFontSizeOverride("font_size", 15);
+        label.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         label.AddThemeColorOverride("font_color", color);
         label.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 0.85f));
         label.AddThemeConstantOverride("outline_size", 4);

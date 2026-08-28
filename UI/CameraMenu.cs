@@ -86,7 +86,7 @@ public partial class CameraMenu : CanvasLayer
             AnchorLeft = 0.5f, AnchorTop = 0.5f, AnchorRight = 0.5f, AnchorBottom = 0.5f,
             OffsetLeft = -50, OffsetTop = -40, OffsetRight = 50, OffsetBottom = 40,
         };
-        _countdownLabel.AddThemeFontSizeOverride("font_size", 64);
+        _countdownLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(64));
         _countdownLabel.AddThemeColorOverride("font_color", Brand.Warning);
         vfStack.AddChild(_countdownLabel);
 
@@ -95,7 +95,7 @@ public partial class CameraMenu : CanvasLayer
             Text = "CAMERA VIEW FINDER",
             AnchorLeft = 0, AnchorTop = 0,
         };
-        _statusLabel.AddThemeFontSizeOverride("font_size", 12);
+        _statusLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         _statusLabel.AddThemeColorOverride("font_color", Brand.TextDim);
         vfStack.AddChild(_statusLabel);
 
@@ -130,7 +130,7 @@ public partial class CameraMenu : CanvasLayer
             ExpandIcon = false,
         };
         Brand.Ghost_(btn);
-        btn.AddThemeFontSizeOverride("font_size", 12);
+        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         btn.Pressed += onClick;
         return btn;
     }

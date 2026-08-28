@@ -50,7 +50,7 @@ public partial class InteractionPrompt : CanvasLayer, IInteractPrompt
             VerticalAlignment = VerticalAlignment.Center,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
-        _label.AddThemeFontSizeOverride("font_size", 16);
+        _label.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         _label.AddThemeColorOverride("font_color", Brand.TextHi);
         _panel.AddChild(_label);
     }

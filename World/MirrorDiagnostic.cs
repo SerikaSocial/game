@@ -80,6 +80,14 @@ public static partial class MirrorDiagnostic
 
     public static void Run(Node host, string skaPath, string outPrefix)
     {
+        // `--serika-mirrortest --stereo` runs the VR/stereo suite instead. It is dispatched from
+        // here rather than from Main.cs's flag table so the stereo work needs no edit to Main.
+        foreach (var a in OS.GetCmdlineArgs().Concat(OS.GetCmdlineUserArgs()))
+            if (a == "--stereo" || a == "stereo")
+            {
+                MirrorStereoDiagnostic.Run(host, skaPath, outPrefix);
+                return;
+            }
         try { RunInner(host, skaPath, outPrefix); }
         catch (Exception e)
         {

@@ -18,6 +18,33 @@
   </PropertyGroup>
 
   <!--
+    No debug symbols in a shipping build.
+
+    The export was packaging `SerikaSocial.pdb` into every platform: the Quest APK
+    (assets/.godot/mono/publish/arm64/), both macOS slices, and the Linux/Windows data payloads.
+    A portable PDB carries local variable names, exact line numbers and source file names — but
+    the reason that actually matters here is SourceLink: the PDB embedded a JSON map from the
+    absolute build path to raw.githubusercontent.com URLs pinned to the exact commit SHAs of the
+    private `SerikaSocial/game` and `SerikaSocial/proto` repositories. Shipping that hands every
+    player the build machine's directory layout and the precise commits the binary was cut from,
+    and points a debugger straight at the original files should those repos ever be readable.
+
+    Note what this does NOT buy: a .NET assembly already contains complete metadata — every type,
+    method, field and property name, plus the IL — so ILSpy reconstructs near-source C# from the
+    DLL alone, with or without a PDB. Stripping symbols is hygiene and disclosure control, not
+    copy protection. Anything that must not be readable belongs on the server, which is where this
+    project already keeps auth and moderation.
+
+    Only ExportRelease is stripped, so `dotnet build` and ExportDebug keep full symbols and local
+    debugging and stack traces are unaffected.
+  -->
+  <PropertyGroup Condition=" '$(Configuration)' == 'ExportRelease' ">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <IncludeSymbolsInSingleFile>false</IncludeSymbolsInSingleFile>
+  </PropertyGroup>
+
+  <!--
     The codec test project (Net/Codec/Tests) references xUnit and must NOT be part of the
     Godot build. The codec sources themselves ARE compiled here — they're the same files the
     tests exercise, so what ships is exactly what is verified.

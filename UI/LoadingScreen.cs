@@ -7,7 +7,7 @@ namespace SerikaSocial;
 /// It's a real 3D scene, not a spinner GIF: a floating faceted crystal (Serika's mark) turns and
 /// bobs in an isolated SubViewport over a violet gradient, with an indeterminate progress bar and
 /// rotating tips. Purely presentational — Main calls Show / SetStatus / HideWithFade.
-public partial class LoadingScreen : CanvasLayer
+public partial class LoadingScreen : CanvasLayer, UI.IVrPassiveLayer
 {
     private static readonly string[] Tips =
     {
@@ -59,59 +59,98 @@ public partial class LoadingScreen : CanvasLayer
 
     private void BuildUi()
     {
+        bool vr = UI.VrUiSurface.Active;
+
         _root = new Control { AnchorRight = 1, AnchorBottom = 1, MouseFilter = Control.MouseFilterEnum.Stop };
         AddChild(_root);
 
-        // Violet gradient backdrop.
-        var grad = new GradientTexture2D
+        // Violet gradient backdrop — on a monitor only.
+        //
+        // On a screen the loading overlay *is* the whole window and a full-bleed gradient is the
+        // right shape. On the VR panel there is no window: the gradient is a 2 m x 1.3 m opaque
+        // sheet hanging in the room, and it is shown at exactly the moment the player is
+        // *travelling* — the one moment they most want to see that something is happening around
+        // them. Measured on the panel it was 100% ink and 100% opaque, the worst of any screen.
+        // In VR the crystal and the status text sit on an ordinary card instead, like every other
+        // screen, and the room stays visible around it.
+        if (!vr)
         {
-            Gradient = Brand.BackdropGradient(),
-            Fill = GradientTexture2D.FillEnum.Linear,
-            FillFrom = new Vector2(0.5f, 0f),
-            FillTo = new Vector2(0.5f, 1f),
-            Width = 8, Height = 256,
-        };
-        var bg = new TextureRect
-        {
-            Texture = grad,
-            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-            StretchMode = TextureRect.StretchModeEnum.Scale,
-            AnchorRight = 1, AnchorBottom = 1,
-        };
-        _root.AddChild(bg);
+            var grad = new GradientTexture2D
+            {
+                Gradient = Brand.BackdropGradient(),
+                Fill = GradientTexture2D.FillEnum.Linear,
+                FillFrom = new Vector2(0.5f, 0f),
+                FillTo = new Vector2(0.5f, 1f),
+                Width = 8, Height = 256,
+            };
+            _root.AddChild(new TextureRect
+            {
+                Texture = grad,
+                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.Scale,
+                AnchorRight = 1, AnchorBottom = 1,
+            });
+        }
 
         // Centre column.
         var col = new VBoxContainer
         {
-            AnchorLeft = 0.5f, AnchorTop = 0.5f, AnchorRight = 0.5f, AnchorBottom = 0.5f,
-            OffsetLeft = -260, OffsetRight = 260, OffsetTop = -220, OffsetBottom = 220,
             Alignment = BoxContainer.AlignmentMode.Center,
         };
         col.AddThemeConstantOverride("separation", 10);
-        _root.AddChild(col);
 
-        // 3D crystal viewport, shown as a texture.
+        if (vr)
+        {
+            var centre = new CenterContainer();
+            centre.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+            _root.AddChild(centre);
+
+            var card = new PanelContainer { CustomMinimumSize = Brand.Card(620, 560) };
+            card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1.5f, Brand.Border));
+            centre.AddChild(card);
+
+            var pad = new MarginContainer();
+            foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+                pad.AddThemeConstantOverride(side, 30);
+            card.AddChild(pad);
+
+            col.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
+            pad.AddChild(col);
+        }
+        else
+        {
+            col.AnchorLeft = 0.5f; col.AnchorTop = 0.5f;
+            col.AnchorRight = 0.5f; col.AnchorBottom = 0.5f;
+            col.OffsetLeft = -260; col.OffsetRight = 260;
+            col.OffsetTop = -220; col.OffsetBottom = 220;
+            _root.AddChild(col);
+        }
+
+        // 3D crystal viewport, shown as a texture. Smaller in VR: at 340 px it ate more than half
+        // the panel's 640 px of logical height and pushed the status line — the only part of this
+        // screen that carries information — down onto the card's bottom edge.
+        int crystal = vr ? 240 : 340;
         var vp = new SubViewport
         {
-            Size = new Vector2I(340, 340),
+            Size = new Vector2I(crystal, crystal),
             TransparentBg = true,
             RenderTargetUpdateMode = SubViewport.UpdateMode.Always,
             RenderTargetClearMode = SubViewport.ClearMode.Always,
             OwnWorld3D = true,
         };
         _viewport = vp;
-        var vpc = new SubViewportContainer { Stretch = false, CustomMinimumSize = new Vector2(340, 340) };
+        var vpc = new SubViewportContainer { Stretch = false, CustomMinimumSize = new Vector2(crystal, crystal) };
         vpc.SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter;
         vpc.AddChild(vp);
         col.AddChild(vpc);
 
         var title = new Label { Text = "Serika Social", HorizontalAlignment = HorizontalAlignment.Center };
-        title.AddThemeFontSizeOverride("font_size", 30);
+        title.AddThemeFontSizeOverride("font_size", Brand.Fs(30));
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         col.AddChild(title);
 
         _status = new Label { HorizontalAlignment = HorizontalAlignment.Center };
-        _status.AddThemeFontSizeOverride("font_size", 15);
+        _status.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         _status.AddThemeColorOverride("font_color", Brand.AccentSoft);
         col.AddChild(_status);
 
@@ -124,7 +163,7 @@ public partial class LoadingScreen : CanvasLayer
         col.AddChild(new Control { CustomMinimumSize = new Vector2(0, 8) });
 
         _tip = new Label { HorizontalAlignment = HorizontalAlignment.Center, AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        _tip.AddThemeFontSizeOverride("font_size", 13);
+        _tip.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _tip.AddThemeColorOverride("font_color", Brand.TextDim);
         col.AddChild(_tip);
     }

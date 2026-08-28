@@ -29,6 +29,8 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const string ActSecondaryBtn = "by_button"; // B (right) / Y (left)
     private const string ActStickClick = "primary_click";
     private const string ActStickTouch = "primary_touch";
+    private const string ActPrimaryBtnTouch = "ax_touch";
+    private const string ActSecondaryBtnTouch = "by_touch";
     private const string ActHaptic = "haptic";
 
     /// How far the trigger or grip must travel before it counts as "pulled" for gesture purposes.
@@ -513,38 +515,157 @@ void fragment() {
         _origin.Position = new Vector3(_origin.Position.X, y, _origin.Position.Z);
     }
 
-    /// Record the headset's floor distance on the first frame with valid tracking. Called
-    /// from _PhysicsProcess before anything else reads the camera position.
+    /// Work out how tall the player is, from the headset's height above the floor.
+    ///
+    /// **The headset is not on the player's face when the app starts.** It is on a desk, or in
+    /// their hands, or halfway to their head — that is what launching an app *is*. The previous
+    /// version latched the very first frame whose reading fell inside a generous 0.3–2.5 m band
+    /// and never looked again, so a headset resting on a table calibrated the player at 1.15 m and
+    /// locked it in for the session. Everything downstream is built on that number: the play space
+    /// is shifted by it, so the world sits half a metre too high, the avatar's eyes are nowhere
+    /// near the camera, and the hands come out in the wrong place. It reads as "tracking is
+    /// awful", because every tracked thing is in the wrong position — while tracking itself is
+    /// perfect.
+    ///
+    /// A desk reading is not noisy, it is *wrong and stable*, so no amount of averaging fixes it.
+    /// What distinguishes a worn headset is that it is **high and it moves**: a head bobs, a table
+    /// does not. So this waits for a sustained run of samples that are both plausibly head-height
+    /// and showing real motion, and only then commits.
+    ///
+    /// It also keeps watching afterwards. A player who takes the headset off and hands it to
+    /// someone shorter, or who calibrated while sitting and then stands, gets re-calibrated rather
+    /// than being stuck with a number from a minute ago.
     private void TryAutoCalibrate()
     {
-        if (_heightCalibrated) return;
         if (XRServer.GetTracker("head") is not XRPositionalTracker headTracker || !headTracker.HasPose("default")) return;
-        // The camera's local Y in the XROrigin is the floor-to-headset distance — but ONLY in a
-        // floor-relative reference space. See the note on `xr/openxr/reference_space` in
-        // project.godot: with the seated LOCAL space this reads about zero, this guard rejects
-        // every frame forever, and the play space ends up placed from a hardcoded constant.
+
         float camY = _camera.Position.Y;
-        if (camY < 0.3f || camY > 2.5f)
+        float dt = 1f / Mathf.Max(1, Engine.PhysicsTicksPerSecond);
+
+        // A headset below this is on a desk, on the floor, or being carried — not being worn.
+        // Sitting players are the reason it is not higher: a seated adult's eyes are around 1.2 m.
+        const float WornMinimum = 1.10f;
+        const float PlausibleMaximum = 2.2f;
+
+        // Ask the runtime whether the headset is ON A FACE, rather than inferring it.
+        //
+        // OpenXR exposes user presence (the proximity sensor) and a session state, and Godot
+        // surfaces both. That is a direct answer to the question this method was guessing at, and
+        // the guess was wrong on device: a headset being picked up off a desk at 1.15 m is both
+        // "plausibly head height" and "moving", so the heuristic accepted it and calibrated the
+        // player 40 cm too short — the same 1.15 m as before the fix.
+        //
+        // Not every runtime implements XR_EXT_user_presence, so the heuristic stays as the
+        // fallback; it is much better than nothing on a PCVR runtime that reports no presence.
+        if (!UserIsWearingHeadset()) { ResetCalibrateWindow(); return; }
+
+        bool plausible = camY >= WornMinimum && camY <= PlausibleMaximum;
+
+        // Liveness is measured as the SPREAD of readings across the settle window, not as a
+        // frame-to-frame difference. Differencing successive frames compares against the frame
+        // rate: a head swaying a centimetre over a second moves ~0.2 mm per tick at 72 Hz, which
+        // is under any threshold that would still reject a table, so the test rejected real
+        // players too. Range over a window is frame-rate independent and says the thing actually
+        // meant — did this thing move at all while we watched it.
+        _calibrateMin = Mathf.Min(_calibrateMin, camY);
+        _calibrateMax = Mathf.Max(_calibrateMax, camY);
+
+        if (!plausible)
         {
-            // Say so out loud rather than failing silently, which is how the reference-space bug
-            // survived: nothing in the logs ever mentioned that calibration had not happened.
-            _calibrateWarnTimer += 1f / Mathf.Max(1, Engine.PhysicsTicksPerSecond);
-            if (_calibrateWarnTimer > 5f)
+            ResetCalibrateWindow();
+            if (!_heightCalibrated)
             {
-                _calibrateWarnTimer = float.NegativeInfinity; // warn once
-                GD.PrintErr($"VR: headset floor distance reads {camY:0.00}m after 5s, outside the " +
-                            "plausible 0.3–2.5m — height auto-calibration is not running. Check " +
-                            "xr/openxr/reference_space is a floor-relative space (2 = Local Floor).");
+                _calibrateWarnTimer += dt;
+                if (_calibrateWarnTimer > 8f)
+                {
+                    _calibrateWarnTimer = float.NegativeInfinity; // warn once
+                    GD.PrintErr($"VR: headset height reads {camY:0.00}m after 8s, outside the " +
+                                $"{WornMinimum:0.00}–{PlausibleMaximum:0.00}m a worn headset occupies — " +
+                                "not calibrating. If this never resolves, check " +
+                                "xr/openxr/reference_space is a floor-relative space (2 = Local Floor).");
+                }
             }
             return;
         }
-        _measuredEyeHeight = camY;
+
+        _calibrateSteady += dt;
+        _calibrateAccum += camY;
+        _calibrateSamples++;
+        if (_calibrateSteady < CalibrateSettleSeconds) return;
+
+        float measured = _calibrateAccum / Mathf.Max(1, _calibrateSamples);
+        float spread = _calibrateMax - _calibrateMin;
+        ResetCalibrateWindow();
+
+        // A head sways by centimetres over a second and a half; a headset on a table does not move
+        // at all. Anything under a few millimetres of total travel is furniture.
+        if (spread < LivenessMetres)
+        {
+            if (!_heightCalibrated)
+            {
+                _calibrateWarnTimer += CalibrateSettleSeconds;
+                if (_calibrateWarnTimer > 8f)
+                {
+                    _calibrateWarnTimer = float.NegativeInfinity;
+                    GD.PrintErr($"VR: headset reads {camY:0.00}m but has not moved ({spread * 1000f:0.0} mm " +
+                                "over 1.5s) — treating it as put down, not worn, so height is not " +
+                                "calibrated yet. Put the headset on.");
+                }
+            }
+            return;
+        }
+
+        // Once calibrated, only move for a change big enough to be a different posture or a
+        // different person — otherwise the play space would creep every few seconds.
+        if (_heightCalibrated && Mathf.Abs(measured - _measuredEyeHeight) < 0.12f) return;
+
+        bool first = !_heightCalibrated;
+        _measuredEyeHeight = measured;
         _heightCalibrated = true;
-        GD.Print($"VR: auto-calibrated eye height = {camY:0.00}m");
+        GD.Print($"VR: {(first ? "auto-calibrated" : "re-calibrated")} eye height = {measured:0.00}m");
         ApplyHeightOffset();
     }
 
+    /// How long the headset must read as worn before its height is trusted.
+    private const float CalibrateSettleSeconds = 1.5f;
+
+    /// Whether the player's height has been measured yet, and what it measured. Exposed so the
+    /// simulated-device diagnostic can assert that a headset lying on a desk is NOT accepted —
+    /// which is the exact failure that shipped, and which is invisible from outside otherwise.
+    public bool HeightCalibrated => _heightCalibrated;
+    public float MeasuredEyeHeight => _measuredEyeHeight;
+
+    /// Total vertical travel over the settle window below which the headset is furniture.
+    private const float LivenessMetres = 0.003f;
+
+    /// Whether the headset is actually being worn.
+    ///
+    /// `IsUserPresent` is the proximity sensor — the only signal that distinguishes "on a face"
+    /// from "on a table" without guessing. It requires XR_EXT_user_presence, so when the runtime
+    /// does not support it this falls back to the session state: `Focused` means the runtime has
+    /// given this app input focus, which a headset sitting in a tray does not get.
+    private static bool UserIsWearingHeadset()
+    {
+        if (XRServer.FindInterface("OpenXR") is not OpenXRInterface xr || !xr.IsInitialized())
+            return true; // no runtime at all (the simulated device): fall through to the heuristic
+
+        if (xr.IsUserPresenceSupported()) return xr.IsUserPresent();
+        return xr.GetSessionState() == OpenXRInterface.SessionState.Focused;
+    }
+
     private float _calibrateWarnTimer;
+    private float _calibrateSteady, _calibrateAccum;
+    private float _calibrateMin = float.MaxValue, _calibrateMax = float.MinValue;
+    private int _calibrateSamples;
+
+    private void ResetCalibrateWindow()
+    {
+        _calibrateSteady = 0f;
+        _calibrateAccum = 0f;
+        _calibrateSamples = 0;
+        _calibrateMin = float.MaxValue;
+        _calibrateMax = float.MinValue;
+    }
 
     /// How far the player's own arm reaches, shoulder to wrist, in metres.
     ///
@@ -601,6 +722,12 @@ void fragment() {
     public void Recenter()
     {
         XRServer.CenterOnHmd(XRServer.RotationMode.ResetButKeepTilt, true);
+        // Recentring is what a player reaches for when the world is in the wrong place, and the
+        // usual reason for that is a height calibrated before the headset was on. Re-measure it
+        // here so there is a way out that does not involve restarting the app.
+        _heightCalibrated = false;
+        _calibrateWarnTimer = 0f;
+        ResetCalibrateWindow();
         Pulse(_leftHand, 0.4f, 0.08f);
         Pulse(_rightHand, 0.4f, 0.08f);
         Recentred?.Invoke();
@@ -905,6 +1032,18 @@ void fragment() {
 
         var left = _leftHand.GetVector2(ActStick);
         var right = _rightHand.GetVector2(ActStick);
+        // Height telemetry, alongside the locomotion line and for the same reason: "I am at my
+        // avatar's feet" is a claim about a chain of four numbers — the tracker's reported head
+        // height, the play-space offset derived from it, the avatar's eye height, and the camera
+        // position that results — and from inside a headset all four are invisible. Printing them
+        // together turns an unfalsifiable complaint into one obviously wrong value.
+        GD.Print($"VRHEIGHT camLocalY={_camera.Position.Y:0.000} camWorldY={_camera.GlobalPosition.Y:0.000} " +
+                 $"originY={_origin.Position.Y:0.000} bodyY={GlobalPosition.Y:0.000} " +
+                 $"avatarH={(_avatar != null ? _avatar.Height : -1f):0.000} " +
+                 $"calibrated={_heightCalibrated} measured={_measuredEyeHeight:0.000} " +
+                 $"present={UserIsWearingHeadset()} " +
+                 $"refSpace={ProjectSettings.GetSetting("xr/openxr/reference_space", -1)}");
+
         GD.Print($"VRLOCO controls={ControlsEnabled} leftStick=({left.X:0.00},{left.Y:0.00}) " +
                  $"rightStick=({right.X:0.00},{right.Y:0.00}) " +
                  $"leftTracked={_leftHand.GetHasTrackingData()} " +
@@ -1633,19 +1772,37 @@ void fragment() {
                 // A controller has three signals, not twenty joints, so the gesture is read from a
                 // table and the fingers are posed from the gesture — never the other way round.
                 // See `HandGestures.FromController` for why measuring curls here cannot work.
-                bool thumbDown = hand.IsButtonPressed(ActPrimaryBtn)
+                // Thumb rest is a TOUCH, not a press.
+                //
+                // Reading only `IsButtonPressed` meant a thumb laid on A/B — which is how a hand
+                // actually sits on a Touch controller — did not count as thumb-down, so the hand
+                // read as `Open` and the avatar sat there with a flat palm whenever the player
+                // was not actively clicking something. Touch controllers publish capacitive touch
+                // on the face buttons and the stick, and Godot's action map binds all of it; this
+                // is the difference between hands that idle correctly and hands that look
+                // permanently surprised.
+                bool thumbDown = hand.IsButtonPressed(ActPrimaryBtnTouch)
+                                 || hand.IsButtonPressed(ActSecondaryBtnTouch)
+                                 || hand.IsButtonPressed(ActStickTouch)
+                                 || hand.IsButtonPressed(ActPrimaryBtn)
                                  || hand.IsButtonPressed(ActSecondaryBtn)
                                  || hand.IsButtonPressed(ActStickClick)
-                                 || hand.IsButtonPressed(ActStickTouch)
                                  || StickOf(hand, left: i == 0).LengthSquared() > 0.04f;
                 float trigger = hand.GetFloat(ActTrigger);
                 float grip = GripOf(hand, left: i == 0);
 
                 next = HandGestures.FromController(thumbDown, trigger > GestureThreshold, grip > GestureThreshold);
-                if (next == HandGesture.Neutral)
-                    HandGestures.RelaxedCurls(trigger, grip, thumbDown, _target[i]);
-                else
-                    HandGestures.CurlsForGesture(next, _target[i]);
+                // The SHAPE is discrete, the DEPTH is analogue.
+                //
+                // Snapping straight to a canonical pose threw away everything the hardware knows:
+                // squeezing the grip halfway left the fingers wherever the last shape put them
+                // until the threshold tripped, and then the whole hand jumped. Real controllers
+                // report how far each axis has travelled and VRChat uses it — a fist follows the
+                // grip continuously. So the gesture picks WHICH fingers close and the analogue
+                // axes decide HOW FAR, with each finger driven by the axis that physically sits
+                // under it.
+                HandGestures.CurlsForGesture(next, _target[i]);
+                HandGestures.ApplyAnalogue(next, trigger, grip, thumbDown, _target[i]);
             }
 
             // Fingers travel to the target rather than snapping to it. A hand that changes shape

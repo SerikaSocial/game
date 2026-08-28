@@ -56,7 +56,7 @@ public partial class Main
             new("quickmenu", () =>
             {
                 _quickMenu.SetLocation("The Commons", true);
-                _quickMenu.SetPlayers(user, new[] { "Aris", "Hoshino", "Nonomi" });
+                _quickMenu.SetPlayers(user, new (string, string)[] { ("u-aris", "Aris"), ("u-hoshino", "Hoshino"), ("u-nonomi", "Nonomi") });
                 _quickMenu.SetTrust("Trusted");
                 _quickMenu.Open(user);
             }),

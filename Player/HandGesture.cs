@@ -113,6 +113,49 @@ public static class HandGestures
             current[i] = Mathf.Lerp(current[i], target[i], k);
     }
 
+    /// Let the analogue axes drive how far the gesture's closed fingers actually close.
+    ///
+    /// `CurlsForGesture` gives the canonical shape — which fingers are in and which are out. That
+    /// is the right answer for *which* pose, and the wrong answer for *how much*: a controller
+    /// reports continuous trigger and grip travel, and throwing it away makes every hand snap
+    /// between fixed poses the instant a threshold trips. VRChat drives fist closure from grip
+    /// pressure for exactly this reason, and it is most of why its hands read as attached to a
+    /// person rather than played back.
+    ///
+    /// Each finger is driven by the axis physically under it: the index by the trigger, the
+    /// remaining three by the grip. Only fingers the gesture *closes* are scaled — an extended
+    /// finger stays extended however hard you squeeze, or a peace sign would collapse into a fist
+    /// under grip pressure. The thumb has no analogue axis on any common controller, so it stays
+    /// as the gesture specifies.
+    ///
+    /// A floor keeps a "closed" finger from reading fully straight when its axis is barely
+    /// touched: the gesture has already been recognised by then, and a fist whose fingers are dead
+    /// flat is not a fist.
+    public static void ApplyAnalogue(HandGesture gesture, float trigger, float grip, bool thumbDown, float[] dst)
+    {
+        if (dst == null || dst.Length < 5) return;
+
+        // Neutral is not a pose the player asked for, so there the hand simply follows the
+        // hardware and nothing is canonical.
+        if (gesture == HandGesture.Neutral) { RelaxedCurls(trigger, grip, thumbDown, dst); return; }
+
+        float t = Mathf.Clamp(trigger, 0f, 1f);
+        float g = Mathf.Clamp(grip, 0f, 1f);
+        Drive(dst, HandPoser.Finger.Index, t);
+        Drive(dst, HandPoser.Finger.Middle, g);
+        Drive(dst, HandPoser.Finger.Ring, g);
+        Drive(dst, HandPoser.Finger.Little, g);
+    }
+
+    /// Scale a finger that the gesture closes by how far its axis has travelled. Fingers the
+    /// gesture leaves open are untouched.
+    private static void Drive(float[] dst, HandPoser.Finger finger, float axis)
+    {
+        int i = (int)finger;
+        if (dst[i] < 0.5f) return; // this gesture wants the finger extended — leave it alone
+        dst[i] = Mathf.Lerp(0.55f, 1f, axis);
+    }
+
     /// The curl a *relaxed* hand should show, following the analogue trigger and grip directly.
     ///
     /// Only used while the gesture is `Neutral`. There the player is not asking for a shape, so

@@ -231,12 +231,12 @@ public partial class Updater : CanvasLayer
         pad.AddChild(col);
 
         _title = new Label { Text = "Update" };
-        _title.AddThemeFontSizeOverride("font_size", 22);
+        _title.AddThemeFontSizeOverride("font_size", Brand.Fs(22));
         _title.AddThemeColorOverride("font_color", Brand.TextHi);
         col.AddChild(_title);
 
         _body = new Label { AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        _body.AddThemeFontSizeOverride("font_size", 14);
+        _body.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
         _body.AddThemeColorOverride("font_color", Brand.TextMid);
         col.AddChild(_body);
 
@@ -251,7 +251,7 @@ public partial class Updater : CanvasLayer
         col.AddChild(_progress);
 
         _detail = new Label();
-        _detail.AddThemeFontSizeOverride("font_size", 12);
+        _detail.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         _detail.AddThemeColorOverride("font_color", Brand.TextDim);
         col.AddChild(_detail);
 

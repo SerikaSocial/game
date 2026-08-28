@@ -27,6 +27,16 @@ public partial class VideoQueuePanel : CanvasLayer
     {
         Layer = 94; // above the pause menu and settings so it is fully clickable
 
+        // The layer starts hidden, not just the card.
+        //
+        // `Open()` sets both, but it bails out when there is no `VideoManager` — which is every
+        // world without a video screen — and `Hide()` bails out when the card is already hidden,
+        // so nothing ever turned this layer off. A `CanvasLayer` is created visible, so on the VR
+        // panel it reported "something is visible on me" from `_Ready` onward, which is what
+        // `VrUiSurface.HasInteractiveUi` uses to decide whether to render the panel and light the
+        // laser pointer. Result: an empty slab and a laser in the player's face in every world.
+        Visible = false;
+
         _card = new PanelContainer
         {
             AnchorLeft = 1, AnchorRight = 1, AnchorTop = 0, AnchorBottom = 1,
@@ -48,7 +58,7 @@ public partial class VideoQueuePanel : CanvasLayer
 
         var header = new HBoxContainer();
         var title = new Label { Text = "Video Queue", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        title.AddThemeFontSizeOverride("font_size", 18);
+        title.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
         var closeBtn = Brand.Ghost_(new Button { CustomMinimumSize = new Vector2(36, 32), Icon = Icons.Get(Icons.Kind.Close, 14, Brand.TextMid) });
@@ -57,7 +67,7 @@ public partial class VideoQueuePanel : CanvasLayer
         vbox.AddChild(header);
 
         _nowPlaying = new Label { Text = "Nothing playing", AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        _nowPlaying.AddThemeFontSizeOverride("font_size", 13);
+        _nowPlaying.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
         _nowPlaying.AddThemeColorOverride("font_color", Brand.Accent);
         vbox.AddChild(_nowPlaying);
 
@@ -97,7 +107,7 @@ public partial class VideoQueuePanel : CanvasLayer
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
-        _logText.AddThemeFontSizeOverride("font_size", 11);
+        _logText.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         _logText.AddThemeColorOverride("font_color", new Color(0.95f, 0.45f, 0.45f));
         _logContainer.AddChild(_logText);
         vbox.AddChild(_logContainer);
@@ -105,7 +115,7 @@ public partial class VideoQueuePanel : CanvasLayer
         vbox.AddChild(new HSeparator());
 
         var upNext = new Label { Text = "Up next" };
-        upNext.AddThemeFontSizeOverride("font_size", 12);
+        upNext.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         upNext.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(upNext);
 
@@ -127,7 +137,7 @@ public partial class VideoQueuePanel : CanvasLayer
                    "they'll skip with a note in the error log.",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
-        note.AddThemeFontSizeOverride("font_size", 11);
+        note.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
         note.AddThemeColorOverride("font_color", Brand.TextDim);
         vbox.AddChild(note);
     }
@@ -218,7 +228,7 @@ public partial class VideoQueuePanel : CanvasLayer
                 SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
                 AutowrapMode = TextServer.AutowrapMode.WordSmart,
             };
-            label.AddThemeFontSizeOverride("font_size", 12);
+            label.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
             label.AddThemeColorOverride("font_color", Brand.TextMid);
             row.AddChild(label);
 

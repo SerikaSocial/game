@@ -74,7 +74,7 @@ public static class Brand
         b.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
         b.AddThemeColorOverride("font_color", TextHi);
         b.AddThemeColorOverride("font_hover_color", Colors.White);
-        b.AddThemeFontSizeOverride("font_size", 15);
+        b.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         return b;
     }
 
@@ -87,7 +87,7 @@ public static class Brand
         b.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
         b.AddThemeColorOverride("font_color", TextMid);
         b.AddThemeColorOverride("font_hover_color", TextHi);
-        b.AddThemeFontSizeOverride("font_size", 15);
+        b.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
         return b;
     }
 
@@ -145,16 +145,67 @@ public static class Brand
     /// The dimming layer behind a modal screen, anchored to fill its parent.
     ///
     /// On a monitor a scrim darkens the world so the dialog reads as the only live thing. On the
-    /// VR panel there is no world behind it to darken — the panel *is* a floating rectangle, so a
-    /// 0.7-alpha scrim turns it into a large dark slab hanging in front of the player, obscuring
-    /// the room for no benefit. In VR the scrim is therefore kept faint: enough to seat the card
-    /// against something, not enough to become an object in its own right.
+    /// VR panel there is no world behind it to darken — the panel *is* a floating rectangle, so
+    /// every pixel of scrim is a pixel of translucent sheet hanging in the room.
+    ///
+    /// This used to scale the alpha down to ~0.20 rather than removing it, on the theory that a
+    /// faint tint still "seats the card against something". Measured on the panel
+    /// (`--serika-uivr`), it does not: every menu painted ink over **100%** of the panel, and in
+    /// a lit room a 0.2-alpha sheet 2 m wide and 1.3 m tall is plainly an object — a grey
+    /// rectangle floating in front of the wall with a small menu inside it. The card already
+    /// carries its own border and drop shadow (`Panel`), which is what actually seats it.
+    ///
+    /// The rect is still created in VR, at zero alpha, because callers also use it to swallow
+    /// clicks that miss the card. Invisible, not absent.
     public static ColorRect Scrim(float alpha = 0.72f)
     {
-        if (UI.VrUiSurface.Active) alpha *= 0.28f;
+        if (UI.VrUiSurface.Active) alpha = 0f;
         var r = new ColorRect { Color = new Color(0.02f, 0.03f, 0.05f, alpha) };
         r.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         return r;
+    }
+
+    /// The angular floor for text on the VR panel, expressed as a `font_size`.
+    ///
+    /// Measured with `--serika-uivr`: the panel is 2.0 m wide at 1.7 m, so it subtends 60.9°, and
+    /// the Controls lay out across `VrUiSurface.LogicalSize.X` = 1000 px of that — **16.4 logical
+    /// pixels per degree**. Godot's `font_size` is the em box and a Latin cap height is about 0.72
+    /// of it, so a `font_size` of *n* reads as `n * 0.72 / 16.4` degrees. The comfortable floor
+    /// for reading in a headset is ~0.5°, which is `n >= 11.4`; 13 is the first size that clears
+    /// it with margin (0.57°) and it is already the most common small size in `UI/`, so rounding
+    /// the stragglers up to it costs no layout.
+    ///
+    /// The eleven `font_size: 11` and one `font_size: 10` overrides across `UI/` were all below
+    /// the floor — tag pills, instance rows, per-world author/capacity lines, the version stamp.
+    /// Those are exactly the labels a player squints at, and squinting is not available in a
+    /// headset.
+    private const int VrMinFontSize = 13;
+
+    /// Clamp a `font_size` to the VR floor. On desktop it is the identity, so the monitor
+    /// typography is unchanged.
+    ///
+    /// Every `AddThemeFontSizeOverride("font_size", n)` in `UI/` routes through this rather than
+    /// each screen branching on `VrUiSurface.Active`: a global type floor that any one screen can
+    /// forget to apply is not a floor.
+    public static int Fs(int size) =>
+        UI.VrUiSurface.Active && size < VrMinFontSize ? VrMinFontSize : size;
+
+    /// Clamp a card's design size to what actually fits the surface it is drawn on.
+    ///
+    /// The desktop sizes are returned untouched — a 1100x700 big menu is right on a 1080p
+    /// monitor. On the panel the whole layout happens inside `VrUiSurface.LogicalSize`, and a
+    /// card that meets or exceeds it is not "full-bleed", it is **clipped**: the SubViewport
+    /// simply cuts it off at the panel edge, which looks deliberate and is not. `MainMenu`'s
+    /// 1100x700 card lost its top edge and both side margins that way, and it filled 100% of a
+    /// 61° x 39° panel with an opaque sheet, so opening the menu blacked out the room.
+    ///
+    /// The cap leaves a margin on all four sides so the card's border and shadow are inside the
+    /// panel and the panel visibly *contains* the screen.
+    public static Vector2 Card(float width, float height)
+    {
+        if (!UI.VrUiSurface.Active) return new Vector2(width, height);
+        var max = (Vector2)UI.VrUiSurface.UsableLogicalSize;
+        return new Vector2(Mathf.Min(width, max.X), Mathf.Min(height, max.Y));
     }
 
     /// A vertical brand gradient (deep violet → near-black), for full-screen backdrops.
