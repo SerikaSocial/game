@@ -111,7 +111,29 @@ public static class TutorialBalloon
         audio.UniqueNameInOwner = true;
         balloon.AddChild(audio);
 
+        // Every node needs an OWNER as well as `UniqueNameInOwner`, or `%Name` resolves to null.
+        //
+        // This subtree is built in code, and a code-built node has no owner unless you assign one
+        // — `UniqueNameInOwner = true` on its own registers nothing. `ExampleBalloon._Ready()`
+        // looks all five of its children up as `%Balloon`, `%CharacterLabel`, `%DialogueLabel`,
+        // `%ResponsesMenu` and `%Progress`, so every one of them came back null and its
+        // `_Process` threw a NullReferenceException on every single frame.
+        //
+        // That was not cosmetic: `Main.MaybeStartTutorial` takes an InputMode hold and only
+        // releases it when the tutorial finishes, so a balloon that could never advance left the
+        // player unable to move at all, with no way out.
+        SetOwnerRecursive(balloon, balloon);
         return balloon;
+    }
+
+    /// Give every descendant the same owner, the way the scene loader would.
+    private static void SetOwnerRecursive(Node node, Node owner)
+    {
+        foreach (var child in node.GetChildren())
+        {
+            child.Owner = owner;
+            SetOwnerRecursive(child, owner);
+        }
     }
 
     private static Theme MakeTheme()

@@ -67,9 +67,16 @@ public partial class Hud : CanvasLayer
         Layer = 100;
 
         // Fullscreen gradient backdrop — no small card, the whole screen IS the login.
+        // On a monitor the login screen IS the whole window, so a near-opaque full-bleed backdrop
+        // is right. On the VR panel it is a two-metre slab hanging in the room, and painting 96%
+        // of it flat dark leaves the form floating in the middle of a void with nothing framing
+        // it. Let the world show through instead, and put the form on a real card below.
+        bool vr = VrUiSurface.Active;
         _scrim = new ColorRect
         {
-            Color = new Color(Brand.Bg0.R, Brand.Bg0.G, Brand.Bg0.B, 0.96f),
+            // Fully transparent in VR: the card below is the entire login screen, floating in the
+            // room. Any backdrop at all just re-adds the dark slab this is meant to remove.
+            Color = new Color(Brand.Bg0.R, Brand.Bg0.G, Brand.Bg0.B, vr ? 0f : 0.96f),
             AnchorRight = 1,
             AnchorBottom = 1,
         };
@@ -85,19 +92,47 @@ public partial class Hud : CanvasLayer
         AddChild(_loginScreen);
 
         // Centered content panel (scales with viewport via anchor centering).
-        var content = new VBoxContainer
-        {
-            AnchorLeft = 0.5f,
-            AnchorTop = 0.5f,
-            AnchorRight = 0.5f,
-            AnchorBottom = 0.5f,
-            OffsetLeft = -260,
-            OffsetTop = -280,
-            OffsetRight = 260,
-            OffsetBottom = 280,
-        };
+        var content = new VBoxContainer();
         content.AddThemeConstantOverride("separation", 14);
-        _loginScreen.AddChild(content);
+
+        if (vr)
+        {
+            // A bordered, rounded card, centred on the panel — the same shape every other screen
+            // in this project uses (`Brand.Panel`). Anchoring the form directly to the middle of
+            // the viewport, as the desktop layout does, gives it no edges at all, and on a
+            // floating panel that reads as text dumped onto a dark rectangle.
+            var centre = new CenterContainer();
+            centre.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+            _loginScreen.AddChild(centre);
+
+            // Large on purpose. The panel's logical space is 1200x760 (see `VrUiSurface`), and a
+            // 620-wide card used barely a quarter of its width — legible on a monitor, tiny
+            // through a headset lens. This fills most of the panel, so the existing font sizes
+            // land at a comfortable angular size without touching every screen's typography.
+            var card = new PanelContainer { CustomMinimumSize = new Vector2(940, 700) };
+            card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1.5f, Brand.Border));
+            centre.AddChild(card);
+
+            var pad = new MarginContainer();
+            foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
+                pad.AddThemeConstantOverride(side, 34);
+            card.AddChild(pad);
+
+            content.SizeFlagsVertical = Control.SizeFlags.ExpandFill;
+            pad.AddChild(content);
+        }
+        else
+        {
+            content.AnchorLeft = 0.5f;
+            content.AnchorTop = 0.5f;
+            content.AnchorRight = 0.5f;
+            content.AnchorBottom = 0.5f;
+            content.OffsetLeft = -260;
+            content.OffsetTop = -280;
+            content.OffsetRight = 260;
+            content.OffsetBottom = 280;
+            _loginScreen.AddChild(content);
+        }
 
         _title = new Label { Text = "Serika Social", HorizontalAlignment = HorizontalAlignment.Center };
         _title.AddThemeFontSizeOverride("font_size", 36);
@@ -161,7 +196,11 @@ public partial class Hud : CanvasLayer
         _browserLoginButton.Pressed += () => LoginPressed?.Invoke();
         content.AddChild(_browserLoginButton);
 
-        content.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
+        // On desktop this pushes the status/quit block to the bottom of a full-screen layout. In
+        // a fixed-height card it just opens a dead gap in the middle of the form.
+        content.AddChild(vr
+            ? new Control { CustomMinimumSize = new Vector2(0, 18) }
+            : new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
 
         _spinner = new Control { CustomMinimumSize = new Vector2(0, 48), Visible = false };
         _spinner.Draw += DrawSpinner;

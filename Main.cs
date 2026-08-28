@@ -908,6 +908,20 @@ public partial class Main : Node3D
             // Reusing the button the player already presses beats teaching them a new gesture.
             vr.MenuPressed += () =>
             {
+                // Toggle. The headset has no Esc key, so if the menu button cannot also close the
+                // menu there is no reliable way out of one — the only exit was finding and
+                // clicking a Close button with the laser, and if the panel had drifted behind you
+                // that was not reachable either.
+                //
+                // Any open menu closes, not just the quick menu: the screens open each other, so
+                // "is something open" is the only question worth asking.
+                if (AnyMenuOpen)
+                {
+                    CloseAllMenus();
+                    SyncMenuHold();
+                    return;
+                }
+
                 RecentreVrPanel();
                 _quickMenu?.Open(_username);
                 SyncMenuHold();
@@ -1739,13 +1753,43 @@ public partial class Main : Node3D
         }
 
         DialogueManagerRuntime.DialogueManager.DialogueEnded += OnTutorialEnded;
-        var balloon = UI.TutorialBalloon.Create();
-        DialogueManagerRuntime.DialogueManager.ShowDialogueBalloonScene(
-            balloon, dialogueRes, "tutorial_start");
+        try
+        {
+            var balloon = UI.TutorialBalloon.Create();
+            DialogueManagerRuntime.DialogueManager.ShowDialogueBalloonScene(
+                balloon, dialogueRes, "tutorial_start");
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"tutorial failed to start ({e.Message}) — releasing input");
+            OnTutorialEnded(null);
+            return;
+        }
+
+        // Dead-man's switch. The tutorial holds the player's controls and only releases them when
+        // the dialogue ends, so anything that stops the balloon advancing leaves the player unable
+        // to move, with no button that helps and nothing on screen explaining why. That is exactly
+        // what happened: the balloon's `%Name` lookups all resolved to null, its `_Process` threw
+        // every frame, the dialogue never advanced and the hold was never released.
+        //
+        // A tutorial is a nicety; being able to walk is not. If it has not finished by now,
+        // something is wrong with it and the player gets their controls back regardless.
+        GetTree().CreateTimer(TutorialWatchdogSeconds).Timeout += () =>
+        {
+            if (!UI.InputMode.HasHold(UI.InputMode.Tutorial)) return;
+            GD.PrintErr($"tutorial still holding input after {TutorialWatchdogSeconds}s — " +
+                        "releasing it so the player can move");
+            OnTutorialEnded(null);
+        };
     }
+
+    /// Generous — a slow reader on the last page should not have the tutorial yanked away.
+    private const float TutorialWatchdogSeconds = 120f;
 
     private void OnTutorialEnded(Resource _)
     {
+        // Reachable from the dialogue signal, the start-up catch and the watchdog, so it must be
+        // safe to run more than once.
         DialogueManagerRuntime.DialogueManager.DialogueEnded -= OnTutorialEnded;
         Tutorial.MarkSeen();
         UI.InputMode.Release(UI.InputMode.Tutorial);
@@ -2198,6 +2242,18 @@ public partial class Main : Node3D
         (_avatarSelector?.IsOpen ?? false) ||
         (_settingsMenu?.IsOpen ?? false) ||
         (_videoQueuePanel?.IsOpen ?? false);
+
+    /// Close every overlay screen. The VR menu button uses this as its "back out" action.
+    private void CloseAllMenus()
+    {
+        if (_quickMenu?.IsOpen ?? false) _quickMenu.Hide();
+        if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide();
+        if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
+        if (_cameraMenu?.IsOpen ?? false) _cameraMenu.Hide();
+        if (_avatarSelector?.IsOpen ?? false) _avatarSelector.Hide();
+        if (_settingsMenu?.IsOpen ?? false) _settingsMenu.Hide();
+        if (_videoQueuePanel?.IsOpen ?? false) _videoQueuePanel.Hide();
+    }
 
     /// Push a live setting change onto whatever it affects.
     private void OnSettingChanged(string what)
