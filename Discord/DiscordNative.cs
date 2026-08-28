@@ -185,6 +185,12 @@ internal static unsafe class DiscordNative
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void Discord_Client_SetTokenExpirationCallback(ref Discord_Client self, NoArgCb cb, IntPtr cbFree, IntPtr userData);
 
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern bool Discord_Client_IsAuthenticated(ref Discord_Client self);
+
+    [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void Discord_Client_SetGameWindowPid(ref Discord_Client self, int pid);
+
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)] internal static extern void Discord_AuthorizationArgs_Init(ref Discord_AuthorizationArgs self);
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)] internal static extern void Discord_AuthorizationArgs_Drop(ref Discord_AuthorizationArgs self);
     [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)] internal static extern void Discord_AuthorizationArgs_SetClientId(ref Discord_AuthorizationArgs self, ulong value);

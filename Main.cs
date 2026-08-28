@@ -113,11 +113,20 @@ public partial class Main : Node3D
         bool isTouchscreen = DisplayServer.IsTouchscreenAvailable();
         bool hasQuest = OS.HasFeature("quest");
         bool hasAndroid = OS.HasFeature("android");
-        GD.Print($"VR decision: hasQuest={hasQuest} hasAndroid={hasAndroid} isTouchscreen={isTouchscreen}");
+        bool hasVrFlag = System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
+            || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
+        bool pcVrLive = VrPlayer.PcVrSessionLooksLive();
+        GD.Print($"VR decision: hasQuest={hasQuest} hasAndroid={hasAndroid} isTouchscreen={isTouchscreen} " +
+                 $"--vr={hasVrFlag} pcVrLive={pcVrLive}");
+        // Desktop used to require `--vr`. SteamVR / Steam Link / ALVR launch the exe without
+        // that flag, so OpenXR came up (or was already up from `openxr/enabled=true`) and the
+        // game still spawned the desktop rig. Detect a live PCVR session instead of starting
+        // SteamVR for a normal desktop click — `PcVrSessionLooksLive` is "already in VR", not
+        // "SteamVR is installed".
         bool wantVr = hasQuest
             || (hasAndroid && !isTouchscreen)
-            || System.Array.IndexOf(OS.GetCmdlineArgs(), "--vr") >= 0
-            || System.Array.IndexOf(OS.GetCmdlineUserArgs(), "--vr") >= 0;
+            || hasVrFlag
+            || pcVrLive;
         GD.Print($"VR decision: wantVr={wantVr}");
         _vrMode = wantVr && VrPlayer.TryInitVr();
         GD.Print($"VR decision: _vrMode={_vrMode}");
@@ -486,6 +495,7 @@ public partial class Main : Node3D
 
     private void OnChatReceived(uint senderId, string text)
     {
+        if (_videoManager != null && _videoManager.TryHandleNet(text)) return;
         string name = _peerNames.GetValueOrDefault(senderId, $"peer{senderId}");
         _chat.AddChat(name, text);
     }
@@ -646,6 +656,7 @@ public partial class Main : Node3D
         _videoManager = new SerikaSocial.World.Video.VideoManager { Name = "VideoManager" };
         AddChild(_videoManager);
         _videoManager.Configure(_api, _worldName);
+        _videoManager.BindNet(text => _transport?.SendChat(text));
         _videoManager.Toast += (msg, secs) => _inWorldHud?.Toast(msg, secs);
         // Skip screens belonging to the world we just left. QueueFree is deferred to the end of
         // the frame, so the outgoing world's nodes are still in the group when this runs;
@@ -979,9 +990,9 @@ public partial class Main : Node3D
             _bootXrOrigin = null;
         }
 
-        // Bring up VR only when it makes sense: on a Quest/Android build, or when a desktop
-        // user explicitly asks with `--vr`. Otherwise OpenXR is never touched, so a normal
-        // desktop launch produces no "failed to load runtime / no HMD" errors.
+        // Bring up VR only when it makes sense: Quest/Android, `--vr`, or a live PCVR session
+        // (SteamVR compositor already running, or OpenXR already initialised). Otherwise
+        // OpenXR is never touched, so a normal desktop launch produces no runtime errors.
         // On touchscreen Android phones, skip VR — the OpenXR loader in the APK can partially
         // initialise and leave the viewport in a broken state, which prevented the LocalPlayer
         // and touch controls from working.
@@ -2001,6 +2012,10 @@ public partial class Main : Node3D
     private void OnWorldDetailFetched()
     {
         _hud?.ShowWorldDetail(_pendingWorldDetail);
+        // DirectWorld portals and the MainMenu Worlds tab both land here without going through
+        // OpenWorldList, so nothing else has taken a hold. Without one, VR locomotion stays live
+        // under the panel. Idempotent when the Home world-list hold is already outstanding.
+        UI.InputMode.Hold(UI.InputMode.WorldList);
     }
 
     private void TeardownRemotes()
@@ -2140,6 +2155,7 @@ public partial class Main : Node3D
         _inWorldHud.SetPlayerCount(1 + others);
         RpcPresence.UpdateState(_worldName, 1 + others, 16, _currentWorldId);
         _chat.AddSystem($"Welcome to {_worldName}.");
+        _videoManager?.RequestSync();
     }
 
     private void OnPeerJoined(PeerInfo p)

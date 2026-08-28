@@ -206,6 +206,17 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     {
         _gravity = (float)ProjectSettings.GetSetting("physics/3d/default_gravity", 9.8f);
 
+        // Same layer/mask as LocalPlayer. This body used to sit on Godot's default layer 1
+        // (World), so `Portal`'s `CollisionMask = LocalPlayer` never matched a VR player and
+        // `BodyEntered` never fired. Walls keep working because `LocalPlayerMask` includes
+        // World — that is already what the default mask was hitting. Remotes become bumpable
+        // (mask includes RemotePlayer), matching desktop; they have `CollisionMask = 0`, so
+        // this is one-way. Seats and other interactables are found by group walk, not by
+        // physics, so they are unaffected. The only other `CollisionMask = LocalPlayer`
+        // consumer is the portal.
+        CollisionLayer = PhysicsLayers.LocalPlayer;
+        CollisionMask = PhysicsLayers.LocalPlayerMask;
+
         _collider = new CollisionShape3D
         {
             Shape = new CapsuleShape3D { Height = 1.6f, Radius = 0.25f },
@@ -1974,10 +1985,38 @@ void fragment() {
         return interface_ != null && interface_.IsInitialized();
     }
 
+    /// True when a PCVR session is already happening: OpenXR came up at engine start
+    /// (`openxr/enabled=true` + a live runtime), or SteamVR's compositor is running.
+    ///
+    /// This is "the user is in VR", not "SteamVR is installed". Checking the latter would
+    /// launch SteamVR on a normal desktop click. Checking the former is how SteamVR, Steam
+    /// Link, ALVR and Wivrn reach this exe without a `--vr` flag.
+    public static bool PcVrSessionLooksLive()
+    {
+        try
+        {
+            var iface = XRServer.FindInterface("OpenXR");
+            if (iface != null && iface.IsInitialized()) return true;
+
+            if (!string.IsNullOrEmpty(OS.GetEnvironment("VR_OVERRIDE")))
+                return true;
+
+            foreach (var name in new[] { "vrserver", "vrcompositor", "vrmonitor" })
+            {
+                if (System.Diagnostics.Process.GetProcessesByName(name).Length > 0)
+                    return true;
+            }
+        }
+        catch (System.Exception e)
+        {
+            GD.Print($"PcVrSessionLooksLive: {e.Message}");
+        }
+        return false;
+    }
+
     /// Attempt to bring up OpenXR at runtime and route rendering to the headset. Returns true
-    /// only if a runtime/headset actually initialises. Auto-init is disabled in project
-    /// settings (so a headless desktop never touches OpenXR); this is called deliberately —
-    /// only on Android/Quest or when launched with `--vr` — so no HMD means no OpenXR errors.
+    /// only if a runtime/headset actually initialises. Called on Quest/Android, `--vr`, or
+    /// when `PcVrSessionLooksLive` — a headless desktop never reaches here.
     public static bool TryInitVr()
     {
         try

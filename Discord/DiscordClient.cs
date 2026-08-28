@@ -167,6 +167,10 @@ internal sealed unsafe class DiscordClient : IDisposable
         Discord_Client_SetActivityJoinCallback(ref _client, _joinDelegate, IntPtr.Zero, IntPtr.Zero);
         Discord_Client_SetTokenExpirationCallback(ref _client, _tokenExpiredDelegate, IntPtr.Zero, IntPtr.Zero);
         Discord_Client_AddLogCallback(ref _client, _logDelegate, IntPtr.Zero, IntPtr.Zero, minSeverity);
+        // Overlay attaches to this PID. Without it Discord may pop the browser authorize
+        // every launch instead of the in-client prompt that can remember the grant.
+        try { Discord_Client_SetGameWindowPid(ref _client, (int)Godot.OS.GetProcessId()); }
+        catch { }
     }
 
     public ClientStatus Status => _init ? Discord_Client_GetStatus(ref _client) : ClientStatus.Disconnected;
@@ -178,6 +182,15 @@ internal sealed unsafe class DiscordClient : IDisposable
     public void Connect() => Discord_Client_Connect(ref _client);
 
     public void Disconnect() => Discord_Client_Disconnect(ref _client);
+
+    public bool IsAuthenticated => _init && Discord_Client_IsAuthenticated(ref _client);
+
+    public void AbortAuthorize()
+    {
+        if (!_init || !_authorizePending) return;
+        try { Discord_Client_AbortAuthorize(ref _client); } catch { }
+        _authorizePending = false;
+    }
 
     // ── Auth bootstrap ────────────────────────────────────────────────────────────────
 
@@ -205,7 +218,7 @@ internal sealed unsafe class DiscordClient : IDisposable
     /// </summary>
     public void BeginAuthorize(Action<bool, string, string, string> onDone)
     {
-        if (!_init) return;
+        if (!_init || _authorizePending) return;
 
         Discord_AuthorizationArgs args = default;
         Discord_AuthorizationCodeVerifier verifier = default;

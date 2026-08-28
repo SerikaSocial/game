@@ -291,6 +291,14 @@ public static class DeviceProfile
         public static bool ProfilePictures = true;
         public static bool StartThirdPerson = false;
 
+        /// Discord Social SDK rich presence. Off skips the Authorize popup entirely.
+        public static bool DiscordPresence = true;
+
+        /// Last answer to Discord's in-client Authorize prompt. `Declined` is sticky — we do
+        /// not pop the overlay again until the player turns presence back on in Settings.
+        public enum DiscordConsentKind { Unknown = 0, Granted = 1, Declined = 2 }
+        public static DiscordConsentKind DiscordConsent = DiscordConsentKind.Unknown;
+
         // VR comfort. Defaults are the conservative end of each axis — snap turning and a
         // movement vignette are what a first-time headset user tolerates; smooth turning with
         // no vignette is the setting experienced players opt into.
@@ -430,6 +438,8 @@ public static class DeviceProfile
             NameTags = (bool)cfg.GetValue("ui", "name_tags", NameTags);
             ProfilePictures = (bool)cfg.GetValue("ui", "pfp", ProfilePictures);
             StartThirdPerson = (bool)cfg.GetValue("controls", "third_person", StartThirdPerson);
+            DiscordPresence = (bool)cfg.GetValue("discord", "presence", DiscordPresence);
+            DiscordConsent = (DiscordConsentKind)(int)cfg.GetValue("discord", "consent", (int)DiscordConsent);
 
             VrSnapTurn = (bool)cfg.GetValue("vr", "snap_turn", VrSnapTurn);
             VrSnapTurnAngle = (float)cfg.GetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
@@ -483,6 +493,8 @@ public static class DeviceProfile
             cfg.SetValue("audio", "input_device", InputDevice);
             cfg.SetValue("ui", "name_tags", NameTags);
             cfg.SetValue("ui", "pfp", ProfilePictures);
+            cfg.SetValue("discord", "presence", DiscordPresence);
+            cfg.SetValue("discord", "consent", (int)DiscordConsent);
             cfg.SetValue("vr", "snap_turn", VrSnapTurn);
             cfg.SetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
             cfg.SetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);

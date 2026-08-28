@@ -44,6 +44,9 @@ namespace SerikaSocial.Player;
 ///            gestures used to stop at the sender's own eyes.
 ///   PANEL  — the UI panel (and so the laser) must be idle unless a real menu is on it. HUD
 ///            chrome must not count, which is what pinned the panel and laser on permanently.
+///   PORTAL — the VR body must sit on PhysicsLayers.LocalPlayer so a portal Area3D whose mask
+///            is that layer actually sees it. Default layer 1 is World, and the portal then
+///            never fires.
 public static partial class VrDiagnostic
 {
     // Far out of the way. The wall used to sit at z=-1.5, which put it directly in the path of
@@ -109,6 +112,7 @@ public static partial class VrDiagnostic
         private Vector3 _stickStart;
         private int _takeoffs;
         private bool _airborne;
+        private bool _portalHit;
 
         // Injected controller headings, in play-space local coordinates.
         private float _moveYaw;   // yaws the WALKING hand for the hand-relative movement check
@@ -275,6 +279,47 @@ public static partial class VrDiagnostic
                              $"{(ok ? "ok" : "FAIL — room-scale walking passes through geometry")}");
                 },
                 _ => _head.Z -= 0.06f);
+
+            // ── PORTAL ───────────────────────────────────────────────────────────────
+            // Same trigger a real Portal uses: an Area3D whose mask is LocalPlayer. The VR body
+            // used to sit on World (Godot's default layer 1), so BodyEntered never fired.
+            Add("portal-place", () =>
+            {
+                Recentre();
+                _portalHit = false;
+                var portal = new Area3D
+                {
+                    Name = "PortalProbe",
+                    Monitoring = true,
+                    Monitorable = false,
+                    CollisionLayer = 0,
+                    CollisionMask = PhysicsLayers.LocalPlayer,
+                    Position = new Vector3(0, 0, -1.6f),
+                };
+                portal.AddChild(new CollisionShape3D
+                {
+                    Shape = new BoxShape3D { Size = new Vector3(2f, 3f, 1.2f) },
+                    Position = new Vector3(0, 1.5f, 0),
+                });
+                portal.BodyEntered += _ => _portalHit = true;
+                _vr.GetParent().AddChild(portal);
+            }, 10);
+
+            Add("portal",
+                () => SetMoveStick(new Vector2(0, MoveFwd * 0.8f)),
+                50,
+                () =>
+                {
+                    SetMoveStick(Vector2.Zero);
+                    bool layer = _vr.CollisionLayer == PhysicsLayers.LocalPlayer;
+                    bool mask = _vr.CollisionMask == PhysicsLayers.LocalPlayerMask;
+                    bool ok = _portalHit && layer && mask;
+                    _ok &= ok;
+                    GD.Print($"VRTEST PORTAL layer=0x{_vr.CollisionLayer:X} mask=0x{_vr.CollisionMask:X} " +
+                             $"entered={_portalHit}  " +
+                             $"{(ok ? "ok — VR body is LocalPlayer and the trigger fires"
+                                    : "FAIL — portal Area3D does not see the VR body")}");
+                });
 
             // ── DRIFT ────────────────────────────────────────────────────────────────
             // Stand still, off-centre in the room, and touch nothing. The body must catch up to

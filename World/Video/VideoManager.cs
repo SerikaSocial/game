@@ -15,10 +15,9 @@ namespace SerikaSocial.World.Video;
 /// error log, raises a toast, and advances. All screens in a world play the same item in
 /// lockstep, so a room shares one "channel".
 ///
-/// **Not yet networked.** The queue is client-local: there is no wire message for it, and
-/// adding one is a `proto` change (the sacred Rust↔C# contract), which is out of scope here.
-/// So today each client has its own queue and its own toast. `QueueChanged`/`Toast` are already
-/// shaped so a future relay-backed sync only has to feed them — see [[transport-chat-webrtc]].
+/// Queue sync rides the existing Chat datagram (see <see cref="VideoNet"/>) so a proto
+/// change is not required. Late joiners ask for a snapshot; everyone else applies enqueue /
+/// skip / clear / play-clock the same way.
 public partial class VideoManager : Node
 {
     public sealed class Item
@@ -35,6 +34,11 @@ public partial class VideoManager : Node
     private string _worldName = "world";
     private int _generation; // bumped on every skip/clear so a slow resolve can detect it's stale
     private bool _busy;
+    private Action<string> _netSend;
+    private bool _applyingNet;
+    private long _startedUnixMs;
+    private string _seekUrl;
+    private double _seekToSec = -1;
 
     public Item NowPlaying { get; private set; }
 
@@ -50,6 +54,48 @@ public partial class VideoManager : Node
     {
         _api = api;
         _worldName = string.IsNullOrEmpty(worldName) ? "world" : worldName;
+    }
+
+    /// Send path is a lambda so it can read the live transport after a reconnect.
+    public void BindNet(Action<string> send) => _netSend = send;
+
+    /// Ask whoever is already in the room for the current queue. Safe to call before anyone
+    /// else is connected — the want is dropped if the relay is not up yet.
+    public void RequestSync() => Broadcast(VideoNet.Want());
+
+    /// True if <paramref name="text"/> was a video control message (and has been applied).
+    /// Main uses this to keep the payload out of the chat overlay.
+    public bool TryHandleNet(string text)
+    {
+        if (!VideoNet.TryParse(text, out var msg)) return false;
+        _applyingNet = true;
+        try
+        {
+            switch (msg.Kind)
+            {
+                case VideoNet.Op.Enqueue:
+                    Enqueue(msg.Url, string.IsNullOrEmpty(msg.By) ? "someone" : msg.By, fromNet: true);
+                    break;
+                case VideoNet.Op.Skip:
+                    Skip(fromNet: true);
+                    break;
+                case VideoNet.Op.Clear:
+                    Clear(fromNet: true);
+                    break;
+                case VideoNet.Op.Play:
+                    RememberSeek(msg.Url, msg.StartedUnixMs);
+                    TrySeekPlaying();
+                    break;
+                case VideoNet.Op.Want:
+                    ReplyState();
+                    break;
+                case VideoNet.Op.State:
+                    ApplySnapshot(msg);
+                    break;
+            }
+        }
+        finally { _applyingNet = false; }
+        return true;
     }
 
     /// Drop screens whose nodes have gone away. A world switch frees the old world's screens,
@@ -70,23 +116,31 @@ public partial class VideoManager : Node
     }
 
     /// Queue a URL. If nothing is playing, it starts immediately.
-    public void Enqueue(string url, string addedBy)
+    public void Enqueue(string url, string addedBy) => Enqueue(url, addedBy, fromNet: false);
+
+    public void Enqueue(string url, string addedBy, bool fromNet)
     {
         url = (url ?? "").Trim();
         if (string.IsNullOrEmpty(url)) return;
+        if (fromNet && AlreadyHas(url)) return;
         _queue.Add(new Item { Url = url, Title = ShortLabel(url), AddedBy = addedBy });
         QueueChanged?.Invoke();
+        if (!fromNet) Broadcast(VideoNet.Enqueue(url, addedBy));
         if (NowPlaying == null && !_busy) _ = Advance();
     }
 
     /// Skip the current clip and play the next.
-    public void Skip()
+    public void Skip() => Skip(fromNet: false);
+
+    public void Skip(bool fromNet)
     {
         _generation++;
         KillTranscode();
         PruneScreens();
         foreach (var s in _screens) s.Stop();
         NowPlaying = null;
+        _startedUnixMs = 0;
+        if (!fromNet) Broadcast(VideoNet.Skip());
         _ = Advance();
     }
 
@@ -97,7 +151,9 @@ public partial class VideoManager : Node
         QueueChanged?.Invoke();
     }
 
-    public void Clear()
+    public void Clear() => Clear(fromNet: false);
+
+    public void Clear(bool fromNet)
     {
         _generation++;
         KillTranscode();
@@ -105,10 +161,12 @@ public partial class VideoManager : Node
         PruneScreens();
         foreach (var s in _screens) s.Stop();
         NowPlaying = null;
+        _startedUnixMs = 0;
         QueueChanged?.Invoke();
+        if (!fromNet) Broadcast(VideoNet.Clear());
     }
 
-    private void OnFinished() => Skip();
+    private void OnFinished() => Skip(fromNet: false);
 
     private void OnScreenFailed(string url, string reason, string detail)
     {
@@ -183,7 +241,7 @@ public partial class VideoManager : Node
                     return;
                 }
                 foreach (var s in _screens) s.Play(item.Url, tcPath, "ogv", "theora");
-                Toast?.Invoke($"▶ {item.Title}", 3);
+                OnPlaybackStarted(item);
                 return;
             }
 
@@ -196,7 +254,7 @@ public partial class VideoManager : Node
             }
 
             foreach (var s in _screens) s.Play(item.Url, localPath, track.Value.container, track.Value.vcodec);
-            Toast?.Invoke($"▶ {item.Title}", 3);
+            OnPlaybackStarted(item);
         }
         catch (Exception e)
         {
@@ -446,7 +504,7 @@ public partial class VideoManager : Node
                 // Playback has begun — release the caller so the queue stops being blocked.
                 if (next == 1)
                 {
-                    Toast?.Invoke($"▶ {item.Title}", 3);
+                    Callable.From(() => OnPlaybackStarted(item)).CallDeferred();
                     firstSegment.TrySetResult(true);
                 }
                 // Yield rather than tight-looping when a burst of segments is already on disk.
@@ -720,6 +778,79 @@ public partial class VideoManager : Node
         e.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     /// A readable label from a URL before the resolver gives us a real title.
+    private void OnPlaybackStarted(Item item)
+    {
+        if (item == null) return;
+        Toast?.Invoke($"▶ {item.Title}", 3);
+        _startedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        Broadcast(VideoNet.Play(item.Url, _startedUnixMs));
+        TrySeekPlaying();
+    }
+
+    private void RememberSeek(string url, long startedUnixMs)
+    {
+        if (string.IsNullOrEmpty(url) || startedUnixMs <= 0) return;
+        double sec = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - startedUnixMs) / 1000.0;
+        if (sec < 0.5) return;
+        _seekUrl = url;
+        _seekToSec = sec;
+        _startedUnixMs = startedUnixMs;
+    }
+
+    private void TrySeekPlaying()
+    {
+        if (_seekToSec < 0.5 || NowPlaying == null) return;
+        if (!string.Equals(NowPlaying.Url, _seekUrl, StringComparison.Ordinal)) return;
+        PruneScreens();
+        foreach (var s in _screens) s.SeekWhenReady(_seekToSec);
+        _seekToSec = -1;
+        _seekUrl = null;
+    }
+
+    private bool AlreadyHas(string url)
+    {
+        if (NowPlaying != null && string.Equals(NowPlaying.Url, url, StringComparison.Ordinal))
+            return true;
+        foreach (var i in _queue)
+            if (string.Equals(i.Url, url, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    private void ReplyState()
+    {
+        if (NowPlaying == null && _queue.Count == 0) return;
+        var upcoming = new string[_queue.Count];
+        for (int i = 0; i < _queue.Count; i++) upcoming[i] = _queue[i].Url;
+        Broadcast(VideoNet.State(NowPlaying?.Url, _startedUnixMs, upcoming));
+    }
+
+    private void ApplySnapshot(VideoNet.Msg msg)
+    {
+        if (msg == null) return;
+        if (!string.IsNullOrEmpty(msg.Url) && AlreadyHas(msg.Url) && NowPlaying != null)
+        {
+            RememberSeek(msg.Url, msg.StartedUnixMs);
+            TrySeekPlaying();
+            return;
+        }
+        if (!string.IsNullOrEmpty(msg.Url))
+        {
+            RememberSeek(msg.Url, msg.StartedUnixMs);
+            Enqueue(msg.Url, "room", fromNet: true);
+        }
+        if (msg.Queue != null)
+        {
+            foreach (var u in msg.Queue)
+                Enqueue(u, "room", fromNet: true);
+        }
+    }
+
+    private void Broadcast(string payload)
+    {
+        if (_applyingNet || _netSend == null || string.IsNullOrEmpty(payload)) return;
+        _netSend(payload);
+    }
+
     private static string ShortLabel(string url)
     {
         try

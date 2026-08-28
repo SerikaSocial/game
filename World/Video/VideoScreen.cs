@@ -116,6 +116,11 @@ public partial class VideoScreen : Node, IInteractable
     public override void _Process(double delta)
     {
         if (!Alive || !_player.IsPlaying()) return;
+        if (_seekToSec > 0)
+        {
+            try { _player.StreamPosition = _seekToSec; } catch { }
+            _seekToSec = -1;
+        }
         var vidTex = _player.GetVideoTexture();
         if (vidTex == null) return;
         if (_screenMat.AlbedoTexture != vidTex)
@@ -325,6 +330,20 @@ public partial class VideoScreen : Node, IInteractable
     /// The decoder's current frame, or null when nothing is playing. Read by the house lights
     /// to tint the screen bounce; nothing else should need it.
     public Texture2D FrameTexture => Alive && _rendering ? _player.GetVideoTexture() : null;
+
+    private double _seekToSec = -1;
+
+    /// Seek once the decoder is actually running. Theora ignores StreamPosition set before
+    /// the first decoded frame, so this is applied from `_Process` on the first playing tick.
+    public void SeekWhenReady(double seconds)
+    {
+        if (seconds < 0.5) return;
+        _seekToSec = seconds;
+        if (Alive && _player.IsPlaying())
+        {
+            try { _player.StreamPosition = seconds; _seekToSec = -1; } catch { }
+        }
+    }
 
     public void Stop()
     {

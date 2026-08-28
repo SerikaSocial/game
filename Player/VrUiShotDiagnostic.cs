@@ -310,6 +310,7 @@ public static partial class VrUiShotDiagnostic
             };
 
             _hud = Mount(new Hud { Name = "Hud" });
+            _hud.JoinWorldFromDetailPressed += id => _joinClicked = id;
             _loading = Mount(new LoadingScreen { Name = "LoadingScreen", Visible = false });
             _quick = Mount(new QuickMenu { Name = "QuickMenu" });
             _main = Mount(new MainMenu { Name = "MainMenu" });
@@ -343,6 +344,18 @@ public static partial class VrUiShotDiagnostic
                         {"id":"commons","name":"The Commons","description":"The main public hangout. Always open, always busy. Come and say hello.","capacity":40,"visitCount":18422,"author":"Serika","isBuiltin":true,"tags":["public","social","hangout"],
                          "instances":[{"playerCount":12,"capacity":40,"access":0,"mode":0,"region":"eu"},
                                       {"playerCount":40,"capacity":40,"access":0,"mode":0,"region":"us"}]}
+                        """).RootElement);
+                }),
+                // The MainMenu / DirectWorld-portal path: HideAll (what EnterHome does), then
+                // ShowWorldDetail with no ShowWorldList first. If this comes back blank, the
+                // panel failed to open because ShowWorldDetail never raises Hud.Visible.
+                new("worlddetail_alone", _hud, () =>
+                {
+                    _hud.HideAll();
+                    _hud.ShowWorldDetail(System.Text.Json.JsonDocument.Parse(
+                        """
+                        {"id":"commons","name":"The Commons","description":"The main public hangout. Always open, always busy. Come and say hello.","capacity":40,"visitCount":18422,"author":"Serika","isBuiltin":true,"tags":["public","social","hangout"],
+                         "instances":[{"playerCount":12,"capacity":40,"access":0,"mode":0,"region":"eu"}]}
                         """).RootElement);
                 }),
                 new("loading", _loading, () => { _loading.Present(); _loading.SetStatus("Connecting to The Commons…"); }),
@@ -414,7 +427,64 @@ public static partial class VrUiShotDiagnostic
             var err = eyeImg.SavePng(path);
             if (err != Error.Ok) { GD.Print($"UIVR FAIL: SavePng({path}) = {err}"); _failures++; return; }
 
+            if (shot.Name is "worlddetail" or "worlddetail_alone") CheckWorldDetail(shot.Name);
             Analyse(shot, path);
+        }
+
+        /// World-detail used to fail by never raising `Hud.Visible`, so HideAll → ShowWorldDetail
+        /// painted nothing. Join itself was on-screen and clickable whenever the layer was up.
+        private string _joinClicked;
+
+        private void CheckWorldDetail(string name)
+        {
+            if (!_hud.Visible)
+            {
+                GD.Print($"UIVR FAIL {name}: Hud.Visible is false — the panel failed to open");
+                _failures++;
+                return;
+            }
+
+            Button join = null;
+            void Find(Node n)
+            {
+                if (n is Button b && b.IsVisibleInTree() && b.Text == "Join World") join = b;
+                foreach (var child in n.GetChildren()) Find(child);
+            }
+            Find(_hud);
+
+            if (join == null)
+            {
+                GD.Print($"UIVR FAIL {name}: Join World button is not in the tree");
+                _failures++;
+                return;
+            }
+
+            var r = join.GetGlobalRect();
+            bool inside = r.Position.Y >= 0 && r.End.Y <= _ui.LogicalSize.Y + 1f
+                          && r.Position.X >= 0 && r.End.X <= _ui.LogicalSize.X + 1f;
+
+            _joinClicked = null;
+            var pos = r.GetCenter();
+            var vp = _ui.Viewport;
+            vp.PushInput(new InputEventMouseMotion { Position = pos, GlobalPosition = pos }, true);
+            vp.PushInput(new InputEventMouseButton
+            {
+                Position = pos, GlobalPosition = pos,
+                ButtonIndex = MouseButton.Left,
+                ButtonMask = MouseButtonMask.Left,
+                Pressed = true,
+            }, true);
+            vp.PushInput(new InputEventMouseButton
+            {
+                Position = pos, GlobalPosition = pos,
+                ButtonIndex = MouseButton.Left,
+                Pressed = false,
+            }, true);
+
+            GD.Print($"UIVR {name} join: rect=({r.Position.X:F0},{r.Position.Y:F0} {r.Size.X:F0}x{r.Size.Y:F0}) " +
+                     $"inside={inside} click={_joinClicked ?? "(none)"}");
+            if (!inside) { GD.Print($"UIVR FAIL {name}: Join World is outside the logical panel"); _failures++; }
+            if (_joinClicked == null) { GD.Print($"UIVR FAIL {name}: Join World did not respond to a pointer click"); _failures++; }
         }
 
         /// Measure what the screen drew, on the panel's own render target.

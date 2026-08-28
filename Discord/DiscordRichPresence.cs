@@ -1,5 +1,6 @@
 using System;
 using Godot;
+using SerikaSocial.UI;
 
 namespace SerikaSocial.Discord;
 
@@ -31,6 +32,8 @@ public static class DiscordRichPresence
     private static ulong _appId;
     private static bool _tokenApplied;
     private static bool _reauthTried;
+    // One Authorize overlay per process. Closing it (or a 4004) must not pop another.
+    private static bool _promptedThisProcess;
 
     // Reconnect: start fast, back off to once a minute while Discord stays away.
     private static double _reconnectDelay = 5.0;
@@ -112,15 +115,27 @@ public static class DiscordRichPresence
 
     /// <summary>
     /// Unlike the old IPC protocol, the Social SDK will not authenticate a tokenless client:
-    /// Connect before UpdateToken is a guaranteed gateway 4004. Boot therefore runs the
-    /// OAuth flow — saved token → refresh → fresh Authorize (a one-time consent popup inside
-    /// Discord) — and only connects once a token is applied.
+    /// Connect before UpdateToken is a guaranteed gateway 4004. Boot therefore prefers a
+    /// saved refresh token, and only opens Discord's Authorize overlay when there is no
+    /// grant yet. Closing that overlay is remembered — it does not come back next launch.
     /// </summary>
     private static void Boot()
     {
-        var saved = LoadToken();
-        if (saved != null && saved.appId == _appId.ToString() && !string.IsNullOrEmpty(saved.refreshToken))
+        if (_client == null || !_enabled) return;
+        if (!DeviceProfile.Settings.DiscordPresence)
         {
+            GD.Print("[Discord] presence off in settings — skipping");
+            return;
+        }
+
+        var saved = LoadToken();
+        bool haveRefresh = saved != null && saved.appId == _appId.ToString()
+                           && !string.IsNullOrEmpty(saved.refreshToken);
+
+        if (haveRefresh)
+        {
+            // A stored grant is the long-lived option: never pop Authorize while it works.
+            SetConsent(DeviceProfile.Settings.DiscordConsentKind.Granted);
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (saved.expiresUnixMs > now + 60_000 && !string.IsNullOrEmpty(saved.accessToken))
                 ApplyTokenThenConnect(saved.accessToken, (DiscordNative.AuthorizationTokenType)saved.tokenType);
@@ -128,29 +143,83 @@ public static class DiscordRichPresence
                 RefreshAndConnect(saved.refreshToken);
             return;
         }
+
+        if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Declined)
+        {
+            GD.Print("[Discord] Authorize was declined — not asking again (Settings → Interface → Discord Rich Presence)");
+            return;
+        }
+
         BeginAuthorizeFlow();
+    }
+
+    /// Settings toggle. Turning presence on after a decline is the only way to see the
+    /// overlay again. Turning it off aborts any in-flight prompt and disconnects.
+    public static void SetEnabled(bool on)
+    {
+        DeviceProfile.Settings.DiscordPresence = on;
+        if (!on)
+        {
+            DeviceProfile.Settings.Save();
+            try { _client?.AbortAuthorize(); } catch { }
+            try { _client?.Disconnect(); } catch { }
+            Ready = false;
+            _tokenApplied = false;
+            GD.Print("[Discord] presence disabled");
+            return;
+        }
+
+        _promptedThisProcess = false;
+        if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Declined)
+            SetConsent(DeviceProfile.Settings.DiscordConsentKind.Unknown);
+        else
+            DeviceProfile.Settings.Save();
+
+        if (_client == null)
+        {
+            // Init never ran (Android, missing lib) — nothing to do.
+            return;
+        }
+        Boot();
     }
 
     private static void BeginAuthorizeFlow()
     {
-        GD.Print("[Discord] no saved authorization — requesting consent (check your Discord client for a prompt)");
+        if (_client == null || _promptedThisProcess) return;
+        _promptedThisProcess = true;
+        GD.Print("[Discord] requesting consent — check your Discord client for a one-time Authorize prompt");
         _client.BeginAuthorize((ok, error, code, redirectUri) =>
         {
+            if (_shuttingDown) return;
             if (!ok)
             {
-                // Declined/popup-closed/Discord not logged in — retry next boot, not in a loop.
                 UnavailableReason = $"authorization failed: {error}";
-                GD.Print($"[Discord] authorize failed: {error}");
+                if (LooksLikeUserCancel(error))
+                {
+                    // Closing/cancelling the overlay is the long-lived "no" — Settings is
+                    // how they get it back. Discord itself also remembers an Authorize.
+                    GD.Print($"[Discord] authorize cancelled — not asking again until Settings → Interface → Discord Rich Presence");
+                    DeviceProfile.Settings.DiscordPresence = false;
+                    SetConsent(DeviceProfile.Settings.DiscordConsentKind.Declined);
+                }
+                else
+                {
+                    // Discord not running, overlay failed to attach, etc. Don't burn the
+                    // first-run chance — try again next launch, not this one.
+                    GD.Print($"[Discord] authorize failed ({error}) — will retry next launch, not this session");
+                }
                 return;
             }
             _client.ExchangeCodeForToken(code, redirectUri, token =>
             {
+                if (_shuttingDown) return;
                 if (!token.Ok)
                 {
                     UnavailableReason = $"token exchange failed: {token.Error}";
                     GD.Print($"[Discord] {UnavailableReason}");
                     return;
                 }
+                SetConsent(DeviceProfile.Settings.DiscordConsentKind.Granted);
                 SaveToken(token);
                 ApplyTokenThenConnect(token.AccessToken, token.TokenType);
             });
@@ -163,13 +232,16 @@ public static class DiscordRichPresence
         {
             if (!token.Ok || string.IsNullOrEmpty(token.AccessToken))
             {
-                // Dead refresh token — clear it and do a fresh consent.
-                GD.Print($"[Discord] token refresh failed ({token.Error}), re-authorizing");
-                ClearToken();
-                BeginAuthorizeFlow();
+                GD.Print($"[Discord] token refresh failed ({token.Error})");
+                if (LooksLikeInvalidGrant(token.Error))
+                {
+                    ClearToken();
+                    if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Granted)
+                        BeginAuthorizeFlow();
+                }
                 return;
             }
-            SaveToken(token);
+            SaveToken(token, previousRefresh: refreshToken);
             ApplyTokenThenConnect(token.AccessToken, token.TokenType);
         });
     }
@@ -183,9 +255,20 @@ public static class DiscordRichPresence
         {
             if (!ok)
             {
-                GD.Print($"[Discord] saved token rejected ({error}), re-authorizing");
-                ClearToken();
-                BeginAuthorizeFlow();
+                // Don't burn the grant on a single rejected apply (wrong type, Discord still
+                // starting). Retry as Bearer, then refresh — Authorize is last resort.
+                GD.Print($"[Discord] token apply failed ({error})");
+                if (type != DiscordNative.AuthorizationTokenType.Bearer)
+                {
+                    ApplyTokenThenConnect(accessToken, DiscordNative.AuthorizationTokenType.Bearer);
+                    return;
+                }
+                var saved = LoadToken();
+                if (saved?.refreshToken != null)
+                {
+                    RefreshAndConnect(saved.refreshToken);
+                    return;
+                }
                 return;
             }
             _tokenApplied = true;
@@ -195,10 +278,16 @@ public static class DiscordRichPresence
 
     private static void OnTokenExpired()
     {
-        if (!_enabled) return;
+        if (!_enabled || !DeviceProfile.Settings.DiscordPresence) return;
         GD.Print("[Discord] access token expired — refreshing");
         var saved = LoadToken();
-        if (saved?.refreshToken == null) { ClearToken(); BeginAuthorizeFlow(); return; }
+        if (saved?.refreshToken == null)
+        {
+            ClearToken();
+            if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Granted)
+                BeginAuthorizeFlow();
+            return;
+        }
         RefreshAndConnect(saved.refreshToken);
     }
 
@@ -281,15 +370,22 @@ public static class DiscordRichPresence
         {
             if (Ready) GD.Print($"[Discord] disconnected ({error}, detail {detail}) — retrying");
             Ready = false;
-            // 4004 after a token was applied means the token itself is dead — a plain
-            // reconnect would just 4004 forever, so re-authenticate (once per session).
-            if (detail == 4004 && _tokenApplied && !_reauthTried)
+            // 4004 is also what Vesktop/arRPC returns (they speak IPC but cannot do the
+            // Social SDK's authenticated handshake). That is not a dead grant — popping
+            // Authorize every launch is the bug. Refresh once; if the token is actually
+            // dead, RefreshAndConnect will Authorize. Otherwise just reconnect.
+            if (detail == 4004 && !_reauthTried)
             {
                 _reauthTried = true;
-                GD.Print("[Discord] gateway rejected the token — re-authorizing");
-                ClearToken();
-                BeginAuthorizeFlow();
-                return;
+                var saved = LoadToken();
+                if (saved?.refreshToken != null)
+                {
+                    GD.Print("[Discord] gateway 4004 — refreshing the saved grant, not re-prompting");
+                    RefreshAndConnect(saved.refreshToken);
+                    return;
+                }
+                // No grant to refresh. Vesktop/arRPC also 4004 with no token — do not
+                // pop Authorize in a loop; the next Boot (next launch, or Settings) can.
             }
             if (_tokenApplied)
             {
@@ -355,33 +451,52 @@ public static class DiscordRichPresence
 
     private const string TokenPath = "user://discord_token.json";
 
+    private static readonly System.Text.Json.JsonSerializerOptions TokenJson = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
     private static SavedToken LoadToken()
     {
         try
         {
             string abs = ProjectSettings.GlobalizePath(TokenPath);
             if (!System.IO.File.Exists(abs)) return null;
-            return System.Text.Json.JsonSerializer.Deserialize<SavedToken>(System.IO.File.ReadAllText(abs));
+            return System.Text.Json.JsonSerializer.Deserialize<SavedToken>(
+                System.IO.File.ReadAllText(abs), TokenJson);
         }
         catch { return null; }
     }
 
-    private static void SaveToken(TokenResult token)
+    private static void SaveToken(TokenResult token, string previousRefresh = null)
     {
         try
         {
+            // Refresh responses sometimes omit the refresh token; keep the one that still works.
+            string refresh = !string.IsNullOrEmpty(token.RefreshToken) ? token.RefreshToken : previousRefresh;
+            int type = token.TokenType == 0 ? (int)DiscordNative.AuthorizationTokenType.Bearer : token.TokenType;
             var saved = new SavedToken
             {
                 appId = _appId.ToString(),
-                tokenType = (int)token.TokenType,
+                tokenType = type,
                 accessToken = token.AccessToken,
-                refreshToken = token.RefreshToken,
+                refreshToken = refresh,
                 expiresUnixMs = token.ExpiresUnixMs,
             };
-            System.IO.File.WriteAllText(ProjectSettings.GlobalizePath(TokenPath),
-                System.Text.Json.JsonSerializer.Serialize(saved));
+            string abs = ProjectSettings.GlobalizePath(TokenPath);
+            string tmp = abs + ".tmp";
+            System.IO.File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(saved, TokenJson));
+            System.IO.File.Copy(tmp, abs, overwrite: true);
+            System.IO.File.Delete(tmp);
         }
         catch (Exception e) { GD.Print($"[Discord] token not saved: {e.Message}"); }
+    }
+
+    private static void SetConsent(DeviceProfile.Settings.DiscordConsentKind kind)
+    {
+        if (DeviceProfile.Settings.DiscordConsent == kind) return;
+        DeviceProfile.Settings.DiscordConsent = kind;
+        DeviceProfile.Settings.Save();
     }
 
     private static void ClearToken()
@@ -392,6 +507,21 @@ public static class DiscordRichPresence
             if (System.IO.File.Exists(abs)) System.IO.File.Delete(abs);
         }
         catch { }
+    }
+
+    private static bool LooksLikeUserCancel(string error)
+    {
+        if (string.IsNullOrEmpty(error)) return false;
+        string e = error.ToLowerInvariant();
+        return e.Contains("cancel") || e.Contains("abort") || e.Contains("denied")
+            || e.Contains("declin") || e.Contains("reject");
+    }
+
+    private static bool LooksLikeInvalidGrant(string error)
+    {
+        if (string.IsNullOrEmpty(error)) return false;
+        string e = error.ToLowerInvariant();
+        return e.Contains("invalid_grant") || e.Contains("invalid grant") || e.Contains("revoked");
     }
 
     private static ulong? ParseAppId(string s) =>

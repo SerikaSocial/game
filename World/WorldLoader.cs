@@ -254,6 +254,7 @@ public static class WorldLoader
         // point. Rescaling below destroys that.
         foreach (var l in lights) ClampLightReach(l);
         foreach (var l in lights) ConfigureLightQuality(l);
+        CapPositionalLightsForMobile(lights);
 
         float maxE = 0f;
         foreach (var l in lights) maxE = Mathf.Max(maxE, l.LightEnergy);
@@ -357,6 +358,24 @@ public static class WorldLoader
         {
             spot.LightSize = 0.1f;
         }
+    }
+
+    /// Compatibility (the Android / Quest renderer) only shades each mesh with a handful of
+    /// omni/spot lights. A cinema ships nine sconces plus a screen bounce — over the limit —
+    /// so most of the room is unlit and reads as black. Keep the brightest few and hide the
+    /// rest; the remaining lamps plus the directional fill cover the space.
+    private static void CapPositionalLightsForMobile(System.Collections.Generic.List<Light3D> lights)
+    {
+        if (!UI.DeviceProfile.IsStandaloneXr) return;
+        var positional = new System.Collections.Generic.List<Light3D>();
+        foreach (var l in lights)
+            if (l is OmniLight3D or SpotLight3D) positional.Add(l);
+        const int Max = 6;
+        if (positional.Count <= Max) return;
+        positional.Sort((a, b) => b.LightEnergy.CompareTo(a.LightEnergy));
+        for (int i = Max; i < positional.Count; i++)
+            positional[i].Visible = false;
+        GD.Print($"WorldLoader: hid {positional.Count - Max} extra lights for mobile Compatibility (kept {Max})");
     }
 
     private static void CollectLights(Node node, System.Collections.Generic.List<Light3D> into)
@@ -629,8 +648,20 @@ public static class WorldLoader
             case "dark": // Cinema: let the screen and sconces do the work.
                 skyTop = new Color(0.01f, 0.01f, 0.02f);
                 skyHorizon = new Color(0.02f, 0.02f, 0.04f);
-                ambient = new Color(0.10f, 0.10f, 0.14f);
-                ambientEnergy = 0.06f;
+                // Quest / Android uses the Compatibility renderer, which only shades a
+                // mesh with a handful of omnis. Near-zero ambient then reads as a black
+                // room with a couple of glowing patches. Keep a real fill on standalone
+                // so you can still walk the aisles; desktop keeps the theatrical dark.
+                if (UI.DeviceProfile.IsStandaloneXr)
+                {
+                    ambient = new Color(0.22f, 0.20f, 0.26f);
+                    ambientEnergy = 0.35f;
+                }
+                else
+                {
+                    ambient = new Color(0.10f, 0.10f, 0.14f);
+                    ambientEnergy = 0.06f;
+                }
                 break;
             case "baked": // Lighting is in the textures: flat, fairly bright, no double shadows.
                 skyTop = new Color(0.05f, 0.05f, 0.06f);
@@ -760,9 +791,12 @@ public static class WorldLoader
     /// Only added when the world truly has none of its own; an authored sun always wins.
     private static void EnsureKeyLight(Node3D root, string mode)
     {
-        // A baked world's shadows are already painted into its textures, and a theatre is
-        // supposed to be dark. Adding a sun to either fights the art.
-        if (mode is "baked" or "dark") return;
+        // A baked world's shadows are already painted into its textures. A theatre on
+        // desktop is supposed to be dark. On Quest the Compatibility renderer cannot
+        // light a whole auditorium with nine omnis, so a dim directional fill is what
+        // actually lets you see the seats.
+        if (mode == "baked") return;
+        if (mode == "dark" && !UI.DeviceProfile.IsStandaloneXr) return;
 
         var lights = new System.Collections.Generic.List<Light3D>();
         CollectLights(root, lights);
@@ -775,6 +809,8 @@ public static class WorldLoader
             "studio" => (0.9f, new Color(1.0f, 0.98f, 1.0f), -62f),
             // Warm, low, lamp-like to match the interior's own fixtures.
             "lit" => (0.7f, new Color(1.0f, 0.92f, 0.80f), -38f),
+            // Quest cinema: enough to read the room, not enough to kill the sconces.
+            "dark" => (0.45f, new Color(1.0f, 0.92f, 0.82f), -48f),
             // Outdoor: a proper sun, slightly warm, at a mid-afternoon angle.
             _ => (1.15f, new Color(1.0f, 0.96f, 0.90f), -45f),
         };

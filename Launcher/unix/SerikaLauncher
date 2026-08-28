@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# Serika Social launcher — Desktop vs VR picker for Linux and macOS.
+# Lives next to the game binary (zip, .deb, AppImage, or inside the .app).
+# Deep links and an already-present --vr skip the picker and go straight in.
+set -euo pipefail
+
+# Resolve symlinks so a /usr/bin/serika-social link still finds the game in /opt.
+_src="$0"
+while [[ -L "$_src" ]]; do
+  _dir="$(cd "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+HERE="$(cd "$(dirname "$_src")" && pwd)"
+
+find_game() {
+  local c
+  for c in \
+      "$HERE/SerikaSocial.x86_64" \
+      "$HERE/SerikaSocial.bin" \
+      "$HERE/Serika Social" \
+      "$HERE/usr/bin/SerikaSocial.x86_64" \
+      "$HERE/../MacOS/SerikaSocial.bin"
+  do
+    if [[ -x "$c" && "$c" != "$0" && ! -d "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+GAME="$(find_game || true)"
+if [[ -z "${GAME:-}" ]]; then
+  msg="Could not find the Serika Social game binary next to:\n$HERE"
+  if command -v zenity >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    zenity --error --title="Serika Social" --text="$msg" --width=360 || true
+  elif command -v osascript >/dev/null 2>&1; then
+    osascript -e "display alert \"Serika Social\" message \"Could not find the game binary.\" as critical" || true
+  else
+    printf '%b\n' "$msg" >&2
+  fi
+  exit 1
+fi
+
+# Already told what to do: a deep link, --vr, or any other game args.
+skip_picker=0
+for a in "$@"; do
+  case "$a" in
+    --vr|serikasocial:*|serikasocial://*) skip_picker=1 ;;
+  esac
+done
+if [[ -n "${SERIKA_SKIP_LAUNCHER:-}" ]]; then skip_picker=1; fi
+# No display (ssh, systemd) — don't block on a GUI.
+if [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && [[ "$(uname -s)" != Darwin ]]; then
+  skip_picker=1
+fi
+
+choice="desktop"
+
+pick_tkinter() {
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - "$HERE" <<'PY'
+import sys, os
+try:
+    import tkinter as tk
+except Exception:
+    sys.exit(2)
+
+here = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+icon = None
+for rel in (
+    "icon.png", "serika-social.png",
+    os.path.join("usr", "bin", "icon.png"),
+    os.path.join("usr", "share", "icons", "hicolor", "256x256", "apps", "serika-social.png"),
+):
+    p = os.path.join(here, rel)
+    if os.path.isfile(p):
+        icon = p
+        break
+
+BG = "#0E0A1A"
+FG = "#A78BFA"
+MUTED = "#A0A0B4"
+DESK = "#4C3B7A"
+VR = "#7C3AED"
+WHITE = "#FFFFFF"
+
+result = {"v": ""}
+
+root = tk.Tk()
+root.title("Serika Social")
+root.configure(bg=BG)
+root.resizable(False, False)
+w, h = 380, 210
+root.geometry(f"{w}x{h}")
+try:
+    root.eval("tk::PlaceWindow . center")
+except tk.TclError:
+    pass
+if icon:
+    try:
+        img = tk.PhotoImage(file=icon)
+        root.iconphoto(True, img)
+        root._icon = img
+    except tk.TclError:
+        pass
+
+def finish(v):
+    result["v"] = v
+    root.destroy()
+
+tk.Label(root, text="Serika Social", fg=FG, bg=BG,
+         font=("Segoe UI", 18, "bold")).pack(pady=(18, 0))
+tk.Label(root, text="Choose your mode", fg=MUTED, bg=BG,
+         font=("Segoe UI", 10)).pack(pady=(4, 16))
+
+row = tk.Frame(root, bg=BG)
+row.pack()
+
+def mkbtn(parent, text, color, value):
+    b = tk.Button(parent, text=text, command=lambda: finish(value),
+                  bg=color, fg=WHITE, activebackground=color, activeforeground=WHITE,
+                  relief="flat", bd=0, width=14, height=2,
+                  font=("Segoe UI", 11), cursor="hand2", highlightthickness=0)
+    b.pack(side="left", padx=8)
+    return b
+
+mkbtn(row, "🖥  Desktop", DESK, "desktop")
+mkbtn(row, "🥽  VR Mode", VR, "vr")
+root.protocol("WM_DELETE_WINDOW", lambda: finish(""))
+root.mainloop()
+sys.stdout.write(result["v"])
+sys.exit(0 if result["v"] else 1)
+PY
+}
+
+pick_zenity() {
+  command -v zenity >/dev/null 2>&1 || return 2
+  local out
+  out="$(zenity --list --radiolist --title="Serika Social" \
+      --text="Choose your mode" --hide-header \
+      --column="" --column="Mode" \
+      TRUE "Desktop" FALSE "VR Mode" \
+      --width=360 --height=220 2>/dev/null)" || return 1
+  case "$out" in
+    VR*) echo vr ;;
+    Desktop*) echo desktop ;;
+    *) return 1 ;;
+  esac
+}
+
+pick_kdialog() {
+  command -v kdialog >/dev/null 2>&1 || return 2
+  local out
+  out="$(kdialog --title "Serika Social" --radiolist "Choose your mode" \
+      desktop "Desktop" on vr "VR Mode" off 2>/dev/null)" || return 1
+  echo "$out"
+}
+
+pick_osascript() {
+  command -v osascript >/dev/null 2>&1 || return 2
+  local out
+  out="$(osascript <<'EOF'
+set theChoice to choose from list {"Desktop", "VR Mode"} with prompt "Choose your mode" with title "Serika Social" default items {"Desktop"}
+if theChoice is false then
+  return ""
+else
+  return item 1 of theChoice
+end if
+EOF
+  )" || return 1
+  case "$out" in
+    "VR Mode") echo vr ;;
+    Desktop) echo desktop ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$skip_picker" -eq 0 ]]; then
+  picked=""
+  status=2
+  set +e
+  picked="$(pick_tkinter 2>/dev/null)"; status=$?
+  if [[ $status -eq 2 || $status -gt 2 ]]; then
+    picked="$(pick_zenity 2>/dev/null)"; status=$?
+  fi
+  if [[ $status -eq 2 || $status -gt 2 ]]; then
+    picked="$(pick_kdialog 2>/dev/null)"; status=$?
+  fi
+  if [[ $status -eq 2 || $status -gt 2 ]]; then
+    picked="$(pick_osascript 2>/dev/null)"; status=$?
+  fi
+  set -e
+  if [[ $status -eq 1 ]]; then
+    # User closed the dialog — do not launch.
+    exit 0
+  fi
+  if [[ $status -eq 0 && -n "$picked" ]]; then
+    choice="$picked"
+  else
+    # No picker available (headless, no zenity/tk). Fall through to desktop.
+    choice="desktop"
+  fi
+fi
+
+args=()
+if [[ "$choice" == "vr" ]]; then
+  args+=(--vr)
+fi
+args+=("$@")
+
+# Replace this process so Steam/desktop files keep the right PID and signals.
+exec "$GAME" "${args[@]}"

@@ -31,16 +31,15 @@ public partial class HouseLights : Node
     // than a cinema: the lamps, the glowing strips, and the environment's ambient fill. All
     // three are pulled down by the same `_dim` curve so they move together.
 
-    /// How far the world's own lights drop while a picture is on. Zero — a cinema is dark.
-    private const float DimTo = 0.0f;
+    /// How far the world's own lights drop while a picture is on. Desktop goes fully dark;
+    /// Quest keeps a walkable remainder because Compatibility cannot light the room from the
+    /// screen bounce alone.
+    private static float DimTo => UI.DeviceProfile.IsStandaloneXr ? 0.18f : 0.0f;
     /// How far the *emissive* fittings drop — the aisle strips, step lights, cove and exit
-    /// signs. Out entirely: at 10% they were still the brightest thing in the room and still
-    /// lit the side walls well enough to see them, which is the opposite of the point. The
-    /// screen is the only light source in here.
-    private const float EmissiveDimTo = 0.0f;
-    /// Ambient goes out entirely. It is a flat fill with no direction, so any of it at all is
-    /// the one thing that cannot be made to look like it comes from the screen.
-    private const float AmbientDimTo = 0.0f;
+    /// signs. Desktop: out entirely. Quest: a marker glow so the aisles stay readable.
+    private static float EmissiveDimTo => UI.DeviceProfile.IsStandaloneXr ? 0.22f : 0.0f;
+    /// Ambient fill while a picture is on. Desktop goes out; Quest keeps enough to see.
+    private static float AmbientDimTo => UI.DeviceProfile.IsStandaloneXr ? 0.40f : 0.0f;
 
     /// Lights fade rather than switch: an instant cut reads as a bug, a fade reads as a cinema.
     /// Long, because the fade *is* the effect — at a couple of seconds it reads as a glitch you

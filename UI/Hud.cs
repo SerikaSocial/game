@@ -25,7 +25,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.7.3";
+    public const string ClientVersion = "1.7.5";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -596,6 +596,15 @@ public partial class Hud : CanvasLayer
             _detailInstanceList.AddChild(noServers);
         }
 
+        // Every other Hud show method raises `Visible`. This one used to only flip the inner
+        // panel, so after `HideAll()` (EnterHome, in-world) or after MainMenu closes (the VR
+        // pause → Worlds path) the card was shown on an invisible CanvasLayer. `--serika-uivr
+        // --screens worlddetail_alone` is the regression: HideAll then ShowWorldDetail must
+        // actually paint.
+        Visible = true;
+        _scrim.Visible = false;
+        _loginScreen.Visible = false;
+        if (_homeButton != null) _homeButton.Visible = false;
         _homePanel.Visible = false;
         _worldDetailPanel.Visible = true;
     }

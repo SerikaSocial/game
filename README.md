@@ -77,9 +77,13 @@ protocol to drift out of date.
   app → OAuth2 → Redirects** (the SDK's built-in loopback redirect; without it authorize dies
   with `OAuth2 Error: invalid_request: Missing "redirect_uri" in request` and no popup ever
   shows). On first boot the manager runs the OAuth flow — saved token → refresh → fresh
-  `Authorize` — and Discord shows a **one-time consent popup** in the official client; click
-  it, the token is exchanged and persisted to `user://discord_token.json`, and every later
-  boot reuses/refreshes it silently.
+  `Authorize` — and Discord shows a **one-time consent popup** in the official client. Click
+  Authorize once; the refresh token is persisted to `user://discord_token.json` and every
+  later boot reuses/refreshes it silently. Cancel (or closing the overlay) is also sticky
+  until **Settings → Interface → Discord Rich Presence** is turned back on. Gateway `4004`
+  (Vesktop/arRPC, or a brief handshake miss) refreshes the saved grant — it does **not**
+  wipe the token or pop Authorize again. The Discord application must be a **Public Client**
+  on the OAuth2 tab for in-process `GetToken`/`RefreshToken` to work.
 - **Android**: the SDK ships there as an AAR with Java glue — not wired; the manager
   disables itself on `OS.HasFeature("android")`.
 - **arRPC caveat**: an `arRPC` bridge (Vesktop/Vencord setups) answers the local IPC socket

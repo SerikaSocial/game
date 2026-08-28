@@ -241,7 +241,7 @@ public partial class SettingsMenu : CanvasLayer
     }
 
     // ── Interface tab ───────────────────────────────────────────────────────────────────
-    private CheckButton _nameTags, _pfp;
+    private CheckButton _nameTags, _pfp, _discordPresence;
     private VBoxContainer BuildInterface()
     {
         var v = Section();
@@ -252,6 +252,22 @@ public partial class SettingsMenu : CanvasLayer
         _pfp = new CheckButton();
         _pfp.Toggled += on => { DeviceProfile.Settings.ProfilePictures = on; SettingChanged?.Invoke("pfp"); DeviceProfile.Settings.Save(); };
         v.AddChild(Row("Show profile pictures on tags", _pfp));
+
+        // Desktop only — the Social SDK is not wired on Android (AAR + Java glue).
+        if (!OS.HasFeature("android"))
+        {
+            _discordPresence = new CheckButton();
+            _discordPresence.Toggled += on => Discord.DiscordRichPresence.SetEnabled(on);
+            v.AddChild(Row("Discord Rich Presence", _discordPresence));
+            var discordHint = new Label
+            {
+                Text = "Shows what you're playing and lets friends join from Discord. Discord asks once; Cancel is remembered. Re-enable here to connect again.",
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            };
+            discordHint.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+            discordHint.AddThemeColorOverride("font_color", Brand.TextDim);
+            v.AddChild(discordHint);
+        }
         return v;
     }
 
@@ -423,6 +439,7 @@ public partial class SettingsMenu : CanvasLayer
         _thirdPerson.SetPressedNoSignal(DeviceProfile.Settings.StartThirdPerson);
         _nameTags.SetPressedNoSignal(DeviceProfile.Settings.NameTags);
         _pfp.SetPressedNoSignal(DeviceProfile.Settings.ProfilePictures);
+        _discordPresence?.SetPressedNoSignal(DeviceProfile.Settings.DiscordPresence);
 
         RebuildVrValues();
     }

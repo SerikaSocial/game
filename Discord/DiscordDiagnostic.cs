@@ -92,21 +92,43 @@ public static class DiscordDiagnostic
         // exactly like the game manager: saved token → apply; else Authorize (the Discord
         // client shows a consent popup — clicking it within --wait continues the run).
         var saved = ReadSavedToken(appId);
-        if (saved != null)
+        if (saved != null && !string.IsNullOrEmpty(saved.refreshToken))
         {
+            // Same rule as the game: a stored grant is long-lived — never Authorize over it.
             authState = "saved-token";
-            client.ApplyToken((DiscordNative.AuthorizationTokenType)saved.tokenType, saved.accessToken,
-                (ok, error) =>
+            GD.Print("DISCORDTEST using saved refresh token (will not show the Authorize prompt)");
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (saved.expiresUnixMs > now + 60_000 && !string.IsNullOrEmpty(saved.accessToken))
+            {
+                client.ApplyToken((DiscordNative.AuthorizationTokenType)saved.tokenType, saved.accessToken,
+                    (ok, error) =>
+                    {
+                        if (!ok) { authState = $"apply-failed({error})"; return; }
+                        authState = "applied";
+                        client.Connect();
+                    });
+            }
+            else
+            {
+                client.RefreshToken(saved.refreshToken, token =>
                 {
-                    if (!ok) { authState = $"apply-failed({error})"; return; }
-                    authState = "applied";
-                    client.Connect();
+                    if (!token.Ok) { authState = $"refresh-failed({token.Error})"; return; }
+                    WriteSavedToken(appId, token, saved.refreshToken);
+                    authState = "refreshed";
+                    client.ApplyToken((DiscordNative.AuthorizationTokenType)token.TokenType,
+                        token.AccessToken, (ok, error) =>
+                        {
+                            if (!ok) { authState = $"apply-failed({error})"; return; }
+                            authState = "applied";
+                            client.Connect();
+                        });
                 });
+            }
         }
         else
         {
             authState = "authorizing";
-            GD.Print("DISCORDTEST requesting authorization — an Authorize prompt should appear in your Discord client");
+            GD.Print("DISCORDTEST requesting authorization — an Authorize prompt should appear in your Discord client (once; later runs reuse the saved token)");
             client.BeginAuthorize((ok, error, code, redirect) =>
             {
                 if (!ok) { authState = $"authorize-failed({error})"; return; }
@@ -210,16 +232,16 @@ public static class DiscordDiagnostic
         catch { return null; }
     }
 
-    private static void WriteSavedToken(ulong appId, TokenResult token)
+    private static void WriteSavedToken(ulong appId, TokenResult token, string previousRefresh = null)
     {
         try
         {
             var saved = new SavedToken
             {
                 appId = appId.ToString(),
-                tokenType = (int)token.TokenType,
+                tokenType = token.TokenType == 0 ? (int)DiscordNative.AuthorizationTokenType.Bearer : token.TokenType,
                 accessToken = token.AccessToken,
-                refreshToken = token.RefreshToken,
+                refreshToken = !string.IsNullOrEmpty(token.RefreshToken) ? token.RefreshToken : previousRefresh,
                 expiresUnixMs = token.ExpiresUnixMs,
             };
             System.IO.File.WriteAllText(ProjectSettings.GlobalizePath(TokenPath),
