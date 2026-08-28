@@ -28,6 +28,9 @@ namespace SerikaSocial.Player;
 ///   JUMP   — holding the jump button must produce exactly one jump, not one per frame.
 ///   STICK  — stick locomotion must move the body.
 ///   WALL   — physically walking in the guardian must be stopped by world collision.
+///   DRIFT  — standing still off-centre in the room must NOT move the body continuously. The
+///            body catches up to the head once and stops; it must not treat the head's standing
+///            offset as a velocity.
 ///   ORIENT — hand-relative movement must follow the CONTROLLER's heading, not the head's.
 ///   DASH   — the right stick must teleport in smooth mode, and must not do so while turning.
 ///   GEST   — the gesture classifier must name each canonical hand shape, and must hold its last
@@ -247,6 +250,40 @@ public static partial class VrDiagnostic
                 },
                 _ => _head.Z -= 0.06f);
 
+            // ── DRIFT ────────────────────────────────────────────────────────────────
+            // Stand still, off-centre in the room, and touch nothing. The body must catch up to
+            // the head ONCE and then stop.
+            //
+            // This is the shape of a real player: nobody stands exactly on their play-space
+            // origin, so the head sits permanently 20-50 cm off it. `SyncBodyToHead` used to move
+            // the body by that whole offset every frame — a constant 3.6 m/s drag that made the
+            // stick feel dead because it was fighting it. The earlier phases all happen to run
+            // with the head at the origin (flat offset under the 1.5 cm deadzone, so the function
+            // returns immediately), which is exactly why the suite never saw it.
+            Add("drift-place", () =>
+            {
+                Recentre();
+                UI.DeviceProfile.Settings.VrLocomotion = UI.DeviceProfile.Settings.Locomotion.Smooth;
+                VrTestInput.LeftStick = Vector2.Zero;
+                VrTestInput.RightStick = Vector2.Zero;
+                // A player standing well off the centre of their guardian, and staying there.
+                _head = new Vector3(0.35f, 1.62f, 0.25f);
+            }, 20, () => _driftStart = _vr.GlobalPosition);
+
+            Add("drift", () => { }, 180, () =>
+            {
+                var moved = (_vr.GlobalPosition - _driftStart) with { Y = 0 };
+                // 180 frames at 60 Hz = 3 s. A correct rig catches up once (~0.43 m here) and then
+                // holds; the bug travelled metres per second and would blow past this instantly.
+                bool ok = moved.Length() < 0.60f;
+                _ok &= ok;
+                GD.Print($"VRDRIFT head parked 0.43 m off-centre, stick centred, 3 s → body moved " +
+                         $"{moved.Length():F2} m  " +
+                         $"{(ok ? "ok — the body catches up once and stops"
+                                : $"FAIL — body is being dragged ({moved.Length() / 3f:F2} m/s with no input)")}");
+                _head = new Vector3(0, 1.62f, 0);
+            });
+
             // ── ORIENT ───────────────────────────────────────────────────────────────
             // Hand-relative movement: yaw the left controller 90° away from the head and walk
             // forward. Travel must follow the controller, not the gaze.
@@ -383,6 +420,7 @@ public static partial class VrDiagnostic
         }
 
         private float _dashTravel;
+        private Vector3 _driftStart;
         private float _startYaw;
         private bool _panelIdle;
         private UI.VrUiSurface _surface;

@@ -663,10 +663,25 @@ void fragment() {
     /// Prediction is clamped to `MaxPredictOffset` to prevent wild jumps from momentary jitter.
     private void SyncBodyToHead()
     {
-        // Use actual HMD local position (no velocity prediction), preventing the camera
-        // and world from sliding or swimming when the head rotates or accelerates.
-        var camLocal = _camera.Position;
-        var flat = new Vector3(camLocal.X, 0, camLocal.Z);
+        // The offset must be measured from the BODY, not from the play space.
+        //
+        // This read `_camera.Position` alone — the head's pose relative to `_origin` — and then
+        // subtracted whatever the body travelled from `_origin.Position`. Those are two different
+        // frames of reference, so the correction never touched the quantity being measured: the
+        // XR runtime rewrites the camera's local pose from the tracker every frame, so `flat`
+        // came back the same size no matter how far the origin had been shifted.
+        //
+        // The body therefore moved by the full head offset EVERY FRAME instead of once. That is a
+        // velocity, not a catch-up: standing 5 cm off-centre in your room dragged the player at
+        // 0.05 m x 72 fps = 3.6 m/s, forever, in a fixed direction. On-device telemetry caught it
+        // travelling 70 m in 24 seconds with the stick centred and `Velocity` reading exactly
+        // zero — which is why it was reported as "I can't walk": locomotion worked fine, but it
+        // was being fought by a constant drift nothing could cancel.
+        //
+        // `_origin.Position + _camera.Position` is the head relative to the body, which IS what
+        // the origin correction below reduces, so it converges to zero after one frame.
+        var camFromBody = _origin.Position + _camera.Position;
+        var flat = new Vector3(camFromBody.X, 0, camFromBody.Z);
         // Saccadic deadzone (1.5cm) to ignore micro HMD tracking jitter so the player
         // body does not jitter or slide down slopes when standing completely still.
         if (flat.Length() < 0.015f) return;
