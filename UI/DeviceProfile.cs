@@ -319,7 +319,14 @@ public static class DeviceProfile
         /// The opposite of the VRChat/Godot convention on purpose — this is what the project owner
         /// asked for after using it. Both layouts are here because stick-hand preference is close
         /// to religious and neither is wrong.
-        public static bool VrMoveOnRightStick = true;
+        /// Locomotion on the right stick instead of the left.
+        ///
+        /// Default is LEFT, which is VRChat's layout and therefore the one social VR players
+        /// already have in muscle memory. This defaulted to the right, which is a defensible
+        /// choice in isolation and the wrong one here: a player whose first minute is spent
+        /// turning when they meant to walk does not conclude that the sticks are swapped, they
+        /// conclude the port is broken.
+        public static bool VrMoveOnRightStick = false;
 
         /// Push forward on the stick, walk forward. Off by default because that is what the
         /// hardware reports here; kept as a setting because thumbstick Y sign is a genuine
@@ -333,6 +340,15 @@ public static class DeviceProfile
         /// Curl the avatar's fingers from the trigger/grip (controllers) or the tracked joints
         /// (bare hands). Separate from `VrHandTracking` because it applies to controllers too.
         public static bool VrFingerPosing = true;
+
+        /// Scale the reach of the avatar's arms to the player's own.
+        ///
+        /// Stylised avatars have short limbs — a 1.57 m rig reaches ~43 cm from shoulder to wrist
+        /// against an adult's ~60 cm — so without this the avatar's hands sit permanently behind
+        /// the player's and the elbows stay locked straight through the outer half of the working
+        /// volume. See `VrAvatarIk.ScaleToArm`. Off is the literal, unscaled behaviour, which is
+        /// worth keeping for anyone wearing a realistically proportioned avatar.
+        public static bool VrArmScaling = true;
 
         /// The wrist-anchored info panel (world, players, clock). Off puts nothing at all in the
         /// player's view while they are just standing in a world, which some people want.
@@ -405,6 +421,7 @@ public static class DeviceProfile
             VrMoveOnRightStick = (bool)cfg.GetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
             VrHandTracking = (bool)cfg.GetValue("vr", "hand_tracking", VrHandTracking);
             VrFingerPosing = (bool)cfg.GetValue("vr", "finger_posing", VrFingerPosing);
+            VrArmScaling = (bool)cfg.GetValue("vr", "arm_scaling", VrArmScaling);
             VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
             VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
             VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
@@ -443,6 +460,7 @@ public static class DeviceProfile
             cfg.SetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
             cfg.SetValue("vr", "hand_tracking", VrHandTracking);
             cfg.SetValue("vr", "finger_posing", VrFingerPosing);
+            cfg.SetValue("vr", "arm_scaling", VrArmScaling);
             cfg.SetValue("vr", "wrist_hud", VrWristHud);
             cfg.SetValue("vr", "haptics", VrHaptics);
             cfg.SetValue("vr", "height_offset", VrHeightOffset);

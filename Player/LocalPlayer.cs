@@ -18,6 +18,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     private const float StandCameraY = 1.6f;
     private const float BobFrequency = 10f;
     private const float BobAmplitude = 0.04f;
+    private const float VoidThreshold = -50f;
 
     public float MouseSensitivity { get; set; } = 0.003f;
 
@@ -30,6 +31,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public Vector2 ExternalMove { get; set; } = Vector2.Zero;
     /// One-shot jump request from a touch button.
     public bool ExternalJump { get; set; }
+
+    /// Raised when the player falls below the void threshold so Main can respawn.
+    public event System.Action RespawnRequested;
     /// Held crouch request from touch controls (or diagnostics); OR-ed with the Ctrl key.
     public bool ExternalCrouch { get; set; }
     /// Held sprint request from touch controls (or diagnostics); OR-ed with the Shift key.
@@ -608,6 +612,8 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         v.Z = dir.Z * speed;
         Velocity = v;
         MoveAndSlide();
+
+        if (GlobalPosition.Y < VoidThreshold) RespawnRequested?.Invoke();
 
         // Animate the equipped avatar from actual movement state (embedded clips override this).
         var planar = new Vector2(Velocity.X, Velocity.Z);

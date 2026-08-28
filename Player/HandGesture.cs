@@ -34,25 +34,100 @@ public static class HandGestures
     private const float Closed = 0.62f;
     private const float Open = 0.38f;
 
-    /// Synthesise a curl vector from controller inputs.
+    /// The gesture a controller is making, from the three signals it actually has.
     ///
-    /// The mapping is the one every OpenXR title uses because it is the one the hardware affords:
-    /// the trigger sits under the index finger, the grip under the remaining three, and the thumb
-    /// rests on the face buttons. It is a coarse three-degrees-of-freedom approximation of a
-    /// twenty-joint hand, which is precisely why the gesture set above is small.
+    /// **A controller cannot be classified by measuring finger curls, and trying to was a bug.**
+    /// The curl route synthesised thumb/index/grip into five floats and ran them through
+    /// `Classify` below. That works for the shapes whose finger pattern the hardware happens to
+    /// reproduce — a fist really is all five closed — and is *unable in principle* to produce the
+    /// ones whose pattern it does not. A peace sign is index and middle extended with ring and
+    /// little closed; one grip axis moves all three of those together, so no combination of
+    /// trigger and grip can ever express it. Peace and Rock'n'Roll were therefore unreachable on
+    /// a controller, and the classifier quietly returned whatever the previous gesture had been.
     ///
-    /// `thumbDown` has no analogue input on any common controller — the built-in OpenXR action map
-    /// exposes no touch-capacitance actions — so it is driven by whether the thumb is doing
-    /// anything at all: resting on a face button or on the stick.
-    public static void CurlsFromController(float trigger, float grip, bool thumbDown, float[] dst)
+    /// So controllers get a lookup table instead, keyed on the three bits VRChat keys on, which is
+    /// the layout the hardware affords and the one players already have in their hands. The seven
+    /// shapes plus the resting state fill the eight combinations exactly.
+    ///
+    /// The one judgement call is which combination is the resting state. VRChat's own
+    /// documentation describes the shapes in prose rather than as a table, and a literal reading
+    /// puts the peace sign on "thumb resting, nothing pressed" — which is precisely how a hand
+    /// sits when it is doing nothing at all, so every idle player would stand there flashing a V.
+    /// Neutral takes that slot and the peace sign moves to the combination the literal reading
+    /// leaves unused.
+    public static HandGesture FromController(bool thumbDown, bool trigger, bool grip) =>
+        (thumbDown, trigger, grip) switch
+        {
+            (true,  false, false) => HandGesture.Neutral,   // resting on the stick, nothing pulled
+            (false, false, false) => HandGesture.Open,
+            (true,  true,  true)  => HandGesture.Fist,
+            (true,  false, true)  => HandGesture.Point,
+            (false, true,  true)  => HandGesture.ThumbsUp,
+            (false, false, true)  => HandGesture.Gun,
+            (true,  true,  false) => HandGesture.RockNRoll,
+            (false, true,  false) => HandGesture.Peace,
+        };
+
+    /// The finger shape each gesture actually is, so the avatar's hand forms the pose rather than
+    /// whatever the trigger and grip happened to describe.
+    ///
+    /// This is what makes the table above worth having: once the gesture is known by name, the
+    /// hand can be posed from the name. A peace sign closes ring and little while the grip axis
+    /// that nominally drives them is released, which is exactly the shape the old curl route could
+    /// not reach.
+    public static void CurlsForGesture(HandGesture gesture, float[] dst)
     {
         if (dst == null || dst.Length < 5) return;
-        dst[(int)HandPoser.Finger.Thumb] = thumbDown ? 1f : 0f;
-        dst[(int)HandPoser.Finger.Index] = Mathf.Clamp(trigger, 0f, 1f);
+        // thumb, index, middle, ring, little.
+        var shape = gesture switch
+        {
+            HandGesture.Fist      => new[] { 1f, 1f, 1f, 1f, 1f },
+            HandGesture.Open      => new[] { 0f, 0f, 0f, 0f, 0f },
+            HandGesture.Point     => new[] { 1f, 0f, 1f, 1f, 1f },
+            HandGesture.ThumbsUp  => new[] { 0f, 1f, 1f, 1f, 1f },
+            HandGesture.Peace     => new[] { 1f, 0f, 0f, 1f, 1f },
+            HandGesture.RockNRoll => new[] { 1f, 0f, 1f, 1f, 0f },
+            HandGesture.Gun       => new[] { 0f, 0f, 1f, 1f, 1f },
+            // A relaxed hand is not a flat hand: fingers rest slightly curled, and posing them
+            // dead straight is what makes an idle avatar's hands look like mannequin parts.
+            _                     => new[] { 0.18f, 0.22f, 0.25f, 0.28f, 0.30f },
+        };
+        System.Array.Copy(shape, dst, 5);
+    }
+
+    /// Blend `current` toward `target` at a fixed rate, in place.
+    ///
+    /// Curls used to be assigned outright, so a finger crossed its whole range in one frame. That
+    /// reads as the hand *teleporting* between shapes — the pose is right in every still frame and
+    /// wrong in motion, which is the failure mode nobody catches in a screenshot. A real finger
+    /// takes roughly 80–120 ms to close, and matching that is most of what makes a synthetic hand
+    /// look like it belongs to someone.
+    ///
+    /// Exponential, so the rate is frame-rate independent: a Quest at 72 Hz and a desktop at 144
+    /// must not close their fingers at different speeds.
+    public static void Approach(float[] current, float[] target, float dt, float seconds = 0.09f)
+    {
+        if (current == null || target == null) return;
+        float k = 1f - Mathf.Exp(-dt / Mathf.Max(0.001f, seconds));
+        for (int i = 0; i < current.Length && i < target.Length; i++)
+            current[i] = Mathf.Lerp(current[i], target[i], k);
+    }
+
+    /// The curl a *relaxed* hand should show, following the analogue trigger and grip directly.
+    ///
+    /// Only used while the gesture is `Neutral`. There the player is not asking for a shape, so
+    /// the most useful thing the hand can do is track what their fingers are really doing — a half
+    /// squeeze shows as a half-closed hand. Every other gesture is a deliberate pose and is driven
+    /// from `CurlsForGesture`, or the analogue value would fight the shape.
+    public static void RelaxedCurls(float trigger, float grip, bool thumbDown, float[] dst)
+    {
+        if (dst == null || dst.Length < 5) return;
         float g = Mathf.Clamp(grip, 0f, 1f);
-        dst[(int)HandPoser.Finger.Middle] = g;
-        dst[(int)HandPoser.Finger.Ring] = g;
-        dst[(int)HandPoser.Finger.Little] = g;
+        dst[(int)HandPoser.Finger.Thumb] = thumbDown ? 0.75f : 0.18f;
+        dst[(int)HandPoser.Finger.Index] = Mathf.Max(0.22f, Mathf.Clamp(trigger, 0f, 1f));
+        dst[(int)HandPoser.Finger.Middle] = Mathf.Max(0.25f, g);
+        dst[(int)HandPoser.Finger.Ring] = Mathf.Max(0.28f, g);
+        dst[(int)HandPoser.Finger.Little] = Mathf.Max(0.30f, g);
     }
 
     /// Classify a curl vector. `previous` is returned whenever the hand is in the dead space

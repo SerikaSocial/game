@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.6.7"
+config/version="1.7.0"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
@@ -116,3 +116,13 @@ openxr/form_factor=0
 openxr/reference_space=2
 openxr/submit_depth_buffer=true
 openxr/extensions/hand_tracking=true
+; No modal when OpenXR fails to start.
+;
+; Godot's default is to pop a blocking `zenity` alert when the runtime cannot be reached, which on
+; a machine with no headset is *every* launch. `--headless` does not suppress it, so a diagnostic
+; run on a dev box sits at 0% CPU with no output, looking exactly like a test that never started —
+; the hang this repo's docs work around by telling every agent to unset DISPLAY first. It is also
+; wrong in production: a desktop player with no headset should get the desktop client, not a dialog
+; about OpenXR. `VrPlayer.TryInitVr` already logs the failure and falls back, which is all the
+; alert was ever for.
+openxr/startup_alert=false

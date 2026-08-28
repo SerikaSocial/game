@@ -167,10 +167,12 @@ public sealed class VrAvatarIk
         Vector3? hipWorld = null,
         Vector3? leftFootWorld = null,
         Vector3? rightFootWorld = null,
-        bool solveHead = true
+        bool solveHead = true,
+        float playerArmReach = 0f
     )
     {
         if (!_valid) return;
+        _playerArmReach = playerArmReach;
 
         var toSkel = _skel.GlobalTransform.AffineInverse();
         var headLocal = toSkel * headWorld;
@@ -252,6 +254,47 @@ public sealed class VrAvatarIk
         SetGlobalRotation(_chest, chestRot);
     }
 
+    /// How far the *player's* arm can reach, in metres. Zero disables the remap below.
+    private float _playerArmReach;
+
+    /// Map the player's reach onto the avatar's, about the shoulder.
+    ///
+    /// **The avatar's arms are not the player's arms, and pretending otherwise leaves the hands
+    /// permanently behind.** Stylised humanoids — which is nearly every avatar people actually
+    /// wear — have short limbs: a 1.57 m rig measures about 43 cm from shoulder to wrist, while an
+    /// adult holding the controllers reaches close to 60 cm. Feed the raw controller position to a
+    /// two-bone solver and it does the only thing it can, which is extend fully and stop 15 cm
+    /// short. Every reach ends with the avatar's hands trailing the player's, the elbows locked
+    /// straight, and — because the arm is pinned at full extension — no elbow bend at all through
+    /// the whole outer half of the working volume. That reads as stiff, laggy arms, and it is not
+    /// a solver bug: the target is simply outside the arm.
+    ///
+    /// So the reach is rescaled rather than clipped. The direction from the shoulder is preserved
+    /// exactly — point at something and the avatar points at it — while the distance is scaled by
+    /// the ratio of the two arm lengths, so full player extension is full avatar extension and
+    /// everything in between lands proportionally. This is the same trick as scaling the world to
+    /// the avatar, but confined to the arms, so it cannot disturb the height calibration or make
+    /// locomotion feel different.
+    ///
+    /// The height calibration already aligns the avatar's eyes with the headset, which puts its
+    /// shoulders roughly where the player's are, so the shoulder is a sound pivot.
+    private Vector3 ScaleToArm(in Arm arm, Vector3 shoulder, Vector3 targetSkel)
+    {
+        if (_playerArmReach <= 0.05f) return targetSkel;
+
+        float avatarReach = arm.L1 + arm.L2;
+        if (avatarReach <= 0.01f) return targetSkel;
+
+        float ratio = avatarReach / _playerArmReach;
+        // Only ever shrink. A player shorter in the arms than their avatar can already reach
+        // everywhere the avatar can, and stretching their input would send the avatar's hands
+        // further out than their own — which is worse than falling short, because it breaks the
+        // one thing that has to hold: what you touch is what your avatar touches.
+        if (ratio >= 1f) return targetSkel;
+
+        return shoulder + (targetSkel - shoulder) * ratio;
+    }
+
     /// Analytic two-bone IK. Places the elbow using the law of cosines, then swings each
     /// segment's rest direction onto the solved direction.
     ///
@@ -262,6 +305,7 @@ public sealed class VrAvatarIk
     private void SolveArm(in Arm arm, Vector3 targetSkel, float poleSign)
     {
         var shoulder = _skel.GetBoneGlobalPose(arm.Upper).Origin;
+        targetSkel = ScaleToArm(arm, shoulder, targetSkel);
 
         var toTarget = targetSkel - shoulder;
         float dist = toTarget.Length();

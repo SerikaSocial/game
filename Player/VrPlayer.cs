@@ -27,7 +27,15 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const string ActMenu = "menu_button";
     private const string ActPrimaryBtn = "ax_button"; // A (right) / X (left)
     private const string ActSecondaryBtn = "by_button"; // B (right) / Y (left)
+    private const string ActStickClick = "primary_click";
+    private const string ActStickTouch = "primary_touch";
     private const string ActHaptic = "haptic";
+
+    /// How far the trigger or grip must travel before it counts as "pulled" for gesture purposes.
+    /// Well past any resting contact, so a finger merely laid on the trigger does not change the
+    /// player's gesture, and well short of the top so the shape forms before the hardware bottoms
+    /// out.
+    private const float GestureThreshold = 0.5f;
 
     private const float WalkSpeed = 2.2f;
     private const float SprintSpeed = 4.2f;
@@ -40,6 +48,7 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const float DefaultPlayerEyeHeight = 1.65f; // average standing eye height
     private const float MaxPredictOffset = 0.06f; // clamp prediction to prevent wild jumps
     private const float BodyYawLerpRate = 8f; // how fast the body catches up to head yaw
+    private const float VoidThreshold = -50f;
 
     // Head tracking smoothing — one-tap latency reduction for standalone headsets.
     // The headset pose arrives at the start of _PhysicsProcess; we predict where it
@@ -70,16 +79,16 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     /// Per-finger curls, fed either from the tracked joints or synthesised from the controller's
     /// trigger/grip. Allocated once — this is written every frame.
     private readonly float[][] _curl = { new float[5], new float[5] };
+
+    /// Where each finger is heading. `_curl` chases this rather than being assigned, so a change
+    /// of gesture is a movement instead of a jump — see `HandGestures.Approach`.
+    private readonly float[][] _target = { new float[5], new float[5] };
+
     private readonly HandGesture[] _gesture = { HandGesture.Neutral, HandGesture.Neutral };
 
     /// Curls the avatar's own finger bones. Rebuilt with each avatar, null when the rig has no
     /// finger bones to pose (the procedural bean, and plenty of real rigs).
     private readonly HandPoser[] _poser = new HandPoser[2];
-
-    /// The controller "bean" meshes, kept so they can be hidden the moment the runtime starts
-    /// reporting real hands. Showing a floating capsule where the player can see their own bare
-    /// fingers is the single most immersion-breaking thing hand tracking can do.
-    private readonly Node3D[] _handVisual = new Node3D[2];
 
     /// Which hand is currently driving the UI ray. Bare hands point with the index finger, so
     /// whichever hand is actually tracked and raised should own the pointer rather than the
@@ -96,6 +105,9 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     public event System.Action MenuPressed;
     /// Raised on the secondary face button — `Main` maps this to the radial action menu.
     public event System.Action ActionMenuPressed;
+
+    /// Raised when the player falls below the void threshold so Main can respawn.
+    public event System.Action RespawnRequested;
 
     private XROrigin3D _origin;
     private XRCamera3D _camera;
@@ -223,8 +235,10 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         _rightHand = new XRController3D { Name = "RightHand", Tracker = "right_hand", ShowWhenTracked = true };
         _origin.AddChild(_rightHand);
 
-        _handVisual[0] = AddHandVisual(_leftHand, new Color(0.45f, 0.62f, 0.95f));
-        _handVisual[1] = AddHandVisual(_rightHand, new Color(0.95f, 0.5f, 0.42f));
+        // No controller meshes. The player's hands are their avatar's hands: `VrAvatarIk` already
+        // puts a modelled, skinned, correctly sized hand at each wrist, and drawing a capsule there
+        // as well leaves a coloured bean floating inside it — visible in first person, in mirrors
+        // and in every shadow pass. The rig is the hand representation; there is no second one.
 
         _jointMarkers[0] = BuildJointMarkers(new Color(0.45f, 0.62f, 0.95f));
         _jointMarkers[1] = BuildJointMarkers(new Color(0.95f, 0.5f, 0.42f));
@@ -244,55 +258,6 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     }
 
     // ---------------------------------------------------------------- rig construction
-
-    /// Controller hand visual: a capsule oriented along the controller's grip axis, so it
-    /// rotates with the controller instead of floating as an axis-aligned box.
-    ///
-    /// Returns a wrapper node holding both parts, so the whole visual can be hidden in one call
-    /// when optical hand tracking takes over.
-    private Node3D AddHandVisual(Node3D parent, Color color)
-    {
-        var group = new Node3D { Name = "HandVisual" };
-        parent.AddChild(group);
-        parent = group;
-
-        // Capsule along Z (the grip/aim axis) looks like a stylised controller body.
-        var mesh = new MeshInstance3D
-        {
-            Name = "HandBody",
-            Mesh = new CapsuleMesh { Height = 0.10f, Radius = 0.022f },
-            // Rotate the capsule to lie along the controller's Z axis (aim direction).
-            Rotation = new Vector3(Mathf.DegToRad(90), 0, 0),
-            Position = new Vector3(0, -0.01f, 0.02f), // offset slightly forward/down for grip realism
-        };
-        var mat = new StandardMaterial3D
-        {
-            AlbedoColor = color,
-            Roughness = 0.35f,
-            Metallic = 0.15f,
-            EmissionEnabled = true,
-            Emission = color * 0.15f, // subtle glow for visibility in dark worlds
-        };
-        mesh.MaterialOverride = mat;
-        parent.AddChild(mesh);
-
-        // A small sphere at the tip to mark the "front" of the controller.
-        var tip = new MeshInstance3D
-        {
-            Name = "HandTip",
-            Mesh = new SphereMesh { Radius = 0.012f, Height = 0.024f },
-            Position = new Vector3(0, 0, -0.05f),
-            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        };
-        tip.MaterialOverride = new StandardMaterial3D
-        {
-            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
-            AlbedoColor = new Color(1, 1, 1, 0.6f),
-        };
-        parent.AddChild(tip);
-        return group;
-    }
 
     /// A procedural bare-hand visual: a small sphere on each tracked joint.
     ///
@@ -581,6 +546,26 @@ void fragment() {
 
     private float _calibrateWarnTimer;
 
+    /// How far the player's own arm reaches, shoulder to wrist, in metres.
+    ///
+    /// There is no way to measure this without asking the player to hold a calibration pose, and a
+    /// pose nobody performs is worth nothing — so it is estimated from the one body measurement
+    /// that *is* taken automatically. Shoulder-to-wrist is a stable fraction of stature across
+    /// adults (~0.36), and stature follows from the calibrated eye height, so a number good to a
+    /// couple of centimetres falls out of the existing calibration for free.
+    ///
+    /// Accuracy matters less than it looks: this feeds a *ratio* against the avatar's arm, so
+    /// being a centimetre out moves the avatar's hand by a couple of millimetres.
+    private float PlayerArmReach
+    {
+        get
+        {
+            if (!UI.DeviceProfile.Settings.VrArmScaling) return 0f;
+            float eye = _heightCalibrated ? _measuredEyeHeight : DefaultPlayerEyeHeight;
+            return eye / 0.93f * 0.36f;
+        }
+    }
+
     /// Toggle a built-in emote, matching `LocalPlayer.PlayEmote`. While an emote is playing the
     /// arm IK stands down — otherwise the controllers would fight the animation and the emote
     /// would read as a twitch.
@@ -646,7 +631,7 @@ void fragment() {
         }
 
         // Menu buttons stay live while a menu is open — that is how you close it again.
-        HandleButtons();
+        HandleButtons(dt);
         UpdatePointer();
 
         var planarSpeed = HandleLocomotion(dt);
@@ -656,6 +641,8 @@ void fragment() {
         UpdateAvatar(dt, planarSpeed);
         UpdateHoldHaptics(dt);
         UpdateWalkHaptics(dt, planarSpeed);
+
+        if (GlobalPosition.Y < VoidThreshold) RespawnRequested?.Invoke();
     }
 
     /// Physically walking in the guardian moves the camera inside the play space. Carry that
@@ -1158,10 +1145,30 @@ void fragment() {
         }, true);
     }
 
-    private void HandleButtons()
+    /// The button layout, which is VRChat's.
+    ///
+    /// Matching it is a deliberate compatibility decision rather than a stylistic one. Social VR
+    /// players arrive with the bindings already in their hands, and every deviation is a thing
+    /// they have to unlearn *while wearing a headset*, where there is nowhere to look them up. So:
+    ///
+    ///   A (right)            jump
+    ///   X (left)             mute
+    ///   B / Y (either)       quick menu on a tap, action menu on a hold
+    ///   stick click          action menu
+    ///   grip                 pick up            (see `UpdateHand`)
+    ///   trigger              use / interact     (see `UpdateHand`)
+    ///   left stick           locomote           (see `HandleLocomotion`)
+    ///   right stick          turn               (see `HandleTurn`)
+    ///   both menu buttons    recentre
+    ///
+    /// Recentring is the one binding with no VRChat equivalent — there it is the runtime's own
+    /// system gesture — and it used to sit on "left Y + right trigger", which is now the quick
+    /// menu plus interact, i.e. a combination players will hit constantly by accident. Holding
+    /// both menu buttons cannot be reached by mistake and follows VRChat's own precedent of
+    /// putting a rarely-wanted global action behind a two-handed menu-button hold.
+    private void HandleButtons(float dt)
     {
-        // Jump on the primary face button (A/X). Suppressed while a menu is up — the same button
-        // is the menu's select.
+        // Jump — A. Suppressed while a menu is up, where the same button is the menu's select.
         //
         // Explicitly latched. The floor check was never an edge trigger, whatever the old comment
         // claimed: holding A while grounded re-applied jump velocity on every single frame, so the
@@ -1171,22 +1178,63 @@ void fragment() {
             Velocity = Velocity with { Y = JumpVelocity };
         _jumpLatch = jump;
 
-        // Menu — latch so a held button opens the menu once. Bare hands have no buttons at all,
-        // so they get the wrist tap below instead.
-        bool menu = _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu)
-                    || WristTapped();
-        if (menu && !_menuLatch) MenuPressed?.Invoke();
-        _menuLatch = menu;
+        // Mute — X. Live while a menu is open: needing to close a menu before you can stop
+        // transmitting is exactly backwards.
+        bool mute = _leftHand.IsButtonPressed(ActPrimaryBtn);
+        if (mute && !_muteLatch) MutePressed?.Invoke();
+        _muteLatch = mute;
 
-        bool action = _rightHand.IsButtonPressed(ActSecondaryBtn);
-        if (action && !_actionLatch) ActionMenuPressed?.Invoke();
-        _actionLatch = action;
+        // B / Y — tap for the quick menu, hold for the action menu.
+        //
+        // The action menu fires the moment the hold threshold passes rather than on release, so
+        // the radial appears under a thumb that is still down, which is how it is then used. The
+        // release is swallowed in that case, or every hold would also open the quick menu behind
+        // it on the way out.
+        bool face = _leftHand.IsButtonPressed(ActSecondaryBtn) || _rightHand.IsButtonPressed(ActSecondaryBtn)
+                    || _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu);
+        if (face)
+        {
+            _faceHeld += dt;
+            if (!_faceConsumed && _faceHeld >= ActionMenuHoldSeconds)
+            {
+                _faceConsumed = true;
+                ActionMenuPressed?.Invoke();
+            }
+        }
+        else
+        {
+            if (_faceHeld > 0f && !_faceConsumed) MenuPressed?.Invoke();
+            _faceHeld = 0f;
+            _faceConsumed = false;
+        }
 
-        // Two-handed recenter: left secondary + right trigger.
-        bool recenter = _leftHand.IsButtonPressed(ActSecondaryBtn) && _rightHand.GetFloat(ActTrigger) > 0.8f;
-        if (recenter && !_recenterLatch) Recenter();
-        _recenterLatch = recenter;
+        // Stick click — the action menu directly, VRChat's "Action Menu Left/Right".
+        bool stickClick = _leftHand.IsButtonPressed(ActStickClick) || _rightHand.IsButtonPressed(ActStickClick);
+        if (stickClick && !_actionLatch) ActionMenuPressed?.Invoke();
+        _actionLatch = stickClick;
+
+        // Bare hands have no buttons at all, so they reach the quick menu by the wrist tap.
+        bool wrist = WristTapped();
+        if (wrist && !_menuLatch) MenuPressed?.Invoke();
+        _menuLatch = wrist;
+
+        // Recentre — both menu buttons, held.
+        bool bothMenu = _leftHand.IsButtonPressed(ActMenu) && _rightHand.IsButtonPressed(ActMenu);
+        _recenterHeld = bothMenu ? _recenterHeld + dt : 0f;
+        if (_recenterHeld >= RecenterHoldSeconds && !_recenterLatch) { _recenterLatch = true; Recenter(); }
+        if (!bothMenu) _recenterLatch = false;
     }
+
+    /// How long B/Y must be held before it means the action menu rather than the quick menu. Long
+    /// enough not to trip on a deliberate tap, short enough not to feel like a stuck button.
+    private const float ActionMenuHoldSeconds = 0.35f;
+    private const float RecenterHoldSeconds = 1.0f;
+
+    private float _faceHeld, _recenterHeld;
+    private bool _faceConsumed, _muteLatch;
+
+    /// Raised on the mute button, so `Main` can toggle the microphone.
+    public event System.Action MutePressed;
 
     /// The bare-hands menu gesture: touch one index fingertip to the other wrist and pinch.
     ///
@@ -1515,7 +1563,8 @@ void fragment() {
         // While a nod or shake is running the gesture owns the head bone; re-solving it from the
         // headset every frame would overwrite the gesture before anyone could see it.
         _ik?.Solve(headTransform, leftTarget, rightTarget,
-                   hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive);
+                   hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
+                   playerArmReach: PlayerArmReach);
 
         // Fingers go on last, for the same reason `HeadAim` does: whatever writes a bone last
         // wins, and the arm IK above rewrites the hand bone these hang off.
@@ -1562,8 +1611,6 @@ void fragment() {
 
             bool bare = wantTracking && track.Active;
 
-            // The controller bean and the player's real hand are mutually exclusive.
-            if (_handVisual[i] != null) _handVisual[i].Visible = !bare;
             if (_jointMarkers[i] != null)
             {
                 // Markers only stand in for an avatar hand that does not exist yet.
@@ -1572,21 +1619,39 @@ void fragment() {
                 if (wantMarkers) PlaceJointMarkers(i, track);
             }
 
+            HandGesture next;
             if (bare)
             {
-                System.Array.Copy(track.Curl, _curl[i], _curl[i].Length);
+                // Optical hands are measured, not looked up: the camera reports every finger
+                // independently, so the shape it sees IS the shape, and classification is the
+                // right way round.
+                System.Array.Copy(track.Curl, _target[i], _target[i].Length);
+                next = HandGestures.Classify(track.Curl, _gesture[i]);
             }
             else
             {
-                // No optical hands: synthesise the curl from what the controller does have.
+                // A controller has three signals, not twenty joints, so the gesture is read from a
+                // table and the fingers are posed from the gesture — never the other way round.
+                // See `HandGestures.FromController` for why measuring curls here cannot work.
                 bool thumbDown = hand.IsButtonPressed(ActPrimaryBtn)
                                  || hand.IsButtonPressed(ActSecondaryBtn)
+                                 || hand.IsButtonPressed(ActStickClick)
+                                 || hand.IsButtonPressed(ActStickTouch)
                                  || StickOf(hand, left: i == 0).LengthSquared() > 0.04f;
-                HandGestures.CurlsFromController(
-                    hand.GetFloat(ActTrigger), GripOf(hand, left: i == 0), thumbDown, _curl[i]);
+                float trigger = hand.GetFloat(ActTrigger);
+                float grip = GripOf(hand, left: i == 0);
+
+                next = HandGestures.FromController(thumbDown, trigger > GestureThreshold, grip > GestureThreshold);
+                if (next == HandGesture.Neutral)
+                    HandGestures.RelaxedCurls(trigger, grip, thumbDown, _target[i]);
+                else
+                    HandGestures.CurlsForGesture(next, _target[i]);
             }
 
-            var next = HandGestures.Classify(_curl[i], _gesture[i]);
+            // Fingers travel to the target rather than snapping to it. A hand that changes shape
+            // in a single frame is correct in every screenshot and wrong in motion.
+            HandGestures.Approach(_curl[i], _target[i], (float)delta);
+
             if (next != _gesture[i])
             {
                 _gesture[i] = next;

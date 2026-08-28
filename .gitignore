@@ -2,12 +2,15 @@
 .godot/
 *.translation
 
-# .NET build output (but keep bundled video tools in bin/)
+# .NET build output (but keep bundled video tools + Discord Social SDK in bin/)
 bin/*
 !bin/ffmpeg
 !bin/yt-dlp
 !bin/ffmpeg.exe
 !bin/yt-dlp.exe
+!bin/libdiscord_partner_sdk.so
+!bin/discord_partner_sdk.dll
+!bin/libdiscord_partner_sdk.dylib
 obj/
 *.user
 

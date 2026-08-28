@@ -12,6 +12,9 @@
     <RootNamespace>SerikaSocial</RootNamespace>
     <Nullable>disable</Nullable>
     <LangVersion>latest</LangVersion>
+    <!-- The Discord Social SDK P/Invoke layer (Discord/DiscordNative.cs) pins Discord_String
+         buffers on the stack when feeding the C API's pointer-typed optional setters. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <!--

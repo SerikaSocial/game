@@ -152,6 +152,12 @@ public partial class Main : Node3D
             Player.VrDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
             return;
         }
+        if (args.ContainsKey("serika-vrsim"))
+        {
+            Player.VrSimDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
+                args.GetValueOrDefault("out", null));
+            return;
+        }
         if (args.ContainsKey("serika-aimtest"))
         {
             Avatar.AimDiagnostic.Run(this, args.GetValueOrDefault("ska", null),
@@ -208,6 +214,12 @@ public partial class Main : Node3D
                 args.GetValueOrDefault("out", null));
             return;
         }
+        if (args.ContainsKey("serika-discordtest"))
+        {
+            Discord.DiscordDiagnostic.Run(this, args.GetValueOrDefault("lib", null),
+                args.GetValueOrDefault("wait", "8"));
+            return;
+        }
         if (args.ContainsKey("serika-smoke"))
         {
             _smoke = true;
@@ -231,6 +243,12 @@ public partial class Main : Node3D
 
         DeepLink.RegisterHandler();
         _pendingIntent = DeepLink.FromCommandLine();
+
+        // Discord Social SDK: rich presence + Join-on-Discord. Subscribed before Init so a
+        // connect that races to Ready can never beat the handler. Desktop-only and entirely
+        // best-effort — Init disables itself (never throws) when Discord isn't available.
+        Discord.DiscordRichPresence.JoinWorldRequested += OnDiscordJoinRequested;
+        Discord.DiscordRichPresence.Init();
 
         _hud = new Hud { Name = "Hud" };
         AddUi(_hud);
@@ -333,9 +351,16 @@ public partial class Main : Node3D
         // `SpawnLocalPlayer` from `EnterHome`, which never reached `HideLoading()` — the player
         // sat on "Loading your avatar…" forever. Exactly the same trap as InWorldHud.
         //
-        // Mounting it costs nothing: in VR this layer goes on the UI panel, and `Clear()` keeps
-        // it hidden unless something calls `Show()`, which only the desktop interactor does.
-        AddUi(_interactPrompt);
+        // Chrome, not a menu — and the claim that "mounting it costs nothing" was wrong.
+        //
+        // `Clear()` hides the prompt's inner `PanelContainer`; the `CanvasLayer` itself is created
+        // visible and is never hidden by anything. `VrUiSurface.HasInteractiveUi` asks whether any
+        // *layer* on the panel is visible, so on the panel this one answered yes from the moment it
+        // was mounted until the session ended — pinning the menu slab and the laser pointer in the
+        // player's face for the whole time they were in a world. That is the identical defect the
+        // mic indicator caused, in a layer added afterwards, which is why chrome is routed to the
+        // wrist by rule rather than case by case.
+        AddUi(_interactPrompt, chrome: true);
 
         _videoQueuePanel = new UI.VideoQueuePanel { Name = "VideoQueuePanel" };
         AddUi(_videoQueuePanel);
@@ -358,7 +383,12 @@ public partial class Main : Node3D
         AddUi(_inWorldHud, chrome: true);
 
         _chat = new ChatOverlay { Name = "ChatOverlay" };
-        AddUi(_chat);
+        // Also chrome: the overlay keeps its layer visible for as long as any message is still on
+        // screen (`Visible = IsTyping || _lines.Count > 0`), so the first chat line of a session
+        // would pin the panel and laser exactly as the interaction prompt did. Typing in VR goes
+        // through `VrKeyboard`, which is a real menu and mounts on the panel, so nothing
+        // interactive is lost by moving the log to the wrist.
+        AddUi(_chat, chrome: true);
         _chat.MessageSubmitted += OnChatSubmitted;
         _chat.Closed += OnChatClosed;
 
@@ -478,7 +508,26 @@ public partial class Main : Node3D
 
     public override void _ExitTree()
     {
+        // Tear the Discord client down cleanly while we still can — after the tree is gone
+        // there is no pump, and the SDK's IPC session would otherwise linger until process
+        // exit. Idempotent, so both this and a WM-close path can call it.
+        Discord.DiscordRichPresence.Shutdown();
         ClearInstanceLock();
+    }
+
+    /// A join accepted in Discord (friend clicked Join on our rich presence). The secret is
+    /// the serikasocial://world/<id> deep link, parsed by the manager. Pre-login we stash it
+    /// as the launch intent so the normal post-login routing lands there; afterwards we join
+    /// straight away — same path as clicking a world in the browser.
+    private void OnDiscordJoinRequested(string worldId)
+    {
+        if (_api == null)
+        {
+            _pendingIntent = new DeepLink.Intent(DeepLink.Kind.World, worldId);
+            _inWorldHud?.Toast("That world will open after you log in", 4);
+            return;
+        }
+        _ = JoinWorldById(worldId);
     }
 
     private static Avatar.SpringBoneSystem FindSpringBones(Node root)
@@ -899,6 +948,7 @@ public partial class Main : Node3D
             // VR used to stay a capsule — no avatar, so remote peers saw a featureless blob and
             // no bone pose was ever broadcast. It equips the same avatar the desktop rig does.
             vr.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
+            vr.RespawnRequested += RespawnLocal;
             _actionMenu?.SetCustomEmotes(vr.Avatar?.CustomEmotes);
             // The headset has no Esc key, so the controller face buttons are the only way in.
             // Pressing menu ALWAYS re-anchors the panel in front of the player, not just on the
@@ -927,6 +977,9 @@ public partial class Main : Node3D
                 SyncMenuHold();
             };
             vr.ActionMenuPressed += () => { RecentreVrPanel(); _actionMenu?.Open(); SyncMenuHold(); };
+            // Mute is on X, matching VRChat. Deliberately does not open or touch any menu: the
+            // point of a hardware mute is that it works in one motion without looking.
+            vr.MutePressed += () => { ToggleMic(); _quickMenu?.SetMic(_micActive); };
             // The two-handed recentre gesture moves the play space; bring the UI with it.
             vr.Recentred += RecentreVrPanel;
 
@@ -953,6 +1006,7 @@ public partial class Main : Node3D
             // Equip the cloud default avatar (or custom downloaded one). Falls back to the
             // procedural bean when no cloud default is available, so nobody is ever a capsule.
             desktop.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
+            desktop.RespawnRequested += RespawnLocal;
             _actionMenu?.SetCustomEmotes(desktop.Avatar?.CustomEmotes);
             // Restore persisted camera mode across world switches.
             if (_persistThirdPerson) desktop.SetFirstPerson(false);
@@ -1135,7 +1189,7 @@ public partial class Main : Node3D
 
             SaveSession(_api.SessionToken);
 
-            // Start rich presence (Discord IPC + Serika RPC).
+            // Start the Serika REST presence push (Discord presence started at boot).
             RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
             RpcPresence.UpdateState("Home", 1);
 
@@ -1170,7 +1224,7 @@ public partial class Main : Node3D
 
             SaveSession(_api.SessionToken);
 
-            // Start rich presence (Discord IPC + Serika RPC).
+            // Start the Serika REST presence push (Discord presence started at boot).
             RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
             RpcPresence.UpdateState("Home", 1);
 
@@ -1282,7 +1336,7 @@ public partial class Main : Node3D
                 _localTrust = ReadTrust(user);
                 GD.Print($"session restored as {_username}");
 
-                // Start rich presence (Discord IPC + Serika RPC).
+                // Start the Serika REST presence push (Discord presence started at boot).
                 RpcPresence.Init(ApiBaseUrl, _api.SessionToken, _api.AccountsToken);
                 RpcPresence.UpdateState("Home", 1);
 
@@ -2026,7 +2080,7 @@ public partial class Main : Node3D
         UI.InputMode.SetPlayable(true);
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
-        RpcPresence.UpdateState(_worldName, 1 + others);
+        RpcPresence.UpdateState(_worldName, 1 + others, 16, _currentWorldId);
         _chat.AddSystem($"Welcome to {_worldName}.");
     }
 
@@ -2037,7 +2091,7 @@ public partial class Main : Node3D
         if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
         _peerNames[p.PeerId] = p.Name;
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
-        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count);
+        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count, 16, _currentWorldId);
         _chat.AddSystem($"{p.Name} joined the world");
     }
 
@@ -2048,7 +2102,7 @@ public partial class Main : Node3D
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
         _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
-        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count);
+        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count, 16, _currentWorldId);
         _chat.AddSystem($"{name} left the world");
     }
 

@@ -42,7 +42,48 @@ Net/
   Codec/                   C# side of the wire format + golden tests
 Avatar/                    humanoid rig, LOD tiers, remote interpolation
 Auth/                      OAuth PKCE, loopback listener on fixed port 34517
+Discord/                   Discord Social SDK: P/Invoke layer, client wrapper, presence manager
 Worlds/
+```
+
+## Discord Social SDK
+
+Rich presence and Join-on-Discord run on the official **Discord Social SDK 1.10** (the native
+C ABI from `cdiscord.h`), P/Invoked from `Discord/DiscordNative.cs` — no hand-rolled IPC
+protocol to drift out of date.
+
+- **Binaries** live in `game/bin/` (`libdiscord_partner_sdk.so` / `discord_partner_sdk.dll` /
+  `libdiscord_partner_sdk.dylib`), each riding the export's pck via the per-preset
+  `include_filter` (same mechanism as ffmpeg). At boot `DiscordNative.EnsureLoaded` extracts
+  the platform's copy to `user://bin/` under a **version-stamped name** and loads it via
+  `NativeLibrary` — dlopen can't read inside a pck, and the stamp means an SDK upgrade
+  replaces the stale extraction on the next boot. Search order: `SERIKA_DISCORD_LIB` env →
+  beside the executable → pck extraction → system path.
+- **Presence** (`Discord/DiscordRichPresence.cs`): connects at boot, pumps
+  `Discord_RunCallbacks` from `Main._Process`, re-pushes the activity on world joins, peer
+  count changes, and reconnects. Retries with capped backoff (5 s → 60 s) so a Discord that
+  starts after the game is still picked up. Everything is main-thread and failure-disabled —
+  no Discord, no library, no crash.
+- **Join**: the activity's join secret is the `serikasocial://world/<id>` deep link itself.
+  With the game running it arrives in-process (`SetActivityJoinCallback` →
+  `Main.OnDiscordJoinRequested` → `JoinWorldById`); cold, Discord launches the registered
+  launch command and the same string lands in argv, which `DeepLink.FromCommandLine` already
+  parses. Party size/max come from the live relay roster.
+- **Config**: `SERIKA_DISCORD_APP_ID` overrides the default application id;
+  `SERIKA_DISCORD_LOG=verbose` raises SDK logging to Info.
+- **Android**: the SDK ships there as an AAR with Java glue — not wired; the manager
+  disables itself on `OS.HasFeature("android")`.
+- **arRPC caveat**: an `arRPC` bridge (Vesktop/Vencord setups) answers the local IPC socket
+  but only implements the classic `SET_ACTIVITY` protocol — the official SDK's authenticated
+  gateway handshake fails there with close code 4004. On such machines Discord presence is
+  silently absent (by design — one canonical code path); the official Discord desktop client
+  is required for the feature.
+
+Diagnostic (verifies library load, marshal/free, full client lifecycle, and — where a real
+Discord client is logged in — a live presence push):
+
+```bash
+env -u DISPLAY -u WAYLAND_DISPLAY $GODOT --headless --path game -- --serika-discordtest [--wait 8]
 ```
 
 ## Notes
