@@ -314,6 +314,18 @@ public static class DeviceProfile
         /// a player who is fine with smooth locomotion can still blink across a room.
         public static bool VrDashTeleport = true;
 
+        /// Which hand walks. Default is the RIGHT stick, with turning on the left.
+        ///
+        /// The opposite of the VRChat/Godot convention on purpose — this is what the project owner
+        /// asked for after using it. Both layouts are here because stick-hand preference is close
+        /// to religious and neither is wrong.
+        public static bool VrMoveOnRightStick = true;
+
+        /// Push forward on the stick, walk forward. Off by default because that is what the
+        /// hardware reports here; kept as a setting because thumbstick Y sign is a genuine
+        /// per-runtime difference, not something to hardcode and hope.
+        public static bool VrInvertForward;
+
         /// Optical hand tracking: use bare hands when the runtime sees them, drive the avatar's
         /// fingers from the joints, and put the UI ray on the index fingertip.
         public static bool VrHandTracking = true;
@@ -389,6 +401,8 @@ public static class DeviceProfile
             VrLocomotion = (Locomotion)(int)cfg.GetValue("vr", "locomotion", (int)VrLocomotion);
             VrMoveOrientation = (MoveOrientation)(int)cfg.GetValue("vr", "move_orientation", (int)VrMoveOrientation);
             VrDashTeleport = (bool)cfg.GetValue("vr", "dash_teleport", VrDashTeleport);
+            VrInvertForward = (bool)cfg.GetValue("vr", "invert_forward", VrInvertForward);
+            VrMoveOnRightStick = (bool)cfg.GetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
             VrHandTracking = (bool)cfg.GetValue("vr", "hand_tracking", VrHandTracking);
             VrFingerPosing = (bool)cfg.GetValue("vr", "finger_posing", VrFingerPosing);
             VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
@@ -425,6 +439,8 @@ public static class DeviceProfile
             cfg.SetValue("vr", "locomotion", (int)VrLocomotion);
             cfg.SetValue("vr", "move_orientation", (int)VrMoveOrientation);
             cfg.SetValue("vr", "dash_teleport", VrDashTeleport);
+            cfg.SetValue("vr", "invert_forward", VrInvertForward);
+            cfg.SetValue("vr", "move_on_right_stick", VrMoveOnRightStick);
             cfg.SetValue("vr", "hand_tracking", VrHandTracking);
             cfg.SetValue("vr", "finger_posing", VrFingerPosing);
             cfg.SetValue("vr", "wrist_hud", VrWristHud);

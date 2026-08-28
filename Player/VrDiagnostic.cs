@@ -28,6 +28,8 @@ namespace SerikaSocial.Player;
 ///   JUMP   — holding the jump button must produce exactly one jump, not one per frame.
 ///   STICK  — stick locomotion must move the body.
 ///   WALL   — physically walking in the guardian must be stopped by world collision.
+///   RESEAT — a tracking discontinuity (headset removed and put back on) must not catapult the
+///            player; the jump is absorbed by the play space.
 ///   DRIFT  — standing still off-centre in the room must NOT move the body continuously. The
 ///            body catches up to the head once and stops; it must not treat the head's standing
 ///            offset as a velocity.
@@ -109,8 +111,14 @@ public static partial class VrDiagnostic
         private bool _airborne;
 
         // Injected controller headings, in play-space local coordinates.
-        private float _leftYaw;    // yaws the left controller for the hand-relative movement check
-        private float _rightPitch; // tips the right controller down so the dash arc finds the floor
+        private float _moveYaw;   // yaws the WALKING hand for the hand-relative movement check
+        private float _turnPitch; // tips the TURNING hand down so the dash arc finds the floor
+
+        private Node3D MoveHandNode =>
+            UI.DeviceProfile.Settings.VrMoveOnRightStick ? _right : _left;
+
+        private Node3D TurnHandNode =>
+            UI.DeviceProfile.Settings.VrMoveOnRightStick ? _left : _right;
 
         private sealed class Phase
         {
@@ -134,6 +142,24 @@ public static partial class VrDiagnostic
             // in place before VrPlayer reads them rather than a frame behind.
             ProcessPhysicsPriority = -100;
             Build();
+        }
+
+        /// Drive the stick that WALKS, and the stick that TURNS, under the current layout.
+        ///
+        /// The hands are swappable (`VrMoveOnRightStick`), so a suite hardcoded to the left stick
+        /// silently stops exercising locomotion the moment the default flips — which is exactly
+        /// what happened: STICK, ORIENT and DASH all went to zero travel while the product was
+        /// fine.
+        private static void SetMoveStick(Vector2 v)
+        {
+            if (UI.DeviceProfile.Settings.VrMoveOnRightStick) VrTestInput.RightStick = v;
+            else VrTestInput.LeftStick = v;
+        }
+
+        private static void SetTurnStick(Vector2 v)
+        {
+            if (UI.DeviceProfile.Settings.VrMoveOnRightStick) VrTestInput.LeftStick = v;
+            else VrTestInput.RightStick = v;
         }
 
         private void Add(string name, Action enter, int frames, Action exit = null, Action<int> tick = null)
@@ -165,7 +191,7 @@ public static partial class VrDiagnostic
             // Half-stick forward with the left grip fully squeezed: a player walking while
             // carrying something. Must be walk speed, and must match the ungripped case.
             Add("sprint-gripped",
-                () => { Recentre(); VrTestInput.LeftStick = new Vector2(0, -0.5f); VrTestInput.LeftGrip = 1f; },
+                () => { Recentre(); SetMoveStick(new Vector2(0, MoveFwd * 0.5f)); VrTestInput.LeftGrip = 1f; },
                 30, () => _grippedSpeed = Planar(_vr.Velocity));
 
             Add("sprint-relaxed",
@@ -174,11 +200,11 @@ public static partial class VrDiagnostic
 
             // Stick to the rim is the sprint gesture now, and must be clearly faster.
             Add("sprint-rim",
-                () => { Recentre(); VrTestInput.LeftStick = new Vector2(0, -1f); },
+                () => { Recentre(); SetMoveStick(new Vector2(0, MoveFwd)); },
                 30, () =>
                 {
                     _rimSpeed = Planar(_vr.Velocity);
-                    VrTestInput.LeftStick = Vector2.Zero;
+                    SetMoveStick(Vector2.Zero);
 
                     bool ok = Mathf.Abs(_grippedSpeed - _relaxedSpeed) < 0.05f
                               && _rimSpeed > _relaxedSpeed + 0.5f;
@@ -215,11 +241,11 @@ public static partial class VrDiagnostic
                 {
                     Recentre();
                     _stickStart = _vr.GlobalPosition;
-                    VrTestInput.LeftStick = new Vector2(0, -0.6f);
+                    SetMoveStick(new Vector2(0, MoveFwd * 0.6f));
                 },
                 60, () =>
                 {
-                    VrTestInput.LeftStick = Vector2.Zero;
+                    SetMoveStick(Vector2.Zero);
                     var travelled = (_vr.GlobalPosition - _stickStart) with { Y = 0 };
                     bool ok = travelled.Length() > 0.5f;
                     _ok &= ok;
@@ -284,6 +310,31 @@ public static partial class VrDiagnostic
                 _head = new Vector3(0, 1.62f, 0);
             });
 
+            // ── RESEAT ───────────────────────────────────────────────────────────────
+            // Take the headset off and put it back on: the runtime re-seats the reference space
+            // and hands back a pose metres away from the last one. The body must NOT interpret
+            // that as walking.
+            Add("reseat-place", () =>
+            {
+                Recentre();
+                VrTestInput.LeftStick = Vector2.Zero;
+                VrTestInput.RightStick = Vector2.Zero;
+                _head = new Vector3(0, 1.62f, 0);
+            }, 20, () => _reseatStart = _vr.GlobalPosition);
+
+            // One frame with the head teleported 4 m sideways, exactly as a re-seat reports it.
+            Add("reseat-jump", () => _head = new Vector3(4.0f, 1.62f, 3.0f), 30, () =>
+            {
+                var moved = (_vr.GlobalPosition - _reseatStart) with { Y = 0 };
+                bool ok = moved.Length() < 0.5f;
+                _ok &= ok;
+                GD.Print($"VRTEST RESEAT head jumped 5.0 m in one frame → body moved " +
+                         $"{moved.Length():F2} m  " +
+                         $"{(ok ? "ok — the jump is absorbed by the play space"
+                                : "FAIL — a tracking discontinuity catapults the player")}");
+                _head = new Vector3(0, 1.62f, 0);
+            });
+
             // ── ORIENT ───────────────────────────────────────────────────────────────
             // Hand-relative movement: yaw the left controller 90° away from the head and walk
             // forward. Travel must follow the controller, not the gaze.
@@ -296,18 +347,18 @@ public static partial class VrDiagnostic
             {
                 Recentre();
                 UI.DeviceProfile.Settings.VrMoveOrientation = UI.DeviceProfile.Settings.MoveOrientation.Hand;
-                _leftYaw = Mathf.Pi * 0.5f;
+                _moveYaw = Mathf.Pi * 0.5f;
                 _stickStart = _vr.GlobalPosition;
             }, 5);
 
-            Add("orient", () => VrTestInput.LeftStick = new Vector2(0, -0.8f), 60, () =>
+            Add("orient", () => SetMoveStick(new Vector2(0, MoveFwd * 0.8f)), 60, () =>
             {
-                VrTestInput.LeftStick = Vector2.Zero;
+                SetMoveStick(Vector2.Zero);
                 UI.DeviceProfile.Settings.VrMoveOrientation = UI.DeviceProfile.Settings.MoveOrientation.Head;
 
                 var travel = (_vr.GlobalPosition - _stickStart) with { Y = 0 };
                 var headFwd = (-_cam.GlobalTransform.Basis.Z with { Y = 0 }).Normalized();
-                var handFwd = (-_left.GlobalTransform.Basis.Z with { Y = 0 }).Normalized();
+                var handFwd = (-MoveHandNode.GlobalTransform.Basis.Z with { Y = 0 }).Normalized();
 
                 if (travel.Length() < 0.2f)
                 {
@@ -326,7 +377,7 @@ public static partial class VrDiagnostic
                              $"controller heading and {toHead:F1}° off the gaze  " +
                              $"{(ok ? "ok — hand-relative movement follows the hand" : "FAIL — movement ignores the controller heading")}");
                 }
-                _leftYaw = 0f;
+                _moveYaw = 0f;
             });
 
             // ── DASH ─────────────────────────────────────────────────────────────────
@@ -338,13 +389,13 @@ public static partial class VrDiagnostic
                 UI.DeviceProfile.Settings.VrLocomotion = UI.DeviceProfile.Settings.Locomotion.Smooth;
                 UI.DeviceProfile.Settings.VrDashTeleport = true;
                 // Aim the right controller down-forward so the arc lands on the floor ahead.
-                _rightPitch = -Mathf.Pi * 0.12f;
+                _turnPitch = -Mathf.Pi * 0.12f;
                 _stickStart = _vr.GlobalPosition;
             }, 10);
 
             // Hold forward to aim, then release: the teleport commits on release.
-            Add("dash-aim", () => VrTestInput.RightStick = new Vector2(0, -1f), 20);
-            Add("dash-fire", () => VrTestInput.RightStick = Vector2.Zero, 10, () =>
+            Add("dash-aim", () => SetTurnStick(new Vector2(0, -1f)), 20);
+            Add("dash-fire", () => SetTurnStick(Vector2.Zero), 10, () =>
             {
                 _dashTravel = ((_vr.GlobalPosition - _stickStart) with { Y = 0 }).Length();
             });
@@ -356,12 +407,12 @@ public static partial class VrDiagnostic
                 _startYaw = _vr.GlobalRotation.Y;
             }, 10);
             // A diagonal: full forward AND full sideways. Turning owns this, so no teleport.
-            Add("dash-turn-aim", () => VrTestInput.RightStick = new Vector2(1f, -1f).Normalized(), 20);
-            Add("dash-turn-fire", () => VrTestInput.RightStick = Vector2.Zero, 10, () =>
+            Add("dash-turn-aim", () => SetTurnStick(new Vector2(1f, -1f).Normalized()), 20);
+            Add("dash-turn-fire", () => SetTurnStick(Vector2.Zero), 10, () =>
             {
                 float turnTravel = ((_vr.GlobalPosition - _stickStart) with { Y = 0 }).Length();
                 float turned = Mathf.RadToDeg(Mathf.Abs(Mathf.AngleDifference(_startYaw, _vr.GlobalRotation.Y)));
-                _rightPitch = 0f;
+                _turnPitch = 0f;
 
                 // The diagonal must TURN, and must not teleport. It is not checked against zero
                 // travel, because turning legitimately moves the body a little: `RotateAroundHead`
@@ -421,6 +472,10 @@ public static partial class VrDiagnostic
 
         private float _dashTravel;
         private Vector3 _driftStart;
+        private Vector3 _reseatStart;
+
+        /// Stick Y that means "walk forward" under the current invert setting.
+        private static float MoveFwd => UI.DeviceProfile.Settings.VrInvertForward ? -1f : 1f;
         private float _startYaw;
         private bool _panelIdle;
         private UI.VrUiSurface _surface;
@@ -732,8 +787,10 @@ public static partial class VrDiagnostic
             _right.Position = _head + new Vector3(0.25f, -0.45f, -0.15f);
             // Controller headings. Hand-relative movement and the teleport arc both read these,
             // so they are posed here alongside the positions rather than nudged inside a phase.
-            _left.Rotation = new Vector3(0, _leftYaw, 0);
-            _right.Rotation = new Vector3(_rightPitch, 0, 0);
+            // By role, not by side: ORIENT yaws the hand that WALKS and DASH pitches the hand
+            // that TURNS, and which physical controller that is depends on the layout setting.
+            MoveHandNode.Rotation = new Vector3(0, _moveYaw, 0);
+            TurnHandNode.Rotation = new Vector3(_turnPitch, 0, 0);
 
             _frames++;
             if (_frames >= phase.Frames)

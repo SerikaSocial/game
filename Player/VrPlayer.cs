@@ -625,7 +625,11 @@ void fragment() {
 
     public override void _PhysicsProcess(double delta)
     {
-        float dt = (float)delta;
+        // A resumed session delivers one enormous delta covering however long the headset was
+        // off. Gravity and every velocity integrator act on it at once, so the player is fired
+        // through the floor before the first tracked frame arrives. Clamp to a long-but-sane
+        // frame; nothing here needs to simulate a real 30-second step.
+        float dt = Mathf.Min((float)delta, 0.1f);
 
         TryAutoCalibrate();
         UpdateFbtTrackers();
@@ -682,6 +686,24 @@ void fragment() {
         // the origin correction below reduces, so it converges to zero after one frame.
         var camFromBody = _origin.Position + _camera.Position;
         var flat = new Vector3(camFromBody.X, 0, camFromBody.Z);
+
+        // Take the headset off and put it back on and the runtime drops tracking, re-seats the
+        // reference space and hands back a pose metres from the last one. Treating that as
+        // "the player walked there" catapults the body across the world and throws the avatar,
+        // the vignette and the head-velocity prediction with it — which is what "glitches out
+        // like crazy if I remove the headset once" is.
+        //
+        // A real person cannot walk two metres between frames, so a jump that large is a
+        // discontinuity by definition. Absorb it into the play space instead: the body stays
+        // where it was and the world stays put, which is the correct outcome for a player who
+        // has not actually moved.
+        if (flat.Length() > TrackingJumpMetres)
+        {
+            _origin.Position -= new Vector3(flat.X, 0, flat.Z);
+            ResetHeadTracking();
+            GD.Print($"VR: absorbed a {flat.Length():0.00} m tracking jump (headset re-seated?)");
+            return;
+        }
         // Saccadic deadzone (1.5cm) to ignore micro HMD tracking jitter so the player
         // body does not jitter or slide down slopes when standing completely still.
         if (flat.Length() < 0.015f) return;
@@ -737,6 +759,21 @@ void fragment() {
     private Quaternion _prevHeadRot;
     private bool _hasPrevHeadRot;
 
+    /// Beyond this, a frame-to-frame head move is a tracking discontinuity, not walking.
+    private const float TrackingJumpMetres = 1.0f;
+
+    /// Forget the differentiated head state. The velocity and angular velocity are derived by
+    /// differencing successive poses, so a discontinuity produces an enormous bogus velocity that
+    /// the IK prediction then acts on for several frames.
+    private void ResetHeadTracking()
+    {
+        _headVel = Vector3.Zero;
+        _headAngVel = Vector3.Zero;
+        _prevHeadLocal = _camera.Position;
+        _prevHeadRot = _camera.Transform.Basis.GetRotationQuaternion();
+        _hasPrevHeadRot = false;
+    }
+
     /// Returns planar speed so the caller can drive both the vignette and the walk cycle.
     ///
     /// There is no bare-hands special case here any more. There used to be an
@@ -751,12 +788,13 @@ void fragment() {
         var v = Velocity;
         if (!IsOnFloor()) v.Y -= _gravity * dt;
 
-        var stick = ControlsEnabled ? StickOf(_leftHand, left: true) : Vector2.Zero;
+        var moveHand = MoveHand;
+        var stick = ControlsEnabled ? StickOf(moveHand, left: moveHand == _leftHand) : Vector2.Zero;
 
         if (UI.DeviceProfile.Settings.VrLocomotion == UI.DeviceProfile.Settings.Locomotion.Teleport)
         {
             v.X = 0; v.Z = 0;
-            UpdateTeleport(stick, _leftHand);
+            UpdateTeleport(stick, moveHand);
         }
         else
         {
@@ -765,7 +803,11 @@ void fragment() {
             {
                 var (fwd, right) = MoveBasis();
                 float speed = IsSprinting(stick) ? SprintSpeed : WalkSpeed;
-                var dir = (fwd * -move.Y + right * move.X) * speed;
+                // Thumbstick Y sign is a per-runtime detail, not a constant: this shipped as
+                // `-move.Y`, which walked backwards on the Quest's OpenXR runtime. The setting
+                // exists because hardcoding one sign and hoping is what produced that bug.
+                float forward = UI.DeviceProfile.Settings.VrInvertForward ? -move.Y : move.Y;
+                var dir = (fwd * forward + right * move.X) * speed;
                 v.X = dir.X;
                 v.Z = dir.Z;
             }
@@ -779,11 +821,12 @@ void fragment() {
             // an unused input — turning is on its X axis.
             if (UI.DeviceProfile.Settings.VrDashTeleport)
             {
-                var right = ControlsEnabled ? StickOf(_rightHand, left: false) : Vector2.Zero;
+                var turnHand = TurnHand;
+                var right = ControlsEnabled ? StickOf(turnHand, left: turnHand == _leftHand) : Vector2.Zero;
                 // Only the forward push arms the dash, and only when the stick is not being used
                 // to turn, so a diagonal flick turns rather than blinking you across the room.
                 var dashStick = Mathf.Abs(right.X) < TurnDeadzone ? right : Vector2.Zero;
-                UpdateTeleport(dashStick, _rightHand);
+                UpdateTeleport(dashStick, turnHand);
             }
         }
 
@@ -883,6 +926,14 @@ void fragment() {
                  $"pos=({GlobalPosition.X:0.0},{GlobalPosition.Y:0.0},{GlobalPosition.Z:0.0})");
     }
 
+    /// The hand that walks, and the hand that turns. Swappable because stick-hand preference is
+    /// close to religious and neither layout is wrong; the default here is movement on the RIGHT.
+    private XRController3D MoveHand =>
+        UI.DeviceProfile.Settings.VrMoveOnRightStick ? _rightHand : _leftHand;
+
+    private XRController3D TurnHand =>
+        UI.DeviceProfile.Settings.VrMoveOnRightStick ? _leftHand : _rightHand;
+
     /// The basis stick input is interpreted against, per the movement-orientation setting.
     ///
     /// Head-relative walks where you look. Hand-relative walks where the left controller points,
@@ -894,7 +945,7 @@ void fragment() {
         if (UI.DeviceProfile.Settings.VrMoveOrientation != UI.DeviceProfile.Settings.MoveOrientation.Hand)
             return HeadBasis();
 
-        var b = _leftHand.GlobalTransform.Basis;
+        var b = MoveHand.GlobalTransform.Basis;
         var fwd = -b.Z with { Y = 0 };
         var right = b.X with { Y = 0 };
         // Pointing the controller straight up or down leaves no horizontal heading at all, and
@@ -936,7 +987,8 @@ void fragment() {
     /// Snap turning is the default because continuous rotation is the biggest sickness trigger.
     private void HandleTurn(float dt)
     {
-        float x = StickOf(_rightHand, left: false).X;
+        var turnHand = TurnHand;
+        float x = StickOf(turnHand, left: turnHand == _leftHand).X;
 
         if (UI.DeviceProfile.Settings.VrSnapTurn)
         {
@@ -946,7 +998,7 @@ void fragment() {
                 float angle = Mathf.DegToRad(UI.DeviceProfile.Settings.VrSnapTurnAngle) * Mathf.Sign(x);
                 RotateAroundHead(-angle);
                 _snapCooldown = SnapTurnCooldown;
-                Pulse(_rightHand, 0.35f, 0.04f);
+                Pulse(turnHand, 0.35f, 0.04f);
             }
             else if (Mathf.Abs(x) <= TurnDeadzone)
             {
