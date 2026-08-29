@@ -120,7 +120,7 @@ public partial class VideoManager : Node
 
     public void Enqueue(string url, string addedBy, bool fromNet)
     {
-        url = (url ?? "").Trim();
+        url = CanonicalMediaUrl((url ?? "").Trim());
         if (string.IsNullOrEmpty(url)) return;
         if (fromNet && AlreadyHas(url)) return;
         _queue.Add(new Item { Url = url, Title = ShortLabel(url), AddedBy = addedBy });
@@ -201,24 +201,38 @@ public partial class VideoManager : Node
 
         try
         {
-            var resolved = await _api.ResolveVideoAsync(item.Url);
+            JsonElement resolved = default;
+            bool haveResolved = false;
+            try
+            {
+                resolved = await _api.ResolveVideoAsync(item.Url);
+                haveResolved = true;
+            }
+            catch (Exception e)
+            {
+                // YouTube bot-checks datacenter IPs. Fall through to local yt-dlp/ffmpeg
+                // instead of giving up — that's the path that works on this machine.
+                GD.Print($"[VideoManager] API resolve failed ({e.Message}) — trying local transcode");
+            }
             if (gen != _generation) return; // skipped/cleared while we were resolving
 
-            item.Title = resolved.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String
-                ? t.GetString() : item.Title;
-            item.ThumbnailUrl = resolved.TryGetProperty("thumbnail", out var th) && th.ValueKind == JsonValueKind.String
-                ? th.GetString() : null;
-            QueueChanged?.Invoke();
-
-            // Fetch a thumbnail so the screen isn't black while resolving/if playback fails.
-            if (!string.IsNullOrEmpty(item.ThumbnailUrl))
+            if (haveResolved)
             {
-                var jpg = await _api.GetImageBytesAsync(item.ThumbnailUrl);
-                if (gen == _generation && jpg != null)
-                    foreach (var s in _screens) s.ShowThumbnail(jpg);
+                item.Title = resolved.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String
+                    ? t.GetString() : item.Title;
+                item.ThumbnailUrl = resolved.TryGetProperty("thumbnail", out var th) && th.ValueKind == JsonValueKind.String
+                    ? th.GetString() : null;
+                QueueChanged?.Invoke();
+
+                if (!string.IsNullOrEmpty(item.ThumbnailUrl))
+                {
+                    var jpg = await _api.GetImageBytesAsync(item.ThumbnailUrl);
+                    if (gen == _generation && jpg != null)
+                        foreach (var s in _screens) s.ShowThumbnail(jpg);
+                }
             }
 
-            var track = PickDecodableTrack(resolved);
+            var track = haveResolved ? PickDecodableTrack(resolved) : null;
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
@@ -571,24 +585,20 @@ public partial class VideoManager : Node
 
         try
         {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = ytdlpPath,
-                Arguments = "--no-warnings --no-playlist -g " +
-                            $"-f \"bv*[height<={MaxHeight}]+ba/b[height<={MaxHeight}]/b\" \"{url}\"",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            using var p = System.Diagnostics.Process.Start(psi);
+            using var p = StartYtDlp(ytdlpPath, url);
             if (p == null) return (null, null);
 
             var readOut = p.StandardOutput.ReadToEndAsync();
+            var readErr = p.StandardError.ReadToEndAsync();
             // 30 s is generous for a metadata-only call; the old code allowed 90 s because it
             // was downloading the whole video here.
             if (!await Task.Run(() => p.WaitForExit(30_000))) { try { p.Kill(); } catch { } return (null, null); }
-            if (p.ExitCode != 0) return (null, null);
+            if (p.ExitCode != 0)
+            {
+                string err = (await readErr).Trim();
+                GD.PrintErr($"[VideoManager] yt-dlp failed: {err}");
+                return (null, null);
+            }
 
             var lines = (await readOut).Split('\n', StringSplitOptions.RemoveEmptyEntries);
             string v = lines.Length > 0 ? lines[0].Trim() : null;
@@ -708,12 +718,84 @@ public partial class VideoManager : Node
         }
     }
 
+    /// Strip playlist / radio junk so yt-dlp fetches one video, not a mix.
+    private static string CanonicalMediaUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+        try
+        {
+            var u = new Uri(url);
+            string host = u.Host.ToLowerInvariant();
+            if (host.Contains("youtu.be"))
+            {
+                string id = u.AbsolutePath.Trim('/');
+                int slash = id.IndexOf('/');
+                if (slash >= 0) id = id[..slash];
+                if (id.Length > 0) return "https://www.youtube.com/watch?v=" + id;
+            }
+            if (host.Contains("youtube.com"))
+            {
+                string id = null;
+                foreach (var part in (u.Query ?? "").TrimStart('?').Split('&'))
+                {
+                    int eq = part.IndexOf('=');
+                    if (eq > 0 && part[..eq] == "v")
+                    {
+                        id = Uri.UnescapeDataString(part[(eq + 1)..]);
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(id) && u.AbsolutePath.StartsWith("/shorts/", StringComparison.OrdinalIgnoreCase))
+                    id = u.AbsolutePath["/shorts/".Length..].Trim('/');
+                if (!string.IsNullOrEmpty(id))
+                    return "https://www.youtube.com/watch?v=" + id;
+            }
+        }
+        catch { }
+        return url;
+    }
+
+    private static System.Diagnostics.Process StartYtDlp(string ytdlpPath, string url)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = ytdlpPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var a in new[]
+        {
+            "--no-warnings", "--no-playlist",
+            "--extractor-args", "youtube:player_client=android,tv_embedded,web",
+            "-g",
+            "-f", $"18/b[height<={MaxHeight}]/bv*[height<={MaxHeight}]+ba/b",
+            url,
+        })
+            psi.ArgumentList.Add(a);
+        return System.Diagnostics.Process.Start(psi);
+    }
+
     private static string FindBinary(string name)
     {
         EnsureBundledBinsExtracted();
 
         bool isWindows = OS.GetName() == "Windows";
         string exeName = isWindows ? name + ".exe" : name;
+
+        // yt-dlp ages in days — prefer a system copy over the one we extracted months ago.
+        // ffmpeg stays bundled-first: the static build is what LoopbackMediaProxy expects.
+        bool preferSystem = name == "yt-dlp";
+        string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+        if (preferSystem)
+        {
+            string[] first = isWindows
+                ? new[] { System.IO.Path.Combine(home, ".local", "bin", exeName) }
+                : new[] { $"{home}/.local/bin/{name}", "/usr/local/bin/" + name, "/usr/bin/" + name };
+            foreach (var c in first)
+                try { if (System.IO.File.Exists(c)) return c; } catch { }
+        }
 
         // 1. Prepackaged binaries extracted to user://bin/
         string userBin = ProjectSettings.GlobalizePath("user://bin");
@@ -733,7 +815,6 @@ public partial class VideoManager : Node
         catch { }
 
         // 3. System PATH locations
-        string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
         string[] candidates = isWindows
             ? new[] {
                 System.IO.Path.Combine(home, ".local", "bin", exeName),

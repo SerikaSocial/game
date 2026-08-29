@@ -221,6 +221,9 @@ public static class WorldLoader
         // gets the device profile's shadow settings stamped onto it like any other.
         EnsureKeyLight(instance as Node3D ?? root, lighting);
 
+        if (lighting == "dark" && UI.DeviceProfile.IsStandaloneXr)
+            ApplyStandaloneDarkVisibility(root, instance);
+
         // Cloud worlds bring their own lights and environment, all authored at full quality.
         // Stamp the device profile over them, or a Quest ends up rendering a desktop-tier world.
         UI.DeviceProfile.ApplyToScene(root);
@@ -654,8 +657,8 @@ public static class WorldLoader
                 // so you can still walk the aisles; desktop keeps the theatrical dark.
                 if (UI.DeviceProfile.IsStandaloneXr)
                 {
-                    ambient = new Color(0.22f, 0.20f, 0.26f);
-                    ambientEnergy = 0.35f;
+                    ambient = new Color(0.45f, 0.42f, 0.48f);
+                    ambientEnergy = 0.85f;
                 }
                 else
                 {
@@ -801,7 +804,11 @@ public static class WorldLoader
         var lights = new System.Collections.Generic.List<Light3D>();
         CollectLights(root, lights);
         foreach (var l in lights)
-            if (l is DirectionalLight3D) return;
+        {
+            if (l is not DirectionalLight3D) continue;
+            // A directional that exists but contributes nothing still blocks the fill.
+            if (l.Visible && l.LightEnergy >= 0.25f) return;
+        }
 
         var (energy, colour, pitch) = mode switch
         {
@@ -810,7 +817,7 @@ public static class WorldLoader
             // Warm, low, lamp-like to match the interior's own fixtures.
             "lit" => (0.7f, new Color(1.0f, 0.92f, 0.80f), -38f),
             // Quest cinema: enough to read the room, not enough to kill the sconces.
-            "dark" => (0.45f, new Color(1.0f, 0.92f, 0.82f), -48f),
+            "dark" => (1.1f, new Color(1.0f, 0.94f, 0.88f), -50f),
             // Outdoor: a proper sun, slightly warm, at a mid-afternoon angle.
             _ => (1.15f, new Color(1.0f, 0.96f, 0.90f), -45f),
         };
@@ -833,6 +840,46 @@ public static class WorldLoader
 
         GD.Print($"WorldLoader: added key light for '{mode}' " +
                  $"(energy {energy}, shadows {sun.ShadowEnabled})");
+    }
+
+    /// Quest / Android cinema: Compatibility ignores most omnis, unshaded meshes ignore
+    /// lights, and the software occluder can hide the whole interior. Force a readable room.
+    private static void ApplyStandaloneDarkVisibility(Node root, Node instance)
+    {
+        ProjectSettings.SetSetting("rendering/occlusion_culling/use_occlusion_culling", false);
+
+        foreach (var node in root.FindChildren("*", "WorldEnvironment", true, false))
+        {
+            if (node is not WorldEnvironment we || we.Environment == null) continue;
+            var env = we.Environment;
+            env.AmbientLightSource = Godot.Environment.AmbientSource.Color;
+            env.AmbientLightColor = new Color(0.45f, 0.42f, 0.48f);
+            env.AmbientLightEnergy = Mathf.Max(env.AmbientLightEnergy, 0.85f);
+            env.BackgroundMode = Godot.Environment.BGMode.Color;
+            env.BackgroundColor = new Color(0.06f, 0.05f, 0.08f);
+            env.SsaoEnabled = false;
+            env.SsrEnabled = false;
+        }
+
+        if (instance != null)
+        {
+            foreach (var node in instance.FindChildren("*", "MeshInstance3D", true, false))
+            {
+                if (node is not MeshInstance3D mi || mi.Mesh == null) continue;
+                for (int i = 0; i < mi.Mesh.GetSurfaceCount(); i++)
+                {
+                    if (mi.GetActiveMaterial(i) is not BaseMaterial3D mat) continue;
+                    if (mat.ShadingMode == BaseMaterial3D.ShadingModeEnum.Unshaded)
+                    {
+                        var dup = (BaseMaterial3D)mat.Duplicate();
+                        dup.ShadingMode = BaseMaterial3D.ShadingModeEnum.PerPixel;
+                        mi.SetSurfaceOverrideMaterial(i, dup);
+                    }
+                }
+            }
+        }
+
+        GD.Print("WorldLoader: standalone dark visibility — ambient 0.85, occluder off, unshaded→lit");
     }
 
     private static Node LoadPackedScene(string path)

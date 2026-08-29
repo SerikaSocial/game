@@ -74,8 +74,9 @@ public static class WorldLod
     /// saves significant draw calls in enclosed worlds like the Cinema or Backrooms.
     public static void EnableOcclusionCulling()
     {
-        if (UI.DeviceProfile.Current != UI.DeviceProfile.Tier.Low) return;
-        ProjectSettings.SetSetting("rendering/occlusion_culling/use_occlusion_culling", true);
-        GD.Print("WorldLod: occlusion culling enabled");
+        // Off. The software occluder treats single-sided authored rooms (Cinema, Backrooms)
+        // as closed volumes and culls the interior to black — which read as "there are no
+        // lights" on Quest. Re-enable only with a tested occluder mesh per world.
+        ProjectSettings.SetSetting("rendering/occlusion_culling/use_occlusion_culling", false);
     }
 }

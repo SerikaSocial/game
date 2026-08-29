@@ -76,7 +76,9 @@ public partial class Updater : CanvasLayer
     {
         // The editor's executable is Godot itself. Prompting "update" there is how you
         // get a dialog in debug that cannot (and must not) overwrite the editor.
-        if (OS.HasFeature("editor"))
+        string exe = OS.GetExecutablePath() ?? "";
+        if (OS.HasFeature("editor")
+            || System.IO.Path.GetFileName(exe).Contains("Godot", StringComparison.OrdinalIgnoreCase))
         {
             GD.Print($"updater: skipped (editor/debug, local={CurrentVersion})");
             return;
