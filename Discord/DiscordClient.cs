@@ -167,10 +167,14 @@ internal sealed unsafe class DiscordClient : IDisposable
         Discord_Client_SetActivityJoinCallback(ref _client, _joinDelegate, IntPtr.Zero, IntPtr.Zero);
         Discord_Client_SetTokenExpirationCallback(ref _client, _tokenExpiredDelegate, IntPtr.Zero, IntPtr.Zero);
         Discord_Client_AddLogCallback(ref _client, _logDelegate, IntPtr.Zero, IntPtr.Zero, minSeverity);
-        // Overlay attaches to this PID. Without it Discord may pop the browser authorize
-        // every launch instead of the in-client prompt that can remember the grant.
-        try { Discord_Client_SetGameWindowPid(ref _client, (int)Godot.OS.GetProcessId()); }
-        catch { }
+        // Overlay is Windows-only (D3D/GL). Setting a PID on Linux/macOS makes Discord's
+        // in-app authorize browser attach to a window it then cannot find, and after ~10 s
+        // it shows "this browser is no longer active" while the game is still running.
+        if (Godot.OS.GetName() == "Windows")
+        {
+            try { Discord_Client_SetGameWindowPid(ref _client, (int)Godot.OS.GetProcessId()); }
+            catch { }
+        }
     }
 
     public ClientStatus Status => _init ? Discord_Client_GetStatus(ref _client) : ClientStatus.Disconnected;
@@ -254,10 +258,11 @@ internal sealed unsafe class DiscordClient : IDisposable
         }
         finally
         {
-            // The SDK copies the args synchronously; only the secret string must survive.
+            // Args first — they hold pointers into the challenge. The SDK copies during
+            // Authorize; after that these are ours to free. Reverse order is a UAF.
+            Discord_AuthorizationArgs_Drop(ref args);
             if (challenge.opaque != IntPtr.Zero) Discord_AuthorizationCodeChallenge_Drop(ref challenge);
             if (verifier.opaque != IntPtr.Zero) Discord_AuthorizationCodeVerifier_Drop(ref verifier);
-            Discord_AuthorizationArgs_Drop(ref args);
         }
     }
 

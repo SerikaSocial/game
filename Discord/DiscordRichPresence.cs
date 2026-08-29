@@ -34,6 +34,10 @@ public static class DiscordRichPresence
     private static bool _reauthTried;
     // One Authorize overlay per process. Closing it (or a 4004) must not pop another.
     private static bool _promptedThisProcess;
+    // Init only constructs the client; Boot waits for the first Poll so RunCallbacks is live.
+    private static bool _bootPending;
+    private static ulong _lastPumpMs;
+    private static Timer _pumpTimer;
 
     // Reconnect: start fast, back off to once a minute while Discord stays away.
     private static double _reconnectDelay = 5.0;
@@ -101,8 +105,12 @@ public static class DiscordRichPresence
 
             _enabled = true;
             _appId = appId;
+            _bootPending = true;
             GD.Print($"[Discord] Social SDK {DiscordClient.VersionString()} (app {appId})");
-            Boot();
+            // Boot from Poll, not here. Init runs in the middle of Main._Ready — Authorize
+            // would open Discord's in-app browser, then _Ready keeps building UI for many
+            // seconds with no RunCallbacks, and Discord reports "browser no longer active".
+            InstallAlwaysPump();
         }
         catch (Exception e)
         {
@@ -312,7 +320,20 @@ public static class DiscordRichPresence
         if (!_enabled || _shuttingDown) return;
         try
         {
-            _client.Pump();
+            // Discord's in-app authorize browser dies if RunCallbacks pauses for ~10 s.
+            // Cap at ~60 Hz so a ProcessAlways timer plus _Process cannot double-tick reconnects.
+            ulong now = NowUnixMs();
+            if (now - _lastPumpMs >= 15)
+            {
+                _lastPumpMs = now;
+                _client.Pump();
+            }
+
+            if (_bootPending)
+            {
+                _bootPending = false;
+                Boot();
+            }
 
             if (!Ready && _tokenApplied && _reconnectTimer > 0)
             {
@@ -337,11 +358,35 @@ public static class DiscordRichPresence
     {
         if (_shuttingDown) return;
         _shuttingDown = true;
+        if (_pumpTimer != null && GodotObject.IsInstanceValid(_pumpTimer))
+        {
+            try { _pumpTimer.Stop(); _pumpTimer.QueueFree(); } catch { }
+            _pumpTimer = null;
+        }
         try { if (Ready) _client?.ClearRichPresence(); } catch { }
         try { _client?.Dispose(); } catch { }
         _client = null;
         _enabled = false;
         Ready = false;
+    }
+
+    /// Discord's authorize browser needs RunCallbacks even if the game window is unfocused
+    /// (the player is in Discord clicking Authorize). A ProcessAlways timer keeps pumping
+    /// if `_Process` is throttled.
+    private static void InstallAlwaysPump()
+    {
+        if (_pumpTimer != null && GodotObject.IsInstanceValid(_pumpTimer)) return;
+        if (Engine.GetMainLoop() is not SceneTree tree || tree.Root == null) return;
+        _pumpTimer = new Timer
+        {
+            Name = "DiscordSdkPump",
+            WaitTime = 0.05,
+            Autostart = true,
+            OneShot = false,
+            ProcessMode = Node.ProcessModeEnum.Always,
+        };
+        _pumpTimer.Timeout += () => { if (!_shuttingDown) Poll(0.05); };
+        tree.Root.CallDeferred(Node.MethodName.AddChild, _pumpTimer);
     }
 
     private static void Disable()
@@ -513,7 +558,9 @@ public static class DiscordRichPresence
     {
         if (string.IsNullOrEmpty(error)) return false;
         string e = error.ToLowerInvariant();
-        return e.Contains("cancel") || e.Contains("abort") || e.Contains("denied")
+        // "abort" is what Discord reports when ITS browser times out because we stopped
+        // pumping — that is not a player choice. Only an explicit cancel/deny is sticky.
+        return e.Contains("cancel") || e.Contains("denied")
             || e.Contains("declin") || e.Contains("reject");
     }
 
