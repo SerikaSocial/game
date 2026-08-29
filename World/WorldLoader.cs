@@ -373,7 +373,9 @@ public static class WorldLoader
         var positional = new System.Collections.Generic.List<Light3D>();
         foreach (var l in lights)
             if (l is OmniLight3D or SpotLight3D) positional.Add(l);
-        const int Max = 6;
+        // Compatibility's per-mesh omni budget is 8. Hiding down to 6 still left the
+        // Cinema's seats and far walls in the dark; keep the renderer's full set.
+        const int Max = 8;
         if (positional.Count <= Max) return;
         positional.Sort((a, b) => b.LightEnergy.CompareTo(a.LightEnergy));
         for (int i = Max; i < positional.Count; i++)
@@ -630,6 +632,8 @@ public static class WorldLoader
             if (child is WorldEnvironment existing && existing.Environment != null)
             {
                 ApplyPostProcessing(existing.Environment, mode);
+                if (mode == "dark" && UI.DeviceProfile.IsStandaloneXr)
+                    ForceStandaloneDarkEnv(existing.Environment);
                 GD.Print($"WorldLoader: kept authored environment, added post-processing " +
                          $"(mode '{mode}')");
                 return;
@@ -657,8 +661,8 @@ public static class WorldLoader
                 // so you can still walk the aisles; desktop keeps the theatrical dark.
                 if (UI.DeviceProfile.IsStandaloneXr)
                 {
-                    ambient = new Color(0.45f, 0.42f, 0.48f);
-                    ambientEnergy = 0.85f;
+                    ambient = new Color(0.62f, 0.58f, 0.68f);
+                    ambientEnergy = 1.35f;
                 }
                 else
                 {
@@ -842,23 +846,18 @@ public static class WorldLoader
                  $"(energy {energy}, shadows {sun.ShadowEnabled})");
     }
 
-    /// Quest / Android cinema: Compatibility ignores most omnis, unshaded meshes ignore
-    /// lights, and the software occluder can hide the whole interior. Force a readable room.
+    /// Quest / Android cinema: Compatibility ignores most omnis, dark authored albedos
+    /// (Cinema walls are ~0.13) read as black without a working light, and the software
+    /// occluder can hide the whole interior — including emissive sconces, which is how
+    /// "0 light" survived the previous ambient bump. Force a readable room.
     private static void ApplyStandaloneDarkVisibility(Node root, Node instance)
     {
-        ProjectSettings.SetSetting("rendering/occlusion_culling/use_occlusion_culling", false);
+        WorldLod.DisableLiveOcclusionCulling();
 
         foreach (var node in root.FindChildren("*", "WorldEnvironment", true, false))
         {
             if (node is not WorldEnvironment we || we.Environment == null) continue;
-            var env = we.Environment;
-            env.AmbientLightSource = Godot.Environment.AmbientSource.Color;
-            env.AmbientLightColor = new Color(0.45f, 0.42f, 0.48f);
-            env.AmbientLightEnergy = Mathf.Max(env.AmbientLightEnergy, 0.85f);
-            env.BackgroundMode = Godot.Environment.BGMode.Color;
-            env.BackgroundColor = new Color(0.06f, 0.05f, 0.08f);
-            env.SsaoEnabled = false;
-            env.SsrEnabled = false;
+            ForceStandaloneDarkEnv(we.Environment);
         }
 
         if (instance != null)
@@ -866,20 +865,68 @@ public static class WorldLoader
             foreach (var node in instance.FindChildren("*", "MeshInstance3D", true, false))
             {
                 if (node is not MeshInstance3D mi || mi.Mesh == null) continue;
+                // Don't self-light the picture — HouseLights and VideoScreen own that surface.
+                if (mi.Name.ToString().Contains("VideoScreen", StringComparison.Ordinal)) continue;
                 for (int i = 0; i < mi.Mesh.GetSurfaceCount(); i++)
                 {
-                    if (mi.GetActiveMaterial(i) is not BaseMaterial3D mat) continue;
-                    if (mat.ShadingMode == BaseMaterial3D.ShadingModeEnum.Unshaded)
-                    {
-                        var dup = (BaseMaterial3D)mat.Duplicate();
+                    if (mi.GetActiveMaterial(i) is not BaseMaterial3D src) continue;
+                    var dup = (BaseMaterial3D)src.Duplicate();
+                    dup.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
+                    if (dup.ShadingMode == BaseMaterial3D.ShadingModeEnum.Unshaded)
                         dup.ShadingMode = BaseMaterial3D.ShadingModeEnum.PerPixel;
-                        mi.SetSurfaceOverrideMaterial(i, dup);
+                    dup.Metallic = 0f;
+                    // Self-light from the albedo so the room stays visible even if every
+                    // OmniLight is dropped by the Compatibility per-mesh budget. Modest —
+                    // HouseLights still dims these when a clip starts.
+                    if (!dup.EmissionEnabled || dup.EmissionEnergyMultiplier < 0.35f)
+                    {
+                        dup.EmissionEnabled = true;
+                        dup.Emission = dup.AlbedoColor;
+                        dup.EmissionEnergyMultiplier = Mathf.Max(dup.EmissionEnergyMultiplier, 0.55f);
                     }
+                    mi.SetSurfaceOverrideMaterial(i, dup);
                 }
             }
+
+            AddStandaloneRoomFill(instance as Node3D);
         }
 
-        GD.Print("WorldLoader: standalone dark visibility — ambient 0.85, occluder off, unshaded→lit");
+        GD.Print("WorldLoader: standalone dark visibility — ambient 1.35, occluder off, emissive fill");
+    }
+
+    private static void ForceStandaloneDarkEnv(Godot.Environment env)
+    {
+        env.AmbientLightSource = Godot.Environment.AmbientSource.Color;
+        env.AmbientLightColor = new Color(0.62f, 0.58f, 0.68f);
+        env.AmbientLightEnergy = Mathf.Max(env.AmbientLightEnergy, 1.35f);
+        env.BackgroundMode = Godot.Environment.BGMode.Color;
+        env.BackgroundColor = new Color(0.10f, 0.08f, 0.14f);
+        env.SsaoEnabled = false;
+        env.SsrEnabled = false;
+        env.VolumetricFogEnabled = false;
+    }
+
+    /// One large unshadowed omni at the room centre so Compatibility has a light that
+    /// actually reaches the seats, not just the six nearest sconces.
+    private static void AddStandaloneRoomFill(Node3D instance)
+    {
+        if (instance == null) return;
+        var aabb = WorldAabb(instance);
+        if (!aabb.HasValue) return;
+        var a = aabb.Value;
+        float range = Mathf.Max(8f, a.Size.Length() * 0.7f);
+        var fill = new OmniLight3D
+        {
+            Name = "SerikaStandaloneFill",
+            LightEnergy = 2.8f,
+            LightColor = new Color(1.0f, 0.94f, 0.88f),
+            OmniRange = range,
+            OmniAttenuation = 0.4f,
+            ShadowEnabled = false,
+        };
+        instance.AddChild(fill);
+        fill.GlobalPosition = a.GetCenter() + new Vector3(0f, a.Size.Y * 0.12f, 0f);
+        GD.Print($"WorldLoader: standalone room fill at {fill.GlobalPosition} range {range:0.0}");
     }
 
     private static Node LoadPackedScene(string path)

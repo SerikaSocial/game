@@ -186,7 +186,7 @@ public partial class VideoManager : Node
     {
         if (_busy) return;
         if (_queue.Count == 0) { NowPlaying = null; QueueChanged?.Invoke(); return; }
-        if (_api == null)
+        if (_api == null && OS.HasFeature("android"))
         {
             Toast?.Invoke("Not connected — can't resolve video", 3);
             return;
@@ -201,17 +201,27 @@ public partial class VideoManager : Node
 
         try
         {
+            // Desktop has yt-dlp + ffmpeg and they work from this machine. The production
+            // API's datacenter IP is bot-gated by YouTube, so asking it first is how every
+            // clip on this PC used to fail with "Sign in to confirm you're not a bot" and
+            // never reach the local path. Quest has no local binaries — it still goes
+            // through the API.
+            bool localFirst = !OS.HasFeature("android");
+            if (localFirst && await TryLocalTranscodeAsync(item, gen)) return;
+            if (gen != _generation) return;
+
             JsonElement resolved = default;
             bool haveResolved = false;
             try
             {
-                resolved = await _api.ResolveVideoAsync(item.Url);
-                haveResolved = true;
+                if (_api != null)
+                {
+                    resolved = await _api.ResolveVideoAsync(item.Url);
+                    haveResolved = true;
+                }
             }
             catch (Exception e)
             {
-                // YouTube bot-checks datacenter IPs. Fall through to local yt-dlp/ffmpeg
-                // instead of giving up — that's the path that works on this machine.
                 GD.Print($"[VideoManager] API resolve failed ({e.Message}) — trying local transcode");
             }
             if (gen != _generation) return; // skipped/cleared while we were resolving
@@ -236,14 +246,9 @@ public partial class VideoManager : Node
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
-                // 1. Local segmented transcode — ffmpeg reads the CDN directly and writes short
-                //    .ogv segments, so the first frame appears after one segment encodes rather
-                //    than after the whole clip. This returns as soon as playback has *started*.
-                if (await TryLocalTranscodeAsync(item, gen)) return;
+                if (!localFirst && await TryLocalTranscodeAsync(item, gen)) return;
                 if (gen != _generation) return;
 
-                // 2. Fall back to the server-side transcode proxy if local tools are unavailable.
-                //    This one is still whole-file, so warn that it will take a while.
                 Toast?.Invoke("Transcoding on the server, this may take a minute…", 4);
                 string tcPath = await DownloadTranscode(item.Url, gen);
                 if (gen != _generation) return;
@@ -585,25 +590,17 @@ public partial class VideoManager : Node
 
         try
         {
-            using var p = StartYtDlp(ytdlpPath, url);
-            if (p == null) return (null, null);
+            var first = await RunYtDlpGetUrls(ytdlpPath, url, cookiesBrowser: null);
+            if (first.video != null) return first;
 
-            var readOut = p.StandardOutput.ReadToEndAsync();
-            var readErr = p.StandardError.ReadToEndAsync();
-            // 30 s is generous for a metadata-only call; the old code allowed 90 s because it
-            // was downloading the whole video here.
-            if (!await Task.Run(() => p.WaitForExit(30_000))) { try { p.Kill(); } catch { } return (null, null); }
-            if (p.ExitCode != 0)
+            string browser = FindCookieBrowser();
+            if (browser != null)
             {
-                string err = (await readErr).Trim();
-                GD.PrintErr($"[VideoManager] yt-dlp failed: {err}");
-                return (null, null);
+                GD.Print($"[VideoManager] yt-dlp retry with --cookies-from-browser {browser}");
+                var second = await RunYtDlpGetUrls(ytdlpPath, url, browser);
+                if (second.video != null) return second;
             }
-
-            var lines = (await readOut).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            string v = lines.Length > 0 ? lines[0].Trim() : null;
-            string a = lines.Length > 1 ? lines[1].Trim() : null;
-            return (string.IsNullOrEmpty(v) ? null : v, string.IsNullOrEmpty(a) ? null : a);
+            return (null, null);
         }
         catch (Exception ex)
         {
@@ -755,7 +752,49 @@ public partial class VideoManager : Node
         return url;
     }
 
-    private static System.Diagnostics.Process StartYtDlp(string ytdlpPath, string url)
+    private static async Task<(string video, string audio)> RunYtDlpGetUrls(
+        string ytdlpPath, string url, string cookiesBrowser)
+    {
+        using var p = StartYtDlp(ytdlpPath, url, cookiesBrowser);
+        if (p == null) return (null, null);
+
+        var readOut = p.StandardOutput.ReadToEndAsync();
+        var readErr = p.StandardError.ReadToEndAsync();
+        if (!await Task.Run(() => p.WaitForExit(30_000)))
+        {
+            try { p.Kill(); } catch { }
+            return (null, null);
+        }
+        if (p.ExitCode != 0)
+        {
+            string err = (await readErr).Trim();
+            if (!string.IsNullOrEmpty(err))
+                GD.PrintErr($"[VideoManager] yt-dlp failed: {err}");
+            return (null, null);
+        }
+
+        var lines = (await readOut).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        string v = lines.Length > 0 ? lines[0].Trim() : null;
+        string a = lines.Length > 1 ? lines[1].Trim() : null;
+        return (string.IsNullOrEmpty(v) ? null : v, string.IsNullOrEmpty(a) ? null : a);
+    }
+
+    private static string FindCookieBrowser()
+    {
+        string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+        if (System.IO.Directory.Exists(System.IO.Path.Combine(home, ".config", "google-chrome")))
+            return "chrome";
+        if (System.IO.Directory.Exists(System.IO.Path.Combine(home, ".config", "chromium")))
+            return "chromium";
+        if (System.IO.Directory.Exists(System.IO.Path.Combine(home, ".mozilla", "firefox")))
+            return "firefox";
+        string os = OS.GetName();
+        if (os == "Windows" || os == "macOS") return "chrome";
+        return null;
+    }
+
+    private static System.Diagnostics.Process StartYtDlp(string ytdlpPath, string url,
+        string cookiesBrowser = null)
     {
         var psi = new System.Diagnostics.ProcessStartInfo
         {
@@ -768,12 +807,17 @@ public partial class VideoManager : Node
         foreach (var a in new[]
         {
             "--no-warnings", "--no-playlist",
-            "--extractor-args", "youtube:player_client=android,tv_embedded,web",
+            "--extractor-args", "youtube:player_client=android,ios,tv_embedded,web",
             "-g",
             "-f", $"18/b[height<={MaxHeight}]/bv*[height<={MaxHeight}]+ba/b",
-            url,
         })
             psi.ArgumentList.Add(a);
+        if (!string.IsNullOrEmpty(cookiesBrowser))
+        {
+            psi.ArgumentList.Add("--cookies-from-browser");
+            psi.ArgumentList.Add(cookiesBrowser);
+        }
+        psi.ArgumentList.Add(url);
         return System.Diagnostics.Process.Start(psi);
     }
 

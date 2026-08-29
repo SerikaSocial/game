@@ -69,14 +69,22 @@ public static class WorldLod
             GD.Print($"WorldLod: tagged {tagged} meshes with visibility ranges (tier={tier}, lodBias={lodBias})");
     }
 
-    /// Enable engine-level occlusion culling. On Quest the software rasteriser is
-    /// essentially free (it uses spare CPU cores the GPU-bound frame doesn't need) and
-    /// saves significant draw calls in enclosed worlds like the Cinema or Backrooms.
+    /// Occlusion culling is off. The software rasteriser treats a closed room (Cinema,
+    /// Backrooms) as a solid volume and culls the interior — which read as "there are no
+    /// lights" on Quest, including the emissive sconces that need no lights at all.
+    /// `ProjectSettings` alone does not move an already-created viewport; stamp the live
+    /// Viewport too, or a setting change at world-load is a no-op.
     public static void EnableOcclusionCulling()
     {
-        // Off. The software occluder treats single-sided authored rooms (Cinema, Backrooms)
-        // as closed volumes and culls the interior to black — which read as "there are no
-        // lights" on Quest. Re-enable only with a tested occluder mesh per world.
+        DisableLiveOcclusionCulling();
+    }
+
+    public static void DisableLiveOcclusionCulling()
+    {
         ProjectSettings.SetSetting("rendering/occlusion_culling/use_occlusion_culling", false);
+        if (Engine.GetMainLoop() is not SceneTree { Root: { } root }) return;
+        root.UseOcclusionCulling = false;
+        foreach (var node in root.FindChildren("*", "Viewport", true, false))
+            if (node is Viewport vp) vp.UseOcclusionCulling = false;
     }
 }

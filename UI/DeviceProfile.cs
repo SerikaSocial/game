@@ -124,10 +124,10 @@ public static class DeviceProfile
         Settings.Load();  // let a saved profile override the auto-detected one
         Apply();
 
-        // Enable occlusion culling on standalone — the software rasteriser is essentially
-        // free and saves significant draw calls in enclosed worlds.
+        // Occlusion culling is off on standalone. The software rasteriser culls the
+        // interior of authored rooms (Cinema) and the headset reads that as no lights.
         if (IsStandaloneXr)
-            SerikaSocial.World.WorldLod.EnableOcclusionCulling();
+            SerikaSocial.World.WorldLod.DisableLiveOcclusionCulling();
     }
 
     /// Adopt a whole tier's presets (the settings menu's tier dropdown). Individual knobs can
@@ -172,6 +172,9 @@ public static class DeviceProfile
                 Tier.Medium => 2048,
                 _ => 4096,
             };
+
+            if (IsStandaloneXr)
+                vp.UseOcclusionCulling = false;
 
             // Debanding: dither the final image to break up 8-bit quantisation.
             //

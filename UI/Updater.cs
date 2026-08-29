@@ -74,13 +74,16 @@ public partial class Updater : CanvasLayer
 
     private async Task CheckAsync()
     {
-        // The editor's executable is Godot itself. Prompting "update" there is how you
-        // get a dialog in debug that cannot (and must not) overwrite the editor.
+        // The editor's executable is Godot itself. F5/"Play Project" spawns a child that
+        // does NOT have the `editor` feature, so we also skip anything whose binary is
+        // named Godot — otherwise debug mode nags to overwrite the editor with a game build.
         string exe = OS.GetExecutablePath() ?? "";
+        string exeName = System.IO.Path.GetFileName(exe);
         if (OS.HasFeature("editor")
-            || System.IO.Path.GetFileName(exe).Contains("Godot", StringComparison.OrdinalIgnoreCase))
+            || OS.HasFeature("debug") && exeName.Contains("Godot", StringComparison.OrdinalIgnoreCase)
+            || exeName.Contains("Godot", StringComparison.OrdinalIgnoreCase))
         {
-            GD.Print($"updater: skipped (editor/debug, local={CurrentVersion})");
+            GD.Print($"updater: skipped (editor/debug, local={CurrentVersion}, exe={exeName})");
             return;
         }
 
