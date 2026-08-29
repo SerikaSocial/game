@@ -74,6 +74,14 @@ public partial class Updater : CanvasLayer
 
     private async Task CheckAsync()
     {
+        // The editor's executable is Godot itself. Prompting "update" there is how you
+        // get a dialog in debug that cannot (and must not) overwrite the editor.
+        if (OS.HasFeature("editor"))
+        {
+            GD.Print($"updater: skipped (editor/debug, local={CurrentVersion})");
+            return;
+        }
+
         try
         {
             using var http = NewClient(TimeSpan.FromSeconds(10));
@@ -134,7 +142,8 @@ public partial class Updater : CanvasLayer
     /// (`/opt/...`, an AppImage mount, a `.deb`-owned tree) can't be written by the running
     /// user — attempting the copy there fails halfway with "access denied". In both cases we
     /// send the player to the download page instead of pretending to self-update.
-    private static bool CanSelfUpdate => !IsAndroid && InstallDirWritable();
+    private static bool CanSelfUpdate =>
+        !IsAndroid && !OS.HasFeature("editor") && InstallDirWritable();
 
     /// Probe whether the directory holding the executable is writable by this process,
     /// by creating and deleting a temp file next to it. Cheap and definitive — cheaper than
