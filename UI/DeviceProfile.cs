@@ -58,7 +58,23 @@ public static class DeviceProfile
     public static bool AvatarOutline = true;
 
     /// True on the Quest / any Android build — the tightest budget.
-    public static bool IsStandaloneXr => OS.HasFeature("android");
+    public static bool IsStandaloneXr => _forceStandaloneXr ?? OS.HasFeature("android");
+
+    private static bool? _forceStandaloneXr;
+
+    /// Pretend to be (or not be) a standalone headset, for diagnostics only.
+    ///
+    /// A large amount of behaviour hangs off `IsStandaloneXr` — the whole Quest lighting path in
+    /// `WorldLoader`, the LOD pass, occlusion culling, the HouseLights dim floors — and none of
+    /// it could be rendered on a dev box, because the flag is a hard platform test. So the Quest
+    /// Cinema was only ever verifiable by building an APK, sideloading it and putting a headset
+    /// on, and it consequently shipped broken twice: once black, once flat and over-bright.
+    ///
+    /// This does NOT make a desktop run equivalent to a Quest — the Compatibility renderer's
+    /// per-mesh light cap, its lack of HDR, and the tile GPU are all still absent. It makes the
+    /// *scene* the Quest would be given inspectable and renderable, which is where both bugs
+    /// actually lived.
+    public static void ForceStandaloneXrForDiagnostics(bool on) => _forceStandaloneXr = on;
 
     /// Pick a starting tier from the platform and seed the knobs. Called once at boot before the
     /// first frame renders.

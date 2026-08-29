@@ -239,6 +239,30 @@ public sealed class ApiClient
         return json;
     }
 
+    /// Start or attach to the server's shared segmented transcode for `url`, and report its
+    /// progress. See `/v1/video/session` — one encode is shared by every viewer, so calling this
+    /// for a clip someone else already queued is a cache hit, not a second encode.
+    ///
+    /// Returns `{ id, segments, done, segmentSeconds, title, duration }`, where `segments` is how
+    /// many are complete and therefore safe to fetch.
+    public async Task<JsonElement> StartVideoSessionAsync(string url)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get,
+            $"{_baseUrl}/v1/video/session?url={Uri.EscapeDataString(url)}");
+        if (SessionToken != null)
+            req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        var res = await _http.SendAsync(req);
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
+        if (!res.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}");
+        return json;
+    }
+
+    /// URL of one segment of a shared transcode job.
+    public string VideoSegmentUrl(string jobId, int index) =>
+        $"{_baseUrl}/v1/video/segment/{Uri.EscapeDataString(jobId)}/{index}";
+
     /// Resolve a peer's profile-picture URL (and display name) from their account id — the only
     /// identity the relay carries. Returns the avatarUrl, or null if the user has none / on error.
     public async Task<string> GetUserAvatarUrlAsync(string userId)

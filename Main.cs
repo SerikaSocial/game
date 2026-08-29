@@ -217,6 +217,17 @@ public partial class Main : Node3D
         }
         if (args.ContainsKey("serika-worldtest"))
         {
+            // `--standalone` renders the world exactly as a Quest would be handed it. See
+            // DeviceProfile.ForceStandaloneXrForDiagnostics for what that does and does not cover.
+            if (args.ContainsKey("standalone"))
+            {
+                UI.DeviceProfile.ForceStandaloneXrForDiagnostics(true);
+                // Detect() already ran at boot and picked the desktop tier. Re-run it so the
+                // quality knobs (tier, shadows, LOD, occlusion) match the headset too, not just
+                // the lighting branch — otherwise this renders a Quest-lit desktop-tier world,
+                // which is a fourth thing that matches neither platform.
+                UI.DeviceProfile.Detect();
+            }
             WorldDiagnostic.Run(this, _worldRoot, args.GetValueOrDefault("world", null),
                 args.GetValueOrDefault("ogv", null), args.GetValueOrDefault("shot", null),
                 args.GetValueOrDefault("wait", null));

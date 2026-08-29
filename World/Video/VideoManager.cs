@@ -249,6 +249,13 @@ public partial class VideoManager : Node
                 if (!localFirst && await TryLocalTranscodeAsync(item, gen)) return;
                 if (gen != _generation) return;
 
+                // Shared segmented transcode. Preferred over the whole-file fallback below on
+                // every platform: it starts playing one segment in instead of one clip in, and
+                // a clip someone else already queued costs no encode at all.
+                Toast?.Invoke("Preparing video…", 3);
+                if (await TryServerSegmentedAsync(item, gen)) return;
+                if (gen != _generation) return;
+
                 Toast?.Invoke("Transcoding on the server, this may take a minute…", 4);
                 string tcPath = await DownloadTranscode(item.Url, gen);
                 if (gen != _generation) return;
@@ -319,6 +326,147 @@ public partial class VideoManager : Node
             return ok && gen == _generation ? "user://video-cache/current.ogv" : null;
         }
         catch { return null; }
+    }
+
+    /// Play through the server's *shared segmented* transcode (`/v1/video/session`).
+    ///
+    /// This is how Quest gets video at all, and it is the primary server path everywhere. The
+    /// older whole-file `DownloadTranscode` below could not work on a headset for three reasons
+    /// that this fixes together:
+    ///
+    ///   - Godot's VideoStreamPlayer opens a *path*, it does not stream, so a single-file
+    ///     transcode means waiting for the entire clip to encode and download before the first
+    ///     frame. Anything of real length also hit the server's 120 s encode watchdog first.
+    ///   - The server's concurrency cap is per-ffmpeg, so the second person in the cinema got a
+    ///     503. Here everyone attaches to one job, and the cap limits distinct *clips*.
+    ///   - Nothing was cached, so N viewers meant N identical encodes. Now the first viewer pays
+    ///     and everyone else reads the cache — which is the whole "only one person encodes" point.
+    ///
+    /// Segments are fed to the screens with the same `BeginPlaylist`/`AppendSegment` playlist the
+    /// desktop local-ffmpeg path uses, so playback starts one segment in, not one clip in.
+    /// Returns true once playback has begun; the pump keeps running in the background.
+    private async Task<bool> TryServerSegmentedAsync(Item item, int gen)
+    {
+        if (_api == null) return false;
+
+        JsonElement session;
+        try
+        {
+            session = await _api.StartVideoSessionAsync(item.Url);
+        }
+        catch (Exception e)
+        {
+            GD.Print($"[VideoManager] server session failed: {e.Message}");
+            return false;
+        }
+        if (gen != _generation) return false;
+
+        string jobId = Str(session, "id");
+        if (string.IsNullOrEmpty(jobId)) return false;
+
+        string title = Str(session, "title");
+        if (!string.IsNullOrEmpty(title)) { item.Title = title; QueueChanged?.Invoke(); }
+
+        DirAccess.MakeDirRecursiveAbsolute("user://video-cache/segments");
+        string absDir = ProjectSettings.GlobalizePath("user://video-cache/segments");
+        foreach (var stale in System.IO.Directory.GetFiles(absDir, "seg_*.ogv"))
+            try { System.IO.File.Delete(stale); } catch { /* in use; harmless */ }
+
+        var firstSegment = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = PumpServerSegmentsAsync(jobId, absDir, gen, item, firstSegment);
+        return await firstSegment.Task;
+    }
+
+    /// Poll the job and download segments as they become available, feeding each to the screens.
+    private async Task PumpServerSegmentsAsync(string jobId, string absDir, int gen, Item item,
+                                               TaskCompletionSource<bool> firstSegment)
+    {
+        int next = 0;
+        bool startedAny = false;
+        bool done = false;
+        int idleTicks = 0;
+
+        try
+        {
+            while (gen == _generation)
+            {
+                int available;
+                bool jobDone;
+                try
+                {
+                    var s = await _api.StartVideoSessionAsync(item.Url);
+                    available = s.TryGetProperty("segments", out var sg) && sg.TryGetInt32(out int v) ? v : 0;
+                    jobDone = s.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.True;
+                }
+                catch (Exception e)
+                {
+                    GD.Print($"[VideoManager] session poll failed: {e.Message}");
+                    break;
+                }
+                if (gen != _generation) return;
+
+                // Throttle the same way the local encoder is throttled: stay a few segments
+                // ahead of the playhead and no more, so a long film does not download in full
+                // onto a headset with a few gigabytes of free space.
+                PruneScreens();
+                var primary = _screens.Count > 0 ? _screens[0] : null;
+                int playing = primary != null && GodotObject.IsInstanceValid(primary)
+                    ? primary.PlayingSegment : -1;
+                int buffered = next - 1 - playing;
+
+                if (buffered < HighWaterSegments && next < available)
+                {
+                    string abs = System.IO.Path.Combine(absDir, $"seg_{next:D4}.ogv");
+                    if (await _api.DownloadToAsync(_api.VideoSegmentUrl(jobId, next), abs))
+                    {
+                        if (gen != _generation) return;
+                        string userPath = $"user://video-cache/segments/seg_{next:D4}.ogv";
+                        Callable.From(() =>
+                        {
+                            PruneScreens();
+                            foreach (var s in _screens) s.AppendSegment(userPath);
+                        }).CallDeferred();
+                        next++;
+                        idleTicks = 0;
+                        if (!startedAny)
+                        {
+                            startedAny = true;
+                            firstSegment.TrySetResult(true);
+                            OnPlaybackStarted(item);
+                        }
+                        CleanupPlayedSegments(absDir, playing);
+                        continue; // fetch the next one immediately rather than sleeping
+                    }
+                    GD.Print($"[VideoManager] segment {next} download failed");
+                }
+
+                if (jobDone && next >= available) { done = true; break; }
+
+                // Nothing to do: either the buffer is full or the encoder has not caught up.
+                await Task.Delay(1000);
+                // A job that is neither finished nor producing is wedged. Give up rather than
+                // poll a dead encode forever and leave the queue stuck on this item.
+                if (!jobDone && next >= available && ++idleTicks > 90) break;
+            }
+        }
+        finally
+        {
+            if (gen == _generation)
+            {
+                Callable.From(() =>
+                {
+                    PruneScreens();
+                    foreach (var s in _screens) s.CompletePlaylist();
+                }).CallDeferred();
+                if (!startedAny)
+                {
+                    OnScreenFailed(item.Url, "server transcode produced nothing",
+                                   $"job {jobId}, {next} segment(s), done={done}");
+                }
+            }
+            firstSegment.TrySetResult(startedAny);
+        }
     }
 
     /// Download a transcoded ogv stream from the server's /v1/video/transcode endpoint.

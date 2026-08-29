@@ -657,12 +657,16 @@ public static class WorldLoader
                 skyHorizon = new Color(0.02f, 0.02f, 0.04f);
                 // Quest / Android uses the Compatibility renderer, which only shades a
                 // mesh with a handful of omnis. Near-zero ambient then reads as a black
-                // room with a couple of glowing patches. Keep a real fill on standalone
-                // so you can still walk the aisles; desktop keeps the theatrical dark.
+                // room with a couple of glowing patches. Lift it a little on standalone so
+                // the aisles stay walkable; desktop keeps the theatrical dark.
+                //
+                // Only a *little*: ambient is directionless, so it is the one knob that can
+                // make a room brighter and flatter at the same time. The readability fix is
+                // the albedo lift in ApplyStandaloneDarkVisibility, not this.
                 if (UI.DeviceProfile.IsStandaloneXr)
                 {
                     ambient = new Color(0.62f, 0.58f, 0.68f);
-                    ambientEnergy = 1.35f;
+                    ambientEnergy = StandaloneDarkAmbient;
                 }
                 else
                 {
@@ -846,10 +850,31 @@ public static class WorldLoader
                  $"(energy {energy}, shadows {sun.ShadowEnabled})");
     }
 
-    /// Quest / Android cinema: Compatibility ignores most omnis, dark authored albedos
-    /// (Cinema walls are ~0.13) read as black without a working light, and the software
-    /// occluder can hide the whole interior — including emissive sconces, which is how
-    /// "0 light" survived the previous ambient bump. Force a readable room.
+    /// Quest / Android cinema: Compatibility only shades a mesh with a handful of omnis, and the
+    /// software occluder can hide a closed room's whole interior — including the emissive
+    /// sconces, which is how "0 light" survived an earlier ambient bump. Both of those are
+    /// handled (`CapPositionalLightsForMobile`, `DisableLiveOcclusionCulling`). This pass is now
+    /// only the small remainder: kill backface culling on single-sided room geometry, and hang
+    /// one fill light so the far rows are not lit solely by the six nearest sconces.
+    ///
+    /// **Never brighten a room with EMISSION or AMBIENT.** Both are direction-independent: they
+    /// add the same value to a surface no matter which way it faces, so each one dilutes the
+    /// only terms that carry shape. The previous version stacked four flat terms — ambient 1.35,
+    /// emission = albedo × 0.55 on *every* surface, and a 2.8-energy fill at attenuation 0.4
+    /// (which across a 16 × 24 m room is not a falloff at all) — against a single directional
+    /// key. Around 80% of the final pixel value was constant, which is the numeric definition of
+    /// the "too bright and not shaded" the Cinema shipped as.
+    ///
+    /// **The dark albedos that pass was written to compensate for do not exist.** glTF's
+    /// `baseColorFactor` is LINEAR and Godot's `AlbedoColor` is sRGB-ENCODED, so the Cinema wall
+    /// authored at 0.13 arrives here as 0.396 — a perfectly ordinary mid-grey. Comparing a
+    /// runtime `AlbedoColor` against a threshold read off the glTF file is an apples-to-oranges
+    /// test, and it is the one that justified self-lighting the entire room. Measured, not
+    /// assumed: `--serika-worldtest --world <bundle> --standalone` dumps every albedo.
+    ///
+    /// So the room is lit the ordinary way — ambient just off black, the world's own eight
+    /// surviving omnis, one fill, and the directional key from `EnsureKeyLight` doing the
+    /// shading.
     private static void ApplyStandaloneDarkVisibility(Node root, Node instance)
     {
         WorldLod.DisableLiveOcclusionCulling();
@@ -862,43 +887,53 @@ public static class WorldLoader
 
         if (instance != null)
         {
+            int surfaces = 0;
             foreach (var node in instance.FindChildren("*", "MeshInstance3D", true, false))
             {
                 if (node is not MeshInstance3D mi || mi.Mesh == null) continue;
-                // Don't self-light the picture — HouseLights and VideoScreen own that surface.
+                // Don't touch the picture — HouseLights and VideoScreen own that surface.
                 if (mi.Name.ToString().Contains("VideoScreen", StringComparison.Ordinal)) continue;
                 for (int i = 0; i < mi.Mesh.GetSurfaceCount(); i++)
                 {
                     if (mi.GetActiveMaterial(i) is not BaseMaterial3D src) continue;
                     var dup = (BaseMaterial3D)src.Duplicate();
+                    // A GLB room is a shell of single-sided boxes; from inside it, every wall is
+                    // a backface. Desktop gets away with more of the room's own lights, so this
+                    // shows up first on standalone.
                     dup.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
                     if (dup.ShadingMode == BaseMaterial3D.ShadingModeEnum.Unshaded)
                         dup.ShadingMode = BaseMaterial3D.ShadingModeEnum.PerPixel;
                     dup.Metallic = 0f;
-                    // Self-light from the albedo so the room stays visible even if every
-                    // OmniLight is dropped by the Compatibility per-mesh budget. Modest —
-                    // HouseLights still dims these when a clip starts.
-                    if (!dup.EmissionEnabled || dup.EmissionEnergyMultiplier < 0.35f)
-                    {
-                        dup.EmissionEnabled = true;
-                        dup.Emission = dup.AlbedoColor;
-                        dup.EmissionEnergyMultiplier = Mathf.Max(dup.EmissionEnergyMultiplier, 0.55f);
-                    }
+                    // Emission is deliberately untouched. The authored emissive fittings (step
+                    // lights, sconce glow, exit signs) keep the values their author set, which is
+                    // what lets `HouseLights.CaptureEmissive` treat those seven surfaces — and
+                    // only those — as the fittings to dim when a film starts. The old
+                    // self-lighting pass made all 33 surfaces emissive and silently hijacked it.
                     mi.SetSurfaceOverrideMaterial(i, dup);
+                    surfaces++;
                 }
             }
 
             AddStandaloneRoomFill(instance as Node3D);
+            GD.Print($"WorldLoader: standalone dark — {surfaces} surface(s) double-sided");
         }
 
-        GD.Print("WorldLoader: standalone dark visibility — ambient 1.35, occluder off, emissive fill");
+        GD.Print($"WorldLoader: standalone dark visibility — ambient {StandaloneDarkAmbient:0.00}, " +
+                 "occluder off, no self-lighting");
     }
+
+    /// Flat ambient fill for a `dark` world on standalone. Keeps unlit sides off pure black and
+    /// nothing more — every 0.1 added here is contrast subtracted from the whole room.
+    private const float StandaloneDarkAmbient = 0.30f;
 
     private static void ForceStandaloneDarkEnv(Godot.Environment env)
     {
         env.AmbientLightSource = Godot.Environment.AmbientSource.Color;
         env.AmbientLightColor = new Color(0.62f, 0.58f, 0.68f);
-        env.AmbientLightEnergy = Mathf.Max(env.AmbientLightEnergy, 1.35f);
+        // Ambient is a flat term — see ApplyStandaloneDarkVisibility. It exists to keep the
+        // unlit side of things off pure black, not to light the room; the key light and the
+        // fill omni do that. At the old 1.35 it *was* the room and nothing had a shaded side.
+        env.AmbientLightEnergy = Mathf.Max(env.AmbientLightEnergy, StandaloneDarkAmbient);
         env.BackgroundMode = Godot.Environment.BGMode.Color;
         env.BackgroundColor = new Color(0.10f, 0.08f, 0.14f);
         env.SsaoEnabled = false;
@@ -906,8 +941,15 @@ public static class WorldLoader
         env.VolumetricFogEnabled = false;
     }
 
-    /// One large unshadowed omni at the room centre so Compatibility has a light that
-    /// actually reaches the seats, not just the six nearest sconces.
+    /// One large unshadowed omni high in the room so Compatibility has a light that actually
+    /// reaches the seats, not just the six nearest sconces.
+    ///
+    /// The attenuation matters more than the energy. At the old 0.4 the falloff term is nearly
+    /// constant across the whole span of a room this size, which makes this a second ambient
+    /// wearing a light's clothing — brightness everywhere, gradient nowhere. A roughly
+    /// inverse-square 1.8 gives the far rows visibly less than the front, which is what makes
+    /// the space read as having depth, and it is hung above head height so surfaces are lit
+    /// from above rather than head-on.
     private static void AddStandaloneRoomFill(Node3D instance)
     {
         if (instance == null) return;
@@ -918,10 +960,10 @@ public static class WorldLoader
         var fill = new OmniLight3D
         {
             Name = "SerikaStandaloneFill",
-            LightEnergy = 2.8f,
+            LightEnergy = 1.1f,
             LightColor = new Color(1.0f, 0.94f, 0.88f),
             OmniRange = range,
-            OmniAttenuation = 0.4f,
+            OmniAttenuation = 1.8f,
             ShadowEnabled = false,
         };
         instance.AddChild(fill);
