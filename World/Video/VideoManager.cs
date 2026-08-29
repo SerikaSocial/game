@@ -171,6 +171,13 @@ public partial class VideoManager : Node
     private void OnScreenFailed(string url, string reason, string detail)
     {
         VideoErrorLog.Record(url, _worldName, reason, detail);
+        // Also to stdout, not just the file. `VideoErrorLog` writes to user://logs, which on
+        // Android lives inside the app's private data dir — and a release APK is not
+        // debuggable, so `adb run-as` refuses and that file cannot be read off a Quest at all.
+        // Every video failure on the headset was therefore completely invisible: the only
+        // evidence was a toast the player had already dismissed. logcat is the one channel that
+        // works on every platform, so failures go there too.
+        GD.PrintErr($"[VideoManager] FAILED {url}: {reason} — {detail}");
         // Exactly the message the design asked for, shown in the corner.
         Toast?.Invoke("Video failed to load, loading next", 3);
         // Guard against a double-advance if several screens fail on the same item.
@@ -243,6 +250,8 @@ public partial class VideoManager : Node
             }
 
             var track = haveResolved ? PickDecodableTrack(resolved) : null;
+            GD.Print($"[VideoManager] '{item.Url}' resolved={haveResolved} " +
+                     $"decodableTrack={(track?.container ?? "none")} localFirst={localFirst}");
             if (track == null)
             {
                 // No natively decodable track (engine has Theora only; YouTube gives mp4/webm).
@@ -362,7 +371,15 @@ public partial class VideoManager : Node
         if (gen != _generation) return false;
 
         string jobId = Str(session, "id");
-        if (string.IsNullOrEmpty(jobId)) return false;
+        if (string.IsNullOrEmpty(jobId))
+        {
+            // Silence here is how the first on-headset test came back unreadable: this path,
+            // and a couple below, returned false with no log, so "video did nothing" could not
+            // be told apart from "video was never asked to do anything".
+            GD.Print($"[VideoManager] server session returned no job id: {session}");
+            return false;
+        }
+        GD.Print($"[VideoManager] server job accepted: {session}");
 
         string title = Str(session, "title");
         if (!string.IsNullOrEmpty(title)) { item.Title = title; QueueChanged?.Invoke(); }
@@ -432,6 +449,7 @@ public partial class VideoManager : Node
                         if (!startedAny)
                         {
                             startedAny = true;
+                            GD.Print($"[VideoManager] server job {jobId}: playing from segment 0");
                             firstSegment.TrySetResult(true);
                             OnPlaybackStarted(item);
                         }
@@ -447,7 +465,20 @@ public partial class VideoManager : Node
                 await Task.Delay(1000);
                 // A job that is neither finished nor producing is wedged. Give up rather than
                 // poll a dead encode forever and leave the queue stuck on this item.
-                if (!jobDone && next >= available && ++idleTicks > 90) break;
+                if (!jobDone && next >= available)
+                {
+                    // Waiting on the encoder is the expected state for the first few seconds
+                    // and a bug after a minute, and those must not look the same in a log.
+                    if (++idleTicks % 10 == 0)
+                        GD.Print($"[VideoManager] server job {jobId}: waiting on encoder " +
+                                 $"({idleTicks}s, {available} segment(s) ready, fetched {next})");
+                    if (idleTicks > 90)
+                    {
+                        GD.PrintErr($"[VideoManager] server job {jobId}: gave up after {idleTicks}s " +
+                                    $"with {available} segment(s) available");
+                        break;
+                    }
+                }
             }
         }
         finally

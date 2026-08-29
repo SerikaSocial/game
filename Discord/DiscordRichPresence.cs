@@ -43,6 +43,11 @@ public static class DiscordRichPresence
     private static double _reconnectDelay = 5.0;
     private static double _reconnectTimer;
 
+    // Authorize retry: when Discord isn't running the authorize fails silently. We retry
+    // periodically so the game picks up Discord if it starts after the game.
+    private static double _authorizeRetryDelay = 10.0;
+    private static double _authorizeRetryTimer;
+
     // Last presence state — what to push on (re)connect and on roster changes.
     private static string _worldName = "Browsing the menus";
     private static string _worldId;
@@ -178,6 +183,8 @@ public static class DiscordRichPresence
         }
 
         _promptedThisProcess = false;
+        _authorizeRetryTimer = 0;
+        _authorizeRetryDelay = 10.0;
         if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Declined)
             SetConsent(DeviceProfile.Settings.DiscordConsentKind.Unknown);
         else
@@ -212,9 +219,12 @@ public static class DiscordRichPresence
                 }
                 else
                 {
-                    // Discord not running, overlay failed to attach, etc. Don't burn the
-                    // first-run chance — try again next launch, not this one.
-                    GD.Print($"[Discord] authorize failed ({error}) — will retry next launch, not this session");
+                    // Discord not running, overlay failed to attach, etc. Reset the prompt
+                    // guard and schedule a retry so we pick up Discord if it starts later.
+                    _promptedThisProcess = false;
+                    _authorizeRetryTimer = _authorizeRetryDelay;
+                    _authorizeRetryDelay = Math.Min(_authorizeRetryDelay * 2.0, 60.0);
+                    GD.Print($"[Discord] authorize failed ({error}) — will retry in {_authorizeRetryTimer:F0}s");
                 }
                 return;
             }
@@ -344,6 +354,18 @@ public static class DiscordRichPresence
                     _client.Connect();
                 }
             }
+
+            // Retry authorize when Discord wasn't running at boot.
+            if (!Ready && !_tokenApplied && _authorizeRetryTimer > 0)
+            {
+                _authorizeRetryTimer -= delta;
+                if (_authorizeRetryTimer <= 0)
+                {
+                    _authorizeRetryTimer = 0;
+                    GD.Print("[Discord] retrying authorize (Discord may have started)");
+                    BeginAuthorizeFlow();
+                }
+            }
         }
         catch (Exception e)
         {
@@ -409,6 +431,8 @@ public static class DiscordRichPresence
             _reauthTried = false;
             _reconnectDelay = 5.0;
             _reconnectTimer = 0;
+            _authorizeRetryTimer = 0;
+            _authorizeRetryDelay = 10.0;
             PushNow(); // a fresh session has no activity — restore ours
         }
         else if (status == DiscordNative.ClientStatus.Disconnected)
