@@ -1755,8 +1755,8 @@ public sealed partial class AvatarInstance : Node3D
 
         // Cast rays down under each foot to find true terrain / prop surface
         uint mask = 1 | (1 << 2); // World + Props/Remote
-        bool hitL = ProbeTerrain(space, lFootPoseWorld, mask, out var hitLPos, out var hitLNormal);
-        bool hitR = ProbeTerrain(space, rFootPoseWorld, mask, out var hitRPos, out var hitRNormal);
+        bool hitL = ProbeTerrain(space, lFootPoseWorld, skelXform, mask, out var hitLPos, out var hitLNormal);
+        bool hitR = ProbeTerrain(space, rFootPoseWorld, skelXform, mask, out var hitRPos, out var hitRNormal);
 
         float desiredYL = hitL ? (hitLPos.Y + _ankleHeightLeft) : (skelXform.Origin.Y + _ankleHeightLeft);
         float desiredYR = hitR ? (hitRPos.Y + _ankleHeightRight) : (skelXform.Origin.Y + _ankleHeightRight);
@@ -1773,16 +1773,19 @@ public sealed partial class AvatarInstance : Node3D
         _smoothedTargetWorldYL = Mathf.Lerp(_smoothedTargetWorldYL, desiredYL, smoothRate);
         _smoothedTargetWorldYR = Mathf.Lerp(_smoothedTargetWorldYR, desiredYR, smoothRate);
 
-        // Calculate hips drop when one foot is on a lower surface / ledge
+        // Calculate hips drop so the reaching leg has full physical reach to touch the ground
         float avatarBaseAnkleY = skelXform.Origin.Y + Mathf.Min(_ankleHeightLeft, _ankleHeightRight);
-        float dropError = Mathf.Min(0f, Mathf.Min(_smoothedTargetWorldYL - avatarBaseAnkleY, _smoothedTargetWorldYR - avatarBaseAnkleY));
-        float targetHipDrop = Mathf.Clamp(dropError * 0.45f, -0.28f, 0f);
+        float dropErrorL = _smoothedTargetWorldYL - avatarBaseAnkleY;
+        float dropErrorR = _smoothedTargetWorldYR - avatarBaseAnkleY;
+        float minDrop = Mathf.Min(0f, Mathf.Min(dropErrorL, dropErrorR));
+        float targetHipDrop = Mathf.Clamp(minDrop * 0.85f, -0.45f, 0f);
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
 
         // Apply Hip offset relative to bind rest position (no compounding)
         if (_hipsBone >= 0)
         {
-            Skeleton.SetBonePosePosition(_hipsBone, _restHipsPos + Vector3.Up * _smoothedHipDrop);
+            var curHip = Skeleton.GetBonePosePosition(_hipsBone);
+            Skeleton.SetBonePosePosition(_hipsBone, new Vector3(curHip.X, _restHipsPos.Y + _smoothedHipDrop, curHip.Z));
         }
 
         // Solve Two-Bone IK for left leg
@@ -1808,13 +1811,14 @@ public sealed partial class AvatarInstance : Node3D
         }
     }
 
-    private static bool ProbeTerrain(PhysicsDirectSpaceState3D space, Vector3 footPos, uint mask,
+    private static bool ProbeTerrain(PhysicsDirectSpaceState3D space, Vector3 footPos, Transform3D skelXform, uint mask,
                                      out Vector3 hitPos, out Vector3 hitNormal)
     {
         hitPos = footPos;
         hitNormal = Vector3.Up;
-        var q = PhysicsRayQueryParameters3D.Create(
-            footPos + Vector3.Up * 0.45f, footPos + Vector3.Down * 1.5f, mask);
+        var start = new Vector3(footPos.X, skelXform.Origin.Y + 0.80f, footPos.Z);
+        var end = new Vector3(footPos.X, skelXform.Origin.Y - 1.80f, footPos.Z);
+        var q = PhysicsRayQueryParameters3D.Create(start, end, mask);
         var hit = space.IntersectRay(q);
         if (hit.Count == 0) return false;
         hitPos = hit["position"].AsVector3();

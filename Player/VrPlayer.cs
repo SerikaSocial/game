@@ -2275,15 +2275,13 @@ void fragment() {
         }
     }
 
-    private const float MaxStepHeight = 0.42f;
+    private const float MaxStepHeight = 0.55f;
 
     private void StepUp(float delta, Vector3 moveDir, float speed)
     {
-        if (!IsOnFloor() || moveDir.LengthSquared() < 0.01f || speed < 0.1f) return;
+        if (!IsOnFloor() || moveDir.LengthSquared() < 0.001f || speed < 0.1f) return;
 
-        var horizMove = moveDir * (speed * delta);
-        if (horizMove.LengthSquared() < 1e-6f) return;
-
+        var horizMove = moveDir.Normalized() * Mathf.Max(speed * delta, 0.08f);
         var xform = GlobalTransform;
         var testParams = new PhysicsTestMotionParameters3D
         {
@@ -2296,7 +2294,7 @@ void fragment() {
         if (PhysicsServer3D.BodyTestMotion(GetRid(), testParams, result))
         {
             var upXform = xform;
-            upXform.Origin += Vector3.Up * MaxStepHeight;
+            upXform.Origin += Vector3.Up * (MaxStepHeight + 0.05f);
 
             var testUpParams = new PhysicsTestMotionParameters3D
             {
@@ -2313,20 +2311,20 @@ void fragment() {
                 var testDownParams = new PhysicsTestMotionParameters3D
                 {
                     From = forwardUpXform,
-                    Motion = Vector3.Down * (MaxStepHeight + 0.05f),
+                    Motion = Vector3.Down * (MaxStepHeight + 0.1f),
                     Margin = 0.02f,
                 };
                 var downResult = new PhysicsTestMotionResult3D();
                 if (PhysicsServer3D.BodyTestMotion(GetRid(), testDownParams, downResult))
                 {
                     var colNormal = downResult.GetCollisionNormal();
-                    if (colNormal.Y >= 0.65f)
+                    if (colNormal.Y >= 0.55f)
                     {
                         var targetPos = downResult.GetCollisionPoint();
                         float stepRise = targetPos.Y - GlobalPosition.Y;
                         if (stepRise > 0.02f && stepRise <= MaxStepHeight)
                         {
-                            GlobalPosition = new Vector3(GlobalPosition.X + horizMove.X, targetPos.Y, GlobalPosition.Z + horizMove.Z);
+                            GlobalPosition = new Vector3(GlobalPosition.X + horizMove.X, targetPos.Y + 0.02f, GlobalPosition.Z + horizMove.Z);
                         }
                     }
                 }
