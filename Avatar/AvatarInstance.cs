@@ -1657,34 +1657,78 @@ public sealed partial class AvatarInstance : Node3D
 
     // ── Terrain Ground & Slope Foot Conformance (Genshin / AAA Style) ──────────────
 
-    private int _lFootBone = -1, _rFootBone = -1;
-    private int _lToesBone = -1, _rToesBone = -1;
-    private Quaternion _restLFootRot, _restRFootRot;
-    private Quaternion _restLToesRot, _restRToesRot;
+    private int _hipsBone = -1;
+    private int _lUpLegBone = -1, _lLowLegBone = -1, _lFootBone = -1, _lToesBone = -1;
+    private int _rUpLegBone = -1, _rLowLegBone = -1, _rFootBone = -1, _rToesBone = -1;
+    private float _lLegL1, _lLegL2, _rLegL1, _rLegL2;
+    private Vector3 _restDirLUp, _restDirLLow, _restDirRUp, _restDirRLow;
+    private Quaternion _restRotLUp, _restRotLLow, _restRotLFoot, _restRotLToes;
+    private Quaternion _restRotRUp, _restRotRLow, _restRotRFoot, _restRotRToes;
+    private float _ankleHeightLeft = 0.08f, _ankleHeightRight = 0.08f;
+    private float _smoothedHipDrop = 0f;
+    private float _smoothedLFootDrop = 0f;
+    private float _smoothedRFootDrop = 0f;
     private bool _feetBonesResolved;
 
     private void ResolveFootBones()
     {
+        _hipsBone = BoneOf("hips");
+        _lUpLegBone = BoneOf("leftUpperLeg");
+        _lLowLegBone = BoneOf("leftLowerLeg");
         _lFootBone = BoneOf("leftFoot");
-        _rFootBone = BoneOf("rightFoot");
         _lToesBone = BoneOf("leftToes");
+
+        _rUpLegBone = BoneOf("rightUpperLeg");
+        _rLowLegBone = BoneOf("rightLowerLeg");
+        _rFootBone = BoneOf("rightFoot");
         _rToesBone = BoneOf("rightToes");
+
         if (Skeleton != null)
         {
-            if (_lFootBone >= 0) _restLFootRot = Skeleton.GetBoneGlobalRest(_lFootBone).Basis.GetRotationQuaternion();
-            if (_rFootBone >= 0) _restRFootRot = Skeleton.GetBoneGlobalRest(_rFootBone).Basis.GetRotationQuaternion();
-            if (_lToesBone >= 0) _restLToesRot = Skeleton.GetBoneGlobalRest(_lToesBone).Basis.GetRotationQuaternion();
-            if (_rToesBone >= 0) _restRToesRot = Skeleton.GetBoneGlobalRest(_rToesBone).Basis.GetRotationQuaternion();
+            if (_lUpLegBone >= 0 && _lLowLegBone >= 0 && _lFootBone >= 0)
+            {
+                var ru = Skeleton.GetBoneGlobalRest(_lUpLegBone);
+                var rl = Skeleton.GetBoneGlobalRest(_lLowLegBone);
+                var rf = Skeleton.GetBoneGlobalRest(_lFootBone);
+                var du = rl.Origin - ru.Origin;
+                var dl = rf.Origin - rl.Origin;
+                _lLegL1 = du.Length();
+                _lLegL2 = dl.Length();
+                _restDirLUp = _lLegL1 > 1e-4f ? du / _lLegL1 : Vector3.Down;
+                _restDirLLow = _lLegL2 > 1e-4f ? dl / _lLegL2 : Vector3.Down;
+                _restRotLUp = ru.Basis.GetRotationQuaternion();
+                _restRotLLow = rl.Basis.GetRotationQuaternion();
+                _restRotLFoot = rf.Basis.GetRotationQuaternion();
+                _ankleHeightLeft = Mathf.Max(0.04f, rf.Origin.Y);
+            }
+            if (_rUpLegBone >= 0 && _rLowLegBone >= 0 && _rFootBone >= 0)
+            {
+                var ru = Skeleton.GetBoneGlobalRest(_rUpLegBone);
+                var rl = Skeleton.GetBoneGlobalRest(_rLowLegBone);
+                var rf = Skeleton.GetBoneGlobalRest(_rFootBone);
+                var du = rl.Origin - ru.Origin;
+                var dl = rf.Origin - rl.Origin;
+                _rLegL1 = du.Length();
+                _rLegL2 = dl.Length();
+                _restDirRUp = _rLegL1 > 1e-4f ? du / _rLegL1 : Vector3.Down;
+                _restDirRLow = _rLegL2 > 1e-4f ? dl / _rLegL2 : Vector3.Down;
+                _restRotRUp = ru.Basis.GetRotationQuaternion();
+                _restRotRLow = rl.Basis.GetRotationQuaternion();
+                _restRotRFoot = rf.Basis.GetRotationQuaternion();
+                _ankleHeightRight = Mathf.Max(0.04f, rf.Origin.Y);
+            }
+            if (_lToesBone >= 0) _restRotLToes = Skeleton.GetBoneGlobalRest(_lToesBone).Basis.GetRotationQuaternion();
+            if (_rToesBone >= 0) _restRotRToes = Skeleton.GetBoneGlobalRest(_rToesBone).Basis.GetRotationQuaternion();
         }
         _feetBonesResolved = true;
     }
 
-    /// Adapt feet and toes to terrain slopes and stairs (Genshin / AAA ground conformance).
+    /// Adapt feet, legs, and pelvis to terrain slopes, ledges, and steps (Genshin / AAA ground conformance).
     public void ApplyGroundSlopeIk(float dt, bool onFloor)
     {
-        if (!onFloor || Skeleton == null) return;
+        if (Skeleton == null) return;
         if (!_feetBonesResolved) ResolveFootBones();
-        if (_lFootBone < 0 && _rFootBone < 0) return;
+        if (_lFootBone < 0 || _rFootBone < 0) return;
 
         var space = Skeleton.GetWorld3D()?.DirectSpaceState;
         if (space == null) return;
@@ -1692,43 +1736,169 @@ public sealed partial class AvatarInstance : Node3D
         var skelXform = Skeleton.GlobalTransform;
         var skelInv = skelXform.AffineInverse();
 
-        AdaptFootToGround(space, _lFootBone, _lToesBone, _restLFootRot, _restLToesRot, skelXform, skelInv);
-        AdaptFootToGround(space, _rFootBone, _rToesBone, _restRFootRot, _restRToesRot, skelXform, skelInv);
+        if (!onFloor)
+        {
+            // Smoothly recover rest height when in mid-air
+            _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, 0f, dt * 10f);
+            _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, 0f, dt * 10f);
+            _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, 0f, dt * 10f);
+            return;
+        }
+
+        var lFootPoseWorld = skelXform * Skeleton.GetBoneGlobalPose(_lFootBone).Origin;
+        var rFootPoseWorld = skelXform * Skeleton.GetBoneGlobalPose(_rFootBone).Origin;
+
+        // Cast rays down under each foot to find true terrain / prop surface
+        uint mask = 1 | (1 << 2); // World + Props/Remote
+        bool hitL = ProbeTerrain(space, lFootPoseWorld, mask, out var hitLPos, out var hitLNormal);
+        bool hitR = ProbeTerrain(space, rFootPoseWorld, mask, out var hitRPos, out var hitRNormal);
+
+        float targetLDrop = hitL ? (hitLPos.Y + _ankleHeightLeft - lFootPoseWorld.Y) : 0f;
+        float targetRDrop = hitR ? (hitRPos.Y + _ankleHeightRight - rFootPoseWorld.Y) : 0f;
+
+        // Limit maximum extension and drop
+        targetLDrop = Mathf.Clamp(targetLDrop, -0.6f, 0.45f);
+        targetRDrop = Mathf.Clamp(targetRDrop, -0.6f, 0.45f);
+
+        // Calculate hips drop when one foot is on a lower surface / ledge
+        float targetHipDrop = Mathf.Min(0f, Mathf.Min(targetLDrop, targetRDrop));
+        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.35f, 0f);
+
+        // Smooth damping
+        float smoothRate = dt * 15f;
+        _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
+        _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, targetLDrop, smoothRate);
+        _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, targetRDrop, smoothRate);
+
+        // Apply Hip offset
+        if (_hipsBone >= 0 && Mathf.Abs(_smoothedHipDrop) > 1e-4f)
+        {
+            var hipPose = Skeleton.GetBonePosePosition(_hipsBone);
+            Skeleton.SetBonePosePosition(_hipsBone, hipPose + Vector3.Up * _smoothedHipDrop);
+        }
+
+        // Solve Two-Bone IK for left leg
+        if (_lUpLegBone >= 0 && _lLowLegBone >= 0 && _lLegL1 > 1e-4f)
+        {
+            var targetWorldL = new Vector3(lFootPoseWorld.X, lFootPoseWorld.Y + _smoothedLFootDrop, lFootPoseWorld.Z);
+            var targetSkelL = skelInv * targetWorldL;
+            var footRotL = FootSoleRotation(hitL ? hitLNormal : Vector3.Up, skelXform, _restRotLFoot);
+            SolveTwoBoneLeg(Skeleton, _lUpLegBone, _lLowLegBone, _lFootBone, _lToesBone,
+                            targetSkelL, footRotL, _lLegL1, _lLegL2,
+                            _restDirLUp, _restDirLLow, _restRotLUp, _restRotLLow, _restRotLFoot, _restRotLToes);
+        }
+
+        // Solve Two-Bone IK for right leg
+        if (_rUpLegBone >= 0 && _rLowLegBone >= 0 && _rLegL1 > 1e-4f)
+        {
+            var targetWorldR = new Vector3(rFootPoseWorld.X, rFootPoseWorld.Y + _smoothedRFootDrop, rFootPoseWorld.Z);
+            var targetSkelR = skelInv * targetWorldR;
+            var footRotR = FootSoleRotation(hitR ? hitRNormal : Vector3.Up, skelXform, _restRotRFoot);
+            SolveTwoBoneLeg(Skeleton, _rUpLegBone, _rLowLegBone, _rFootBone, _rToesBone,
+                            targetSkelR, footRotR, _rLegL1, _rLegL2,
+                            _restDirRUp, _restDirRLow, _restRotRUp, _restRotRLow, _restRotRFoot, _restRotRToes);
+        }
     }
 
-    private void AdaptFootToGround(PhysicsDirectSpaceState3D space, int footBone, int toesBone,
-                                   Quaternion restFoot, Quaternion restToes,
-                                   Transform3D skelXform, Transform3D skelInv)
+    private static bool ProbeTerrain(PhysicsDirectSpaceState3D space, Vector3 footPos, uint mask,
+                                     out Vector3 hitPos, out Vector3 hitNormal)
     {
-        if (footBone < 0) return;
-
-        var footGlobal = skelXform * Skeleton.GetBoneGlobalPose(footBone).Origin;
+        hitPos = footPos;
+        hitNormal = Vector3.Up;
         var q = PhysicsRayQueryParameters3D.Create(
-            footGlobal + Vector3.Up * 0.35f, footGlobal + Vector3.Down * 0.8f, 1 /* ground layer */);
+            footPos + Vector3.Up * 0.45f, footPos + Vector3.Down * 1.0f, mask);
         var hit = space.IntersectRay(q);
-        if (hit.Count == 0) return;
+        if (hit.Count == 0) return false;
+        hitPos = hit["position"].AsVector3();
+        hitNormal = hit["normal"].AsVector3();
+        return true;
+    }
 
-        var normalWorld = hit["normal"].AsVector3();
-        if (normalWorld.Dot(Vector3.Up) < 0.3f) return; // ignore vertical walls
+    private static Quaternion FootSoleRotation(Vector3 worldNormal, Transform3D skelXform, Quaternion restFoot)
+    {
+        var n = (skelXform.Basis.Inverse() * worldNormal).Normalized();
+        if (n.LengthSquared() < 1e-4f || n.Dot(Vector3.Up) < 0.2f) return restFoot;
 
-        var normalSkel = (skelInv.Basis * normalWorld).Normalized();
-        if (normalSkel.LengthSquared() < 1e-4f) return;
+        float maxTilt = Mathf.DegToRad(45f);
+        float tiltAngle = Mathf.Acos(Mathf.Clamp(Vector3.Up.Dot(n), -1f, 1f));
+        if (tiltAngle > maxTilt)
+        {
+            var axis = Vector3.Up.Cross(n).Normalized();
+            n = Vector3.Up.Rotated(axis, maxTilt);
+        }
 
-        // Angle difference with Up in skeleton space
-        float tiltAngle = Mathf.Acos(Mathf.Clamp(Vector3.Up.Dot(normalSkel), -1f, 1f));
-        if (tiltAngle < Mathf.DegToRad(0.8f)) return; // already flat
-        tiltAngle = Mathf.Min(tiltAngle, Mathf.DegToRad(45f));
+        var tilt = SwingTo(Vector3.Up, n);
+        return tilt * restFoot;
+    }
 
-        var tiltAxis = Vector3.Up.Cross(normalSkel).Normalized();
-        var tiltQuat = new Quaternion(tiltAxis, tiltAngle);
+    private static void SolveTwoBoneLeg(Skeleton3D skel, int upperBone, int lowerBone, int footBone, int toesBone,
+                                        Vector3 targetSkel, Quaternion footRot,
+                                        float l1, float l2,
+                                        Vector3 restDirUpper, Vector3 restDirLower,
+                                        Quaternion restRotUpper, Quaternion restRotLower,
+                                        Quaternion restRotFoot, Quaternion restRotToes)
+    {
+        var hip = skel.GetBoneGlobalPose(upperBone).Origin;
+        var toTarget = targetSkel - hip;
+        float dist = toTarget.Length();
+        if (dist < 1e-4f) return;
 
-        var currentFootRot = Skeleton.GetBonePoseRotation(footBone);
-        Skeleton.SetBonePoseRotation(footBone, currentFootRot * (restFoot.Inverse() * tiltQuat * restFoot));
+        float maxExt = (l1 + l2) * 0.999f;
+        float minExt = Mathf.Abs(l1 - l2) + 1e-3f;
+        float d = Mathf.Clamp(dist, minExt, maxExt);
+        var aim = toTarget / dist;
+
+        float cosA = (l1 * l1 + d * d - l2 * l2) / (2f * l1 * d);
+        float a = Mathf.Acos(Mathf.Clamp(cosA, -1f, 1f));
+
+        var pole = new Vector3(0, 0, -1f);
+        var axis = aim.Cross(pole);
+        if (axis.LengthSquared() < 1e-6f) axis = aim.Cross(Vector3.Right);
+        axis = axis.Normalized();
+
+        var upperDir = aim.Rotated(axis, a).Normalized();
+        var knee = hip + upperDir * l1;
+        var lowerDir = targetSkel - knee;
+        if (lowerDir.LengthSquared() < 1e-8f) return;
+        lowerDir = lowerDir.Normalized();
+
+        var upperRot = SwingTo(restDirUpper, upperDir) * restRotUpper;
+        var lowerRot = SwingTo(restDirLower, lowerDir) * restRotLower;
+
+        SetBoneGlobalRotation(skel, upperBone, upperRot);
+        skel.SetBonePoseRotation(lowerBone, upperRot.Inverse() * lowerRot);
+
+        if (footBone >= 0)
+        {
+            skel.SetBonePoseRotation(footBone, lowerRot.Inverse() * footRot);
+        }
 
         if (toesBone >= 0)
         {
-            var currentToesRot = Skeleton.GetBonePoseRotation(toesBone);
-            Skeleton.SetBonePoseRotation(toesBone, currentToesRot * (restToes.Inverse() * tiltQuat * restToes));
+            var currentToes = restRotToes;
+            skel.SetBonePoseRotation(toesBone, footRot.Inverse() * (footRot * currentToes));
         }
+    }
+
+    private static void SetBoneGlobalRotation(Skeleton3D skel, int bone, Quaternion globalRot)
+    {
+        int parent = skel.GetBoneParent(bone);
+        var parentRot = parent >= 0
+            ? skel.GetBoneGlobalPose(parent).Basis.GetRotationQuaternion()
+            : Quaternion.Identity;
+        skel.SetBonePoseRotation(bone, (parentRot.Inverse() * globalRot).Normalized());
+    }
+
+    private static Quaternion SwingTo(Vector3 from, Vector3 to)
+    {
+        float dot = from.Dot(to);
+        if (dot > 0.9999f) return Quaternion.Identity;
+        if (dot < -0.9999f)
+        {
+            var ortho = from.Cross(Vector3.Up);
+            if (ortho.LengthSquared() < 1e-6f) ortho = from.Cross(Vector3.Right);
+            return new Quaternion(ortho.Normalized(), Mathf.Pi);
+        }
+        return new Quaternion(from, to);
     }
 }
