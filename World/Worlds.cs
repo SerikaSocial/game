@@ -228,9 +228,9 @@ public static partial class Worlds
         root.AddChild(Sphere(0.25f, new Vector3(0.7f, 0.55f, 2.2f), Mat(new Color(0.4f, 0.5f, 0.6f), 0.95f)));
 
         // Coffee table top (collidable). Legs are decorative only.
-        root.AddChild(CollidableBox(new Vector3(1.4f, 0.08f, 0.7f), new Vector3(0, 0.42f, 1.1f), Mat(new Color(0.28f, 0.18f, 0.11f), 0.5f, 0.1f)));
-        foreach (var (lx, lz) in new[] { (-0.6f, -0.28f), (0.6f, -0.28f), (-0.6f, 0.28f), (0.6f, 0.28f) })
-            root.AddChild(Box(new Vector3(0.08f, 0.42f, 0.08f), new Vector3(lx, 0.21f, 1.1f + lz), Mat(new Color(0.2f, 0.13f, 0.08f))));
+        root.AddChild(CollidableBox(new Vector3(1.8f, 0.08f, 0.9f), new Vector3(0, 0.38f, 1.1f), Mat(new Color(0.28f, 0.18f, 0.11f), 0.5f, 0.1f)));
+        foreach (var (lx, lz) in new[] { (-0.8f, -0.38f), (0.8f, -0.38f), (-0.8f, 0.38f), (0.8f, 0.38f) })
+            root.AddChild(Box(new Vector3(0.08f, 0.38f, 0.08f), new Vector3(lx, 0.19f, 1.1f + lz), Mat(new Color(0.2f, 0.13f, 0.08f))));
 
         // Bookshelf against the left wall (collidable). Books are decorative only.
         var shelfMat = Mat(new Color(0.26f, 0.17f, 0.10f), 0.7f);

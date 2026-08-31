@@ -1725,6 +1725,10 @@ public sealed partial class AvatarInstance : Node3D
         _feetBonesResolved = true;
     }
 
+    private float _smoothedTargetWorldYL = 0f;
+    private float _smoothedTargetWorldYR = 0f;
+    private bool _targetsInitialized = false;
+
     /// Adapt feet, legs, and pelvis to terrain slopes, ledges, and steps (Genshin / AAA ground conformance).
     public void ApplyGroundSlopeIk(float dt, bool onFloor)
     {
@@ -1741,9 +1745,8 @@ public sealed partial class AvatarInstance : Node3D
         if (!onFloor)
         {
             // Smoothly recover rest height when in mid-air
+            _targetsInitialized = false;
             _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, 0f, dt * 10f);
-            _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, 0f, dt * 10f);
-            _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, 0f, dt * 10f);
             return;
         }
 
@@ -1755,24 +1758,26 @@ public sealed partial class AvatarInstance : Node3D
         bool hitL = ProbeTerrain(space, lFootPoseWorld, mask, out var hitLPos, out var hitLNormal);
         bool hitR = ProbeTerrain(space, rFootPoseWorld, mask, out var hitRPos, out var hitRNormal);
 
-        float targetYL = hitL ? (hitLPos.Y + _ankleHeightLeft) : lFootPoseWorld.Y;
-        float targetYR = hitR ? (hitRPos.Y + _ankleHeightRight) : rFootPoseWorld.Y;
+        float desiredYL = hitL ? (hitLPos.Y + _ankleHeightLeft) : (skelXform.Origin.Y + _ankleHeightLeft);
+        float desiredYR = hitR ? (hitRPos.Y + _ankleHeightRight) : (skelXform.Origin.Y + _ankleHeightRight);
 
-        float targetLDrop = Mathf.Clamp(targetYL - lFootPoseWorld.Y, -1.2f, 0.45f);
-        float targetRDrop = Mathf.Clamp(targetYR - rFootPoseWorld.Y, -1.2f, 0.45f);
+        if (!_targetsInitialized)
+        {
+            _smoothedTargetWorldYL = desiredYL;
+            _smoothedTargetWorldYR = desiredYR;
+            _targetsInitialized = true;
+        }
+
+        // Smoothly track the target world Y
+        float smoothRate = dt * 18f;
+        _smoothedTargetWorldYL = Mathf.Lerp(_smoothedTargetWorldYL, desiredYL, smoothRate);
+        _smoothedTargetWorldYR = Mathf.Lerp(_smoothedTargetWorldYR, desiredYR, smoothRate);
 
         // Calculate hips drop when one foot is on a lower surface / ledge
         float avatarBaseAnkleY = skelXform.Origin.Y + Mathf.Min(_ankleHeightLeft, _ankleHeightRight);
-        float dropErrorL = targetYL - avatarBaseAnkleY;
-        float dropErrorR = targetYR - avatarBaseAnkleY;
-        float targetHipDrop = Mathf.Min(0f, Mathf.Min(dropErrorL, dropErrorR)) * 0.45f;
-        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.25f, 0f);
-
-        // Smooth damping
-        float smoothRate = dt * 18f;
+        float dropError = Mathf.Min(0f, Mathf.Min(_smoothedTargetWorldYL - avatarBaseAnkleY, _smoothedTargetWorldYR - avatarBaseAnkleY));
+        float targetHipDrop = Mathf.Clamp(dropError * 0.45f, -0.28f, 0f);
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
-        _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, targetLDrop, smoothRate);
-        _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, targetRDrop, smoothRate);
 
         // Apply Hip offset relative to bind rest position (no compounding)
         if (_hipsBone >= 0)
@@ -1783,7 +1788,7 @@ public sealed partial class AvatarInstance : Node3D
         // Solve Two-Bone IK for left leg
         if (_lUpLegBone >= 0 && _lLowLegBone >= 0 && _lLegL1 > 1e-4f)
         {
-            var targetWorldL = new Vector3(lFootPoseWorld.X, lFootPoseWorld.Y + _smoothedLFootDrop, lFootPoseWorld.Z);
+            var targetWorldL = new Vector3(lFootPoseWorld.X, _smoothedTargetWorldYL, lFootPoseWorld.Z);
             var targetSkelL = skelInv * targetWorldL;
             var footRotL = FootSoleRotation(hitL ? hitLNormal : Vector3.Up, skelXform, _restRotLFoot);
             SolveTwoBoneLeg(Skeleton, _lUpLegBone, _lLowLegBone, _lFootBone, _lToesBone,
@@ -1794,7 +1799,7 @@ public sealed partial class AvatarInstance : Node3D
         // Solve Two-Bone IK for right leg
         if (_rUpLegBone >= 0 && _rLowLegBone >= 0 && _rLegL1 > 1e-4f)
         {
-            var targetWorldR = new Vector3(rFootPoseWorld.X, rFootPoseWorld.Y + _smoothedRFootDrop, rFootPoseWorld.Z);
+            var targetWorldR = new Vector3(rFootPoseWorld.X, _smoothedTargetWorldYR, rFootPoseWorld.Z);
             var targetSkelR = skelInv * targetWorldR;
             var footRotR = FootSoleRotation(hitR ? hitRNormal : Vector3.Up, skelXform, _restRotRFoot);
             SolveTwoBoneLeg(Skeleton, _rUpLegBone, _rLowLegBone, _rFootBone, _rToesBone,
