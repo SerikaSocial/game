@@ -1778,7 +1778,7 @@ public sealed partial class AvatarInstance : Node3D
         float dropErrorL = _smoothedTargetWorldYL - avatarBaseAnkleY;
         float dropErrorR = _smoothedTargetWorldYR - avatarBaseAnkleY;
         float minDrop = Mathf.Min(0f, Mathf.Min(dropErrorL, dropErrorR));
-        float targetHipDrop = Mathf.Clamp(minDrop * 0.85f, -0.45f, 0f);
+        float targetHipDrop = Mathf.Clamp(minDrop * 0.95f, -0.50f, 0f);
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
 
         // Apply Hip offset relative to bind rest position (no compounding)
@@ -1860,6 +1860,9 @@ public sealed partial class AvatarInstance : Node3D
         float d = Mathf.Clamp(dist, minExt, maxExt);
         var aim = toTarget / dist;
 
+        float deficit = Mathf.Max(0f, dist - maxExt);
+        float tiptoeAngle = Mathf.Clamp(deficit / 0.12f, 0f, 1f) * Mathf.DegToRad(50f);
+
         float cosA = (l1 * l1 + d * d - l2 * l2) / (2f * l1 * d);
         float a = Mathf.Acos(Mathf.Clamp(cosA, -1f, 1f));
 
@@ -1884,12 +1887,15 @@ public sealed partial class AvatarInstance : Node3D
 
         if (footBone >= 0)
         {
-            skel.SetBonePoseRotation(footBone, lowerRot.Inverse() * footRot);
+            var tiptoeRot = new Quaternion(Vector3.Right, tiptoeAngle);
+            var finalFootRot = footRot * tiptoeRot;
+            skel.SetBonePoseRotation(footBone, lowerRot.Inverse() * finalFootRot);
         }
 
         if (toesBone >= 0)
         {
-            var currentToes = restRotToes;
+            var toeFlex = new Quaternion(Vector3.Right, -tiptoeAngle * 0.85f);
+            var currentToes = restRotToes * toeFlex;
             skel.SetBonePoseRotation(toesBone, footRot.Inverse() * (footRot * currentToes));
         }
     }
