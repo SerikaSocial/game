@@ -174,14 +174,30 @@ public static partial class Worlds
         // Tiered seating with SeatNodes.
         var seatMat = Mat(new Color(0.12f, 0.08f, 0.15f), 0.9f);
         var handleMat = Mat(new Color(0.18f, 0.14f, 0.22f), 0.5f);
+        var stairMat = Mat(new Color(0.10f, 0.07f, 0.12f), 0.95f);
+
         for (int row = 0; row < 5; row++)
         {
             float z = -2f + row * 4.5f;
             float y = 0.3f + row * 0.35f;
+
+            // Row seating platforms
             root.AddChild(CollidableBox(new Vector3(8f, 0.5f, 1.4f), new Vector3(-5f, y, z), seatMat));
             root.AddChild(CollidableBox(new Vector3(8f, 0.5f, 1.4f), new Vector3(5f, y, z), seatMat));
             root.AddChild(CollidableBox(new Vector3(8f, 0.8f, 0.2f), new Vector3(-5f, y + 0.35f, z + 0.6f), seatMat));
             root.AddChild(CollidableBox(new Vector3(8f, 0.8f, 0.2f), new Vector3(5f, y + 0.35f, z + 0.6f), seatMat));
+
+            // Central aisle stairs and landing for seamless traversal
+            float prevY = row == 0 ? 0f : (0.3f + (row - 1) * 0.35f);
+            float stepRise = (y - prevY) / 3f;
+            float zStepStart = z - 2.1f;
+            for (int s = 0; s < 3; s++)
+            {
+                float sY = prevY + (s + 1) * stepRise;
+                float sZ = zStepStart + s * 0.7f;
+                root.AddChild(CollidableBox(new Vector3(1.8f, 0.12f, 0.72f), new Vector3(0, sY - 0.06f, sZ), stairMat));
+            }
+            root.AddChild(CollidableBox(new Vector3(1.8f, 0.5f, 1.4f), new Vector3(0, y, z), stairMat));
 
             // Stool handles / armrests on the left, right, and between chairs for each bench
             foreach (float benchCenterX in new[] { -5f, 5f })

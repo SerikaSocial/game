@@ -1658,6 +1658,7 @@ public sealed partial class AvatarInstance : Node3D
     // ── Terrain Ground & Slope Foot Conformance (Genshin / AAA Style) ──────────────
 
     private int _hipsBone = -1;
+    private Vector3 _restHipsPos = Vector3.Zero;
     private int _lUpLegBone = -1, _lLowLegBone = -1, _lFootBone = -1, _lToesBone = -1;
     private int _rUpLegBone = -1, _rLowLegBone = -1, _rFootBone = -1, _rToesBone = -1;
     private float _lLegL1, _lLegL2, _rLegL1, _rLegL2;
@@ -1685,6 +1686,7 @@ public sealed partial class AvatarInstance : Node3D
 
         if (Skeleton != null)
         {
+            if (_hipsBone >= 0) _restHipsPos = Skeleton.GetBonePosePosition(_hipsBone);
             if (_lUpLegBone >= 0 && _lLowLegBone >= 0 && _lFootBone >= 0)
             {
                 var ru = Skeleton.GetBoneGlobalRest(_lUpLegBone);
@@ -1757,24 +1759,23 @@ public sealed partial class AvatarInstance : Node3D
         float targetRDrop = hitR ? (hitRPos.Y + _ankleHeightRight - rFootPoseWorld.Y) : 0f;
 
         // Limit maximum extension and drop
-        targetLDrop = Mathf.Clamp(targetLDrop, -0.6f, 0.45f);
-        targetRDrop = Mathf.Clamp(targetRDrop, -0.6f, 0.45f);
+        targetLDrop = Mathf.Clamp(targetLDrop, -1.0f, 0.45f);
+        targetRDrop = Mathf.Clamp(targetRDrop, -1.0f, 0.45f);
 
         // Calculate hips drop when one foot is on a lower surface / ledge
-        float targetHipDrop = Mathf.Min(0f, Mathf.Min(targetLDrop, targetRDrop));
-        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.35f, 0f);
+        float targetHipDrop = Mathf.Min(0f, Mathf.Min(targetLDrop, targetRDrop)) * 0.40f;
+        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.22f, 0f);
 
         // Smooth damping
-        float smoothRate = dt * 15f;
+        float smoothRate = dt * 16f;
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
         _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, targetLDrop, smoothRate);
         _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, targetRDrop, smoothRate);
 
-        // Apply Hip offset
-        if (_hipsBone >= 0 && Mathf.Abs(_smoothedHipDrop) > 1e-4f)
+        // Apply Hip offset relative to bind rest position (no compounding)
+        if (_hipsBone >= 0)
         {
-            var hipPose = Skeleton.GetBonePosePosition(_hipsBone);
-            Skeleton.SetBonePosePosition(_hipsBone, hipPose + Vector3.Up * _smoothedHipDrop);
+            Skeleton.SetBonePosePosition(_hipsBone, _restHipsPos + Vector3.Up * _smoothedHipDrop);
         }
 
         // Solve Two-Bone IK for left leg
@@ -1806,7 +1807,7 @@ public sealed partial class AvatarInstance : Node3D
         hitPos = footPos;
         hitNormal = Vector3.Up;
         var q = PhysicsRayQueryParameters3D.Create(
-            footPos + Vector3.Up * 0.45f, footPos + Vector3.Down * 1.0f, mask);
+            footPos + Vector3.Up * 0.45f, footPos + Vector3.Down * 1.5f, mask);
         var hit = space.IntersectRay(q);
         if (hit.Count == 0) return false;
         hitPos = hit["position"].AsVector3();
@@ -1851,12 +1852,14 @@ public sealed partial class AvatarInstance : Node3D
         float cosA = (l1 * l1 + d * d - l2 * l2) / (2f * l1 * d);
         float a = Mathf.Acos(Mathf.Clamp(cosA, -1f, 1f));
 
-        var pole = new Vector3(0, 0, -1f);
-        var axis = aim.Cross(pole);
-        if (axis.LengthSquared() < 1e-6f) axis = aim.Cross(Vector3.Right);
-        axis = axis.Normalized();
-
+        // Lateral bend axis (+X). Knee must ALWAYS bend forward (-Z).
+        var axis = Vector3.Right;
         var upperDir = aim.Rotated(axis, a).Normalized();
+        if (upperDir.Z > aim.Z)
+        {
+            upperDir = aim.Rotated(axis, -a).Normalized();
+        }
+
         var knee = hip + upperDir * l1;
         var lowerDir = targetSkel - knee;
         if (lowerDir.LengthSquared() < 1e-8f) return;

@@ -221,6 +221,12 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
         CollisionLayer = PhysicsLayers.LocalPlayer;
         CollisionMask = PhysicsLayers.LocalPlayerMask;
 
+        // Stair and slope traversal
+        FloorSnapLength = 0.35f;
+        FloorConstantSpeed = true;
+        FloorBlockOnWall = false;
+        FloorMaxAngle = Mathf.DegToRad(48f);
+
         _collider = new CollisionShape3D
         {
             Shape = new CapsuleShape3D { Height = 1.6f, Radius = 0.25f },

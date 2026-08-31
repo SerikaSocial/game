@@ -84,6 +84,12 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         CollisionLayer = PhysicsLayers.LocalPlayer;
         CollisionMask = PhysicsLayers.LocalPlayerMask;
 
+        // Stair and slope traversal
+        FloorSnapLength = 0.35f;
+        FloorConstantSpeed = true;
+        FloorBlockOnWall = false;
+        FloorMaxAngle = Mathf.DegToRad(48f);
+
         // Capsule body + collision.
         _capsuleShape = new CapsuleShape3D { Height = StandHeight, Radius = 0.3f };
         _collision = new CollisionShape3D { Shape = _capsuleShape };
