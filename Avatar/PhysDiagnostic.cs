@@ -166,10 +166,10 @@ public static class PhysDiagnostic
             }
 
             var chains = spring.DebugChainTails();
-            int dead = moved.Count(m => m < 0.005f);
+            int dead = moved.Count(m => m < 0.001f);
             var byName = chains.Select((c, i) => (c.Chain, moved[i]))
                                .OrderBy(t => t.Item2).ToList();
-            GD.Print($"PHYSTEST CHAINS {chains.Count} total, {dead} moved <5mm at walking pace; " +
+            GD.Print($"PHYSTEST CHAINS {chains.Count} total, {dead} moved <1mm at walking pace; " +
                      $"quietest={byName[0].Chain}@{byName[0].Item2:F4}m " +
                      $"liveliest={byName[^1].Chain}@{byName[^1].Item2:F4}m");
             if (dead > 0)

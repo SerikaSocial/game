@@ -472,6 +472,55 @@ public static partial class VrDiagnostic
                          $"{(ok ? "ok — dash fires forward only, diagonals turn instead" : "FAIL — dash either does not fire or fires while turning")}");
             });
 
+            // ── BODY ─────────────────────────────────────────────────────────────────
+            // Everything below is about the avatar's own body rather than about input, and none
+            // of it existed while the body was a capsule with two arms bolted on. Each check is
+            // a thing a player notices immediately in a headset and which no earlier phase could
+            // see: your legs, your height, your wrists, and whether you swivel when you glance.
+            Add("body-reset", () => { Recentre(); _headYaw = 0f; _handRoll[0] = _handRoll[1] = 0f; }, 30);
+
+            // HEAD — the whole torso solve is only worth anything if it lands the head where the
+            // headset is. Every other body check is downstream of this one.
+            Add("body-head", () => { }, 10, CheckHeadLandsOnHeadset);
+
+            // POSTURE — standing upright must LOOK upright. A spine that bridges hips to head
+            // will happily settle into a permanent stoop if the lean terms are biased, and a
+            // hunched avatar is glaring to everyone else in the room and invisible to its owner.
+            Add("body-posture", () => { }, 10, CheckStandingPosture);
+
+            // PLANT — a small lean must not move the feet. This is the "my avatar skates" report.
+            Add("plant-mark", MarkFeet, 10);
+            Add("plant-lean", () => _head += new Vector3(0.12f, 0, 0), 40, CheckFeetStayed);
+
+            // STEP — a real walk must move them, and land them back under the body.
+            Add("step-reset", () => { Recentre(); }, 40);
+            Add("step-mark", MarkFeet, 10);
+            Add("step-walk", () => SetMoveStick(new Vector2(0, MoveFwd)), 80,
+                () => { SetMoveStick(Vector2.Zero); }, null);
+            Add("step-settle", () => { }, 40, CheckFeetStepped);
+
+            // CROUCH — ducking must bend the avatar and shrink the collider, or you cannot get
+            // under anything and your avatar stands bolt upright while you are on the floor.
+            Add("crouch-reset", () => { Recentre(); }, 40);
+            Add("crouch-mark", MarkStanding, 10);
+            Add("crouch-down", () => _head = new Vector3(0, 1.10f, 0), 60, CheckCrouched);
+
+            // WRIST — turning a controller must turn the avatar's wrist by about as much.
+            Add("wrist-reset", () => { Recentre(); }, 40);
+            Add("wrist-mark", MarkWrist, 10);
+            Add("wrist-roll", () => _handRoll[1] = Mathf.DegToRad(60f), 30, CheckWristRolled);
+
+            // YAW — a glance must not rotate the body; a sustained turn must.
+            //
+            // Measured as a CHANGE from a baseline taken here, not as an absolute heading: the
+            // DASH phase leaves the rig snapped 60° round and `Recentre` only moves it, so an
+            // absolute reading is 60° of someone else's turn plus whatever this phase did.
+            Add("yaw-reset", () => { Recentre(); _handRoll[1] = 0f; _headYaw = 0f; }, 60,
+                () => _yawBase = BodyYawDegrees());
+            Add("yaw-glance", () => _headYaw = Mathf.DegToRad(25f), 60, MarkGlanceYaw);
+            Add("yaw-turn", () => _headYaw = Mathf.DegToRad(85f), 120, CheckBodyYaw);
+            Add("yaw-clear", () => { _headYaw = 0f; Recentre(); }, 30);
+
             // ── GEST ─────────────────────────────────────────────────────────────────
             Add("gesture", () => { }, 1, CheckGestures);
 
@@ -518,6 +567,228 @@ public static partial class VrDiagnostic
         private float _dashTravel;
         private Vector3 _driftStart;
         private Vector3 _reseatStart;
+
+        // ── Body-check state ─────────────────────────────────────────────────────────
+        private float _headYaw;
+        private readonly float[] _handRoll = new float[2];
+        private readonly Vector3[] _footMark = new Vector3[2];
+        private float _standMarkHipsY, _standMarkCapsule;
+        private Basis _wristMark;
+        private float _glanceYawDelta, _yawBase;
+
+        /// World-space position of the avatar's foot bone, `i` 0 = left.
+        private Vector3 FootWorld(int i)
+        {
+            var av = _vr.Avatar;
+            var skel = av?.Skeleton;
+            if (skel == null) return Vector3.Zero;
+            int bone = av.BoneOf(i == 0 ? "leftFoot" : "rightFoot");
+            if (bone < 0) return Vector3.Zero;
+            return skel.GlobalTransform * skel.GetBoneGlobalPose(bone).Origin;
+        }
+
+        private bool HasBody()
+        {
+            var av = _vr.Avatar;
+            return av?.Skeleton != null && av.BoneOf("hips") >= 0 && av.BoneOf("head") >= 0;
+        }
+
+        private void MarkFeet()
+        {
+            _footMark[0] = FootWorld(0);
+            _footMark[1] = FootWorld(1);
+        }
+
+        private void MarkStanding()
+        {
+            var av = _vr.Avatar;
+            var skel = av?.Skeleton;
+            _standMarkHipsY = skel != null && av.BoneOf("hips") >= 0
+                ? skel.GetBoneGlobalPose(av.BoneOf("hips")).Origin.Y : 0f;
+            _standMarkCapsule = CapsuleHeight();
+        }
+
+        private float CapsuleHeight()
+        {
+            foreach (var child in _vr.GetChildren())
+                if (child is CollisionShape3D cs && cs.Shape is CapsuleShape3D cap) return cap.Height;
+            return 0f;
+        }
+
+        private void MarkWrist()
+        {
+            var av = _vr.Avatar;
+            var skel = av?.Skeleton;
+            int bone = av?.BoneOf("rightHand") ?? -1;
+            _wristMark = bone >= 0 && skel != null
+                ? skel.GetBoneGlobalPose(bone).Basis : Basis.Identity;
+        }
+
+        /// The head BONE must land where the headset is, allowing for the rig's own head-bone →
+        /// eye offset. Everything else in the body solve hangs off the hips being placed from
+        /// this, so a failure here means every other body number is meaningless.
+        private void CheckHeadLandsOnHeadset()
+        {
+            if (!HasBody()) { GD.Print("VRTEST HEAD   rig has no hips/head — SKIPPED"); return; }
+
+            var av = _vr.Avatar;
+            var skel = av.Skeleton;
+            var headWorld = skel.GlobalTransform * skel.GetBoneGlobalPose(av.BoneOf("head")).Origin;
+            // Where the head bone SHOULD be: the headset, walked back down the eye offset.
+            var want = _cam.GlobalPosition - _cam.GlobalTransform.Basis * av.EyeRestOffset;
+            float err = headWorld.DistanceTo(want);
+
+            bool ok = err < 0.06f;
+            _ok &= ok;
+            GD.Print($"VRTEST HEAD   head bone {err * 100f:F1} cm from the headset's eye point  " +
+                     $"{(ok ? "ok — the torso solve reaches the headset" : "FAIL — the body does not reach its own head")}");
+        }
+
+        /// Standing still, the spine must be roughly vertical and the feet roughly together.
+        ///
+        /// Both halves matter and neither is caught by anything else. The hips are placed from the
+        /// head and the spine is bent to bridge them, so a small bias in either the lean follow or
+        /// the eye offset settles into a permanent stoop that passes every positional check. And
+        /// the stance width comes from the rig's own bind pose, so a rig modelled mid-stride — or
+        /// a planter that never re-seats — leaves the avatar standing in a permanent lunge, which
+        /// is what the procedural walk cycle used to do while its owner stood perfectly still.
+        private void CheckStandingPosture()
+        {
+            if (!HasBody()) { GD.Print("VRTEST POSTURE rig has no hips — SKIPPED"); return; }
+
+            var av = _vr.Avatar;
+            var skel = av.Skeleton;
+            var hips = skel.GetBoneGlobalPose(av.BoneOf("hips")).Origin;
+            var head = skel.GetBoneGlobalPose(av.BoneOf("head")).Origin;
+
+            var spine = head - hips;
+            float tilt = spine.LengthSquared() > 1e-6f
+                ? Mathf.RadToDeg(spine.Normalized().AngleTo(Vector3.Up)) : 0f;
+
+            float stance = Planar(FootWorld(0) - FootWorld(1));
+
+            bool ok = tilt < 12f && stance < 0.45f;
+            _ok &= ok;
+            GD.Print($"VRTEST POSTURE standing → spine {tilt:F1}° off vertical, feet {stance * 100f:F0} cm apart  " +
+                     $"{(ok ? "ok — stands upright with its feet under it" : "FAIL — stoops or stands in a lunge")}");
+        }
+
+        /// Leaning is a lean, not a walk: the feet must stay where they were planted.
+        ///
+        /// This is the check for the oldest and most-reported VR body defect here — the avatar
+        /// mounted on the headset's XZ, so every sway of the player's head slid the whole rig,
+        /// feet included. From outside it read as an avatar permanently ice-skating.
+        private void CheckFeetStayed()
+        {
+            if (!HasBody() || !UI.DeviceProfile.Settings.VrFootIk)
+            { GD.Print("VRTEST PLANT  no legs or foot IK off — SKIPPED"); return; }
+
+            float l = Planar(FootWorld(0) - _footMark[0]);
+            float r = Planar(FootWorld(1) - _footMark[1]);
+            float worst = Mathf.Max(l, r);
+
+            // Generous: the lean itself is 12 cm and the step threshold is 32 cm, so a correct
+            // solve moves the feet by nothing at all. Anything approaching the lean distance
+            // means the body is still being dragged under the head.
+            bool ok = worst < 0.06f;
+            _ok &= ok;
+            GD.Print($"VRTEST PLANT  12 cm head lean → feet moved L={l * 100f:F1} cm R={r * 100f:F1} cm  " +
+                     $"{(ok ? "ok — a lean does not drag the feet" : "FAIL — the feet skate with the head")}");
+        }
+
+        /// ...but actually walking must step them, and land them back under the body.
+        private void CheckFeetStepped()
+        {
+            if (!HasBody() || !UI.DeviceProfile.Settings.VrFootIk)
+            { GD.Print("VRTEST STEP   no legs or foot IK off — SKIPPED"); return; }
+
+            float moved = Mathf.Min(Planar(FootWorld(0) - _footMark[0]),
+                                    Planar(FootWorld(1) - _footMark[1]));
+            // Both feet must have ended up under the body, or the avatar walked away from its
+            // own legs — which is what an unclamped planter does.
+            float lag = Mathf.Max(Planar(FootWorld(0) - _vr.GlobalPosition),
+                                  Planar(FootWorld(1) - _vr.GlobalPosition));
+
+            bool ok = moved > 0.3f && lag < 0.5f;
+            _ok &= ok;
+            GD.Print($"VRTEST STEP   walking → each foot travelled ≥{moved:F2} m, trailing the body " +
+                     $"by ≤{lag:F2} m  " +
+                     $"{(ok ? "ok — the feet step and keep up" : "FAIL — the feet do not follow the body")}");
+        }
+
+        /// A physical crouch must bend the avatar AND shrink the collider.
+        private void CheckCrouched()
+        {
+            if (!HasBody()) { GD.Print("VRTEST CROUCH rig has no hips — SKIPPED"); return; }
+
+            var av = _vr.Avatar;
+            float hipsNow = av.Skeleton.GetBoneGlobalPose(av.BoneOf("hips")).Origin.Y;
+            float hipDrop = _standMarkHipsY - hipsNow;
+            float capsuleNow = CapsuleHeight();
+            float capsuleDrop = _standMarkCapsule - capsuleNow;
+
+            // The injected crouch is 52 cm of head travel. The hips cannot follow all of it (the
+            // legs run out of fold), so this asks only that a real crouch happened in both the
+            // rig and the collider — not for a specific depth, which is rig-dependent.
+            bool ok = _vr.CrouchFraction > 0.25f && hipDrop > 0.15f && capsuleDrop > 0.15f;
+            _ok &= ok;
+            GD.Print($"VRTEST CROUCH 52 cm head drop → fraction={_vr.CrouchFraction:F2}, " +
+                     $"hips fell {hipDrop * 100f:F0} cm, capsule shrank {capsuleDrop * 100f:F0} cm  " +
+                     $"{(ok ? "ok — crouching crouches the body and the collider" : "FAIL — the player ducks but nothing else does")}");
+        }
+
+        /// Rolling the controller must roll the avatar's wrist by about as much.
+        ///
+        /// Measured as a DELTA, deliberately. The absolute alignment of a hand depends on the
+        /// runtime's grip-pose convention, which no headless run can observe; the thing that
+        /// actually has to hold — and which was entirely absent before, because the solver was
+        /// only ever handed a hand POSITION — is that turning your wrist turns your avatar's.
+        private void CheckWristRolled()
+        {
+            var av = _vr.Avatar;
+            int bone = av?.BoneOf("rightHand") ?? -1;
+            if (bone < 0 || !UI.DeviceProfile.Settings.VrWristTracking)
+            { GD.Print("VRTEST WRIST  no hand bone or wrist tracking off — SKIPPED"); return; }
+
+            var now = av.Skeleton.GetBoneGlobalPose(bone).Basis;
+            var delta = now.GetRotationQuaternion() * _wristMark.GetRotationQuaternion().Inverse();
+            float deg = Mathf.RadToDeg(2f * Mathf.Acos(Mathf.Clamp(Mathf.Abs(delta.Normalized().W), -1f, 1f)));
+
+            // 60° in; the twist limiter and the elbow's own re-solve absorb some of it, so a wide
+            // band. Zero would mean the rotation is being dropped, which is the regression.
+            bool ok = deg > 25f && deg < 95f;
+            _ok &= ok;
+            GD.Print($"VRTEST WRIST  60° controller roll → avatar wrist turned {deg:F0}°  " +
+                     $"{(ok ? "ok — the wrist follows the controller" : "FAIL — wrist rotation is being discarded")}");
+        }
+
+        private float BodyYawDegrees() => Mathf.RadToDeg(_vr.PoseTransform().Basis.GetEuler().Y);
+
+        /// Body rotation since the baseline, signed-shortest so it never reports 350° for -10°.
+        private float YawSinceBase()
+            => Mathf.RadToDeg(Mathf.AngleDifference(Mathf.DegToRad(_yawBase),
+                                                    Mathf.DegToRad(BodyYawDegrees())));
+
+        private void MarkGlanceYaw() => _glanceYawDelta = Mathf.Abs(YawSinceBase());
+
+        /// A glance must not turn the body; a sustained turn must.
+        private void CheckBodyYaw()
+        {
+            float turned = Mathf.Abs(YawSinceBase());
+            float deadzone = UI.DeviceProfile.Settings.VrBodyTurnDeadzone;
+
+            // 25° is inside the deadzone, so the body must have stayed put. 85° is well outside
+            // it, so the body must have come round to leave the head roughly at the deadzone
+            // edge — i.e. it turns the EXCESS, about 85 − 40 = 45°, not the whole 85°.
+            float expected = 85f - deadzone;
+            bool ok = _glanceYawDelta < 5f
+                      && turned > expected * 0.6f && turned < expected * 1.6f;
+            _ok &= ok;
+            GD.Print($"VRTEST YAW    25° glance → body turned {_glanceYawDelta:F1}°; " +
+                     $"85° turn → body turned {turned:F1}° (deadzone {deadzone:F0}°, " +
+                     $"expected ≈{expected:F0}°)  " +
+                     $"{(ok ? "ok — the body has neck slack and then follows" : "FAIL — the body tracks the gaze one-for-one")}");
+        }
 
         /// Stick Y that means "walk forward" under the current invert setting.
         private static float MoveFwd => UI.DeviceProfile.Settings.VrInvertForward ? -1f : 1f;
@@ -826,6 +1097,7 @@ public static partial class VrDiagnostic
             // Pose the tracked nodes the way the OpenXR runtime would, BEFORE VrPlayer reads them.
             // The driver's process priority puts it ahead of the rig for exactly this reason.
             _cam.Position = _head;
+            _cam.Rotation = new Vector3(0, _headYaw, 0);
             // Hands roughly at the sides, so the arm IK has a solvable target rather than a
             // degenerate one — a broken chain would print noise into every other check.
             _left.Position = _head + new Vector3(-0.25f, -0.45f, -0.15f);
@@ -834,8 +1106,18 @@ public static partial class VrDiagnostic
             // so they are posed here alongside the positions rather than nudged inside a phase.
             // By role, not by side: ORIENT yaws the hand that WALKS and DASH pitches the hand
             // that TURNS, and which physical controller that is depends on the layout setting.
+            //
+            // Roll is per-SIDE and rides on top, because the WRIST check turns one controller
+            // about its own forward axis while the heading fields stay where the locomotion
+            // checks left them. Assigning `Rotation` outright would silently drop it.
             MoveHandNode.Rotation = new Vector3(0, _moveYaw, 0);
             TurnHandNode.Rotation = new Vector3(_turnPitch, 0, 0);
+            for (int i = 0; i < 2; i++)
+            {
+                if (_handRoll[i] == 0f) continue;
+                var node = i == 0 ? _left : _right;
+                node.Basis = node.Basis * new Basis(Vector3.Back, _handRoll[i]);
+            }
 
             _frames++;
             if (_frames >= phase.Frames)

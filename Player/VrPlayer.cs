@@ -82,9 +82,13 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     /// trigger/grip. Allocated once — this is written every frame.
     private readonly float[][] _curl = { new float[5], new float[5] };
 
+    /// Per-finger lateral splay (spread) angles in radians.
+    private readonly float[][] _splay = { new float[5], new float[5] };
+
     /// Where each finger is heading. `_curl` chases this rather than being assigned, so a change
     /// of gesture is a movement instead of a jump — see `HandGestures.Approach`.
     private readonly float[][] _target = { new float[5], new float[5] };
+    private readonly float[][] _targetSplay = { new float[5], new float[5] };
 
     private readonly HandGesture[] _gesture = { HandGesture.Neutral, HandGesture.Neutral };
 
@@ -453,6 +457,9 @@ void fragment() {
         ScaleCollider(avatar.Height);
 
         _ik = new VrAvatarIk(avatar);
+        // The foot planter probes downward for the floor; without excluding our own capsule
+        // every ray hits it and both feet plant at hip height.
+        _ik.SetGroundProbe(GetRid(), PhysicsLayers.World);
         if (!_ik.Valid)
         {
             // No usable arm chain (the procedural bean, or a malformed rig). Fall back to the
@@ -483,6 +490,10 @@ void fragment() {
             cap.Height = Mathf.Max(0.5f, height * 0.9f);
             cap.Radius = Mathf.Clamp(height * 0.15f, 0.15f, 0.35f);
             _collider.Position = new Vector3(0, cap.Height * 0.5f, 0);
+            // Remember full height: `UpdateCrouch` shrinks the live capsule every frame, so it
+            // needs a standing reference that a crouch cannot ratchet downward.
+            _standingCapsuleHeight = cap.Height;
+            _crouchFraction = 0f;
         }
         if (_bodyMesh != null)
         {
@@ -522,7 +533,20 @@ void fragment() {
         // Offset = how far to shift the play space so the avatar's eyes sit where the headset is.
         // A positive value lifts the origin (making the player shorter in-world).
         float autoOffset = avatarEyeHeight - eyeRef;
-        float y = manualOffset + autoOffset;
+
+        // ...and then a few centimetres lower again, so the avatar stands with its knees softly
+        // bent instead of locked straight.
+        //
+        // Aligning the eyes exactly means the avatar occupies precisely its bind-pose height,
+        // which for a humanoid rig is legs-dead-straight — the hip-to-foot distance equals the
+        // leg's full reach, and the leg has no slack at all. `VrAvatarIk` then cannot hold a
+        // planted foot through even a small lean, because a foot that stays put while the hips
+        // move is a target the leg physically cannot span. The feet get dragged instead, which is
+        // the skating this was all meant to fix. Standing the player a centimetre or three "into"
+        // the avatar is invisible in a headset (you never see your own eye height) and is anyway
+        // truer to how a person stands than a locked-knee mannequin.
+        float knees = _ik?.StandingCrouchMetres ?? 0f;
+        float y = manualOffset + autoOffset - knees;
         _origin.Position = new Vector3(_origin.Position.X, y, _origin.Position.Z);
     }
 
@@ -608,6 +632,18 @@ void fragment() {
         float spread = _calibrateMax - _calibrateMin;
         ResetCalibrateWindow();
 
+        // A window that spans half a metre is not a head, it is a headset being LIFTED — and
+        // averaging across that transition is how this latched 1.29 m on a player standing at
+        // 1.65: the mean of "on the desk" and "on the face". It self-corrects a second or two
+        // later, which is precisely long enough for the play space to visibly jump under someone
+        // who has only just put the headset on. A worn head does not travel this far in 1.5 s, so
+        // waiting for the motion to settle costs nothing and removes the wrong answer entirely.
+        if (spread > SettledSpreadMetres)
+        {
+            ResetCalibrateWindow();
+            return;
+        }
+
         // A head sways by centimetres over a second and a half; a headset on a table does not move
         // at all. Anything under a few millimetres of total travel is furniture.
         if (spread < LivenessMetres)
@@ -648,6 +684,10 @@ void fragment() {
 
     /// Total vertical travel over the settle window below which the headset is furniture.
     private const float LivenessMetres = 0.003f;
+
+    /// ...and above which it is in transit rather than being worn. Comfortably more than a head
+    /// sways or nods, comfortably less than the ~50 cm of a headset coming up off a desk.
+    private const float SettledSpreadMetres = 0.18f;
 
     /// Whether the headset is actually being worn.
     ///
@@ -757,6 +797,10 @@ void fragment() {
         TryAutoCalibrate();
         UpdateFbtTrackers();
         UpdateHands(dt);
+        // Before locomotion: the capsule height this sets is what `MoveAndSlide` is about to be
+        // resolved against, so a crouch has to be in effect on the frame the player ducks, not
+        // the frame after it.
+        UpdateCrouch(dt);
 
         // The headset keeps tracking even while a menu is up; only *input* is suspended.
         UpdateHeadVelocity(dt);
@@ -1649,19 +1693,28 @@ void fragment() {
     {
         if (_avatar == null) return;
 
-        // Smooth body yaw: instead of snapping the avatar to the head forward every frame,
-        // lerp the body yaw so turning the head doesn't whip the whole body around.
-        var (fwd, _) = HeadBasis();
-        float targetYaw = Mathf.Atan2(fwd.X, fwd.Z);
-        _bodyYaw = Mathf.LerpAngle(_bodyYaw, targetYaw, 1f - Mathf.Exp(-BodyYawLerpRate * dt));
+        UpdateBodyYaw(dt, speed);
         var bodyFwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
 
-        var flatCam = _camera.GlobalPosition with { Y = GlobalPosition.Y };
-        _avatarMount.GlobalPosition = flatCam;
+        // **The avatar stands on the BODY, not under the headset.**
+        //
+        // This used to mount the rig at the camera's XZ. That looks identical most of the time —
+        // `SyncBodyToHead` keeps the body under the head — and is wrong in the two moments that
+        // matter. Leaning became a translation: tip forward to look at something and your whole
+        // avatar, feet included, slid forward with your skull, which is the single largest source
+        // of the "feet are skating" report. And when a wall stops the body, the head keeps going,
+        // so the avatar was drawn standing *inside* the wall it had just been prevented from
+        // entering.
+        //
+        // Mounting on the body makes the head's offset from it a real quantity, which is exactly
+        // what `VrAvatarIk` now consumes: it leans the spine and hips to reach the head instead of
+        // teleporting the body under it. Leaning is a lean, and the feet stay where they were put.
+        _avatarMount.GlobalPosition = GlobalPosition;
         _avatarMount.GlobalBasis = Basis.LookingAt(bodyFwd, Vector3.Up);
 
-        // Procedural locomotion first, then IK overrides the head and arms on top of it.
-        _avatar.Animate(dt, speed, IsOnFloor());
+        // Procedural locomotion first, then IK overrides the head, spine, legs and arms on top.
+        _avatar.Animate(dt, speed, IsOnFloor(), crouching: _crouchFraction > 0.35f,
+                        sprinting: speed > (WalkSpeed + SprintSpeed) * 0.5f);
 
         // An emote owns the whole body; letting the hand IK write over it afterwards would
         // reduce a wave or a dance to a twitch.
@@ -1703,18 +1756,17 @@ void fragment() {
         // Bare hands put the wrist where the camera sees it; controllers put it where the
         // controller is. The wrist rather than the palm, because that is what the humanoid
         // `leftHand`/`rightHand` bone is — see `VrHandTracking.TryGetWrist`.
-        var leftTarget = _handTrack[0].Active && UI.DeviceProfile.Settings.VrHandTracking
-                         && _handTrack[0].TryGetWrist(out var lw)
-            ? lw.Origin : _leftHand.GlobalPosition;
-        var rightTarget = _handTrack[1].Active && UI.DeviceProfile.Settings.VrHandTracking
-                          && _handTrack[1].TryGetWrist(out var rw)
-            ? rw.Origin : _rightHand.GlobalPosition;
+        //
+        // Full transforms, not positions. The rotation is the wrist, and `VrAvatarIk` needs it to
+        // put the hand anywhere other than in line with the forearm.
+        var leftTarget = HandTarget(0, _leftHand);
+        var rightTarget = HandTarget(1, _rightHand);
 
         // While a nod or shake is running the gesture owns the head bone; re-solving it from the
         // headset every frame would overwrite the gesture before anyone could see it.
-        _ik?.Solve(headTransform, leftTarget, rightTarget,
+        _ik?.Solve(headTransform, leftTarget, rightTarget, dt,
                    hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
-                   playerArmReach: PlayerArmReach);
+                   playerArmReach: PlayerArmReach, planarSpeed: speed, grounded: IsOnFloor());
 
         // Fingers go on last, for the same reason `HeadAim` does: whatever writes a bone last
         // wins, and the arm IK above rewrites the hand bone these hang off.
@@ -1724,9 +1776,191 @@ void fragment() {
         // peers. Widening the pose frame is a proto change, which is a breaking-change review.
         if (UI.DeviceProfile.Settings.VrFingerPosing)
         {
-            _poser[0]?.Apply(_curl[0]);
-            _poser[1]?.Apply(_curl[1]);
+            bool bare0 = IsHandTracked(0);
+            bool bare1 = IsHandTracked(1);
+            _poser[0]?.Apply(_curl[0], _splay[0], bare0 ? _handTrack[0].ThumbOpposition : 0f);
+            _poser[1]?.Apply(_curl[1], _splay[1], bare1 ? _handTrack[1].ThumbOpposition : 0f);
         }
+    }
+
+    /// Where the avatar's chest points, which is not simply where the player is looking.
+    ///
+    /// **A body does not follow a gaze one-for-one.** The old rule lerped the body yaw straight
+    /// at the head yaw every frame, so glancing at someone beside you slowly rotated your entire
+    /// avatar to face them — and because `PoseTransform` broadcasts this yaw, every peer watched
+    /// you swivel while you thought you were standing still. It also meant you could never look
+    /// over your shoulder: the body chased the look and the shoulder was never behind you.
+    ///
+    /// Real necks have slack. The body stays put until the head is turned past a threshold, and
+    /// only then rotates enough to bring the head back inside it — so a glance costs nothing and a
+    /// sustained turn brings the shoulders round, which is what people actually do.
+    ///
+    /// Walking overrides all of it: you face the way you are going. That is both true of humans
+    /// and necessary here, because strafing with your head turned would otherwise moonwalk.
+    private void UpdateBodyYaw(float dt, float speed)
+    {
+        var (fwd, _) = HeadBasis();
+        float headYaw = Mathf.Atan2(fwd.X, fwd.Z);
+
+        // Moving: face travel, and quickly. `Velocity` is the honest source — it is what actually
+        // happened after collision, so walking into a wall at an angle does not keep the avatar
+        // striding at the wall.
+        var vel = new Vector2(Velocity.X, Velocity.Z);
+        if (speed > 0.35f && vel.LengthSquared() > 1e-6f)
+        {
+            float moveYaw = Mathf.Atan2(vel.X, vel.Y);
+            // Blend toward the gaze so a sideways strafe reads as a sidestep rather than the
+            // avatar rotating to walk face-first in the strafe direction.
+            float blended = Mathf.LerpAngle(moveYaw, headYaw, MoveYawGazeBlend);
+            _bodyYaw = Mathf.LerpAngle(_bodyYaw, blended, 1f - Mathf.Exp(-BodyYawLerpRate * dt));
+            return;
+        }
+
+        float deadzone = Mathf.DegToRad(Mathf.Max(0f, UI.DeviceProfile.Settings.VrBodyTurnDeadzone));
+        float err = Mathf.AngleDifference(_bodyYaw, headYaw);
+
+        // Outside the neck's slack: chase only the excess, so the body comes to rest with the head
+        // exactly at the edge of the deadzone rather than square on. Chasing the head itself would
+        // make the body overshoot into the slack and then drift for as long as you kept looking.
+        float target = Mathf.Abs(err) <= deadzone
+            ? _bodyYaw
+            : headYaw - Mathf.Sign(err) * deadzone;
+
+        // **Where the hands are is better evidence than where the head is looking.**
+        //
+        // A head swivels freely on its neck, so head yaw says only where someone is *looking*.
+        // Hands hang off the shoulders, so when the torso turns the hands come with it — which
+        // makes the hands a direct measurement of the thing being guessed at. Overte (the
+        // open-source High Fidelity fork) goes as far as weighting this 100% hands / 0% head,
+        // deriving chest azimuth from the hip-to-hand midpoint.
+        //
+        // Pure hands is too strong here, because hands resting at the sides carry no azimuth at
+        // all and the answer degenerates. So the hands lead only in proportion to how much they
+        // actually have to say: arms out in front or reaching to one side are strong evidence,
+        // arms hanging down are none, and in that case this falls through to the head rule above.
+        if (TryHandAzimuth(out float handYaw, out float confidence))
+            target = Mathf.LerpAngle(target, handYaw, confidence);
+
+        if (Mathf.Abs(Mathf.AngleDifference(_bodyYaw, target)) < 1e-4f) return;
+        _bodyYaw = Mathf.LerpAngle(_bodyYaw, target, 1f - Mathf.Exp(-BodyYawLerpRate * dt));
+    }
+
+    /// The direction the player's arms say their chest is facing, and how much to trust it.
+    ///
+    /// Confidence is how far the hands' midpoint sits from the body's vertical axis: a midpoint
+    /// on the axis has no direction at all, and normalising it would hand back pure noise.
+    private bool TryHandAzimuth(out float yaw, out float confidence)
+    {
+        yaw = 0f;
+        confidence = 0f;
+
+        var mid = (_leftHand.GlobalPosition + _rightHand.GlobalPosition) * 0.5f;
+        var off = mid - GlobalPosition;
+        var flat = new Vector2(off.X, off.Z);
+        float reach = flat.Length();
+        if (reach < HandAzimuthMin) return false;
+
+        yaw = Mathf.Atan2(flat.X, flat.Y);
+        confidence = Mathf.Clamp((reach - HandAzimuthMin) / (HandAzimuthFull - HandAzimuthMin), 0f, 1f)
+                     * HandAzimuthWeight;
+        return confidence > 1e-3f;
+    }
+
+    /// Below this the hands are simply hanging and say nothing about the torso; above the second
+    /// they are extended enough to be the whole answer.
+    private const float HandAzimuthMin = 0.25f;
+    private const float HandAzimuthFull = 0.60f;
+    private const float HandAzimuthWeight = 0.8f;
+
+    private const float MoveYawGazeBlend = 0.35f;
+
+    /// How far the player has physically crouched, 0 (standing) to 1 (as low as tracked).
+    /// Drives the collider height, the avatar's `crouching` animation state, and — through
+    /// `VrAvatarIk` — how far the hips drop and the knees fold.
+    public float CrouchFraction => _crouchFraction;
+    private float _crouchFraction;
+    private float _standingCapsuleHeight = 1.6f;
+
+    /// Track how low the player is standing, and shrink the collider to match.
+    ///
+    /// **Ducking has to actually duck.** Every real VR game lets you crouch under things by
+    /// crouching, and this one had a capsule fixed at the avatar's full standing height: the
+    /// player could put their head under a beam and their body would still refuse to fit. The
+    /// capsule now follows the headset down, which is what makes low doorways, tables and cover
+    /// behave the way the player's own body tells them they should.
+    ///
+    /// The floor of the capsule stays on the floor — only the top comes down — or shrinking it
+    /// would drop the player through the ground on the frame they crouched.
+    private void UpdateCrouch(float dt)
+    {
+        if (!UI.DeviceProfile.Settings.VrPhysicalCrouch)
+        {
+            _crouchFraction = 0f;
+            return;
+        }
+
+        // Measured against the calibrated standing height, so a short player is not permanently
+        // "crouching" and a tall one has to actually bend before anything happens.
+        // `_camera.Position` is already the headset's height above the play-space floor — the
+        // camera is a child of the origin, so its local Y is exactly the quantity wanted, and it
+        // is the same number `TryAutoCalibrate` measures the standing height from. Subtracting
+        // `_origin.Position.Y` as well takes the calibration offset off twice, which reports a
+        // permanent crouch on every avatar whose height differs from its wearer's.
+        float standing = _heightCalibrated ? _measuredEyeHeight : DefaultPlayerEyeHeight;
+        float drop = standing - _camera.Position.Y;
+
+        // A dead band absorbs the couple of centimetres a head moves just by breathing and
+        // looking around; without it the collider would resize every frame of normal standing.
+        float target = Mathf.Clamp((drop - CrouchDeadband) / (standing * MaxCrouchFraction), 0f, 1f);
+        _crouchFraction = Mathf.Lerp(_crouchFraction, target, 1f - Mathf.Exp(-12f * dt));
+
+        if (_collider?.Shape is not CapsuleShape3D cap) return;
+        float wanted = Mathf.Max(MinCapsuleHeight, _standingCapsuleHeight * (1f - _crouchFraction * MaxCrouchFraction));
+        if (Mathf.Abs(cap.Height - wanted) < 0.005f) return;
+
+        // Standing back up must not push the player's head through a ceiling they crouched under.
+        if (wanted > cap.Height && !CanStandTo(wanted)) return;
+
+        cap.Height = wanted;
+        _collider.Position = new Vector3(0, wanted * 0.5f, 0);
+    }
+
+    /// Whether there is room overhead to grow the capsule back to `height`.
+    private bool CanStandTo(float height)
+    {
+        var space = GetWorld3D()?.DirectSpaceState;
+        if (space == null || _collider?.Shape is not CapsuleShape3D cap) return true;
+
+        float grow = height - cap.Height;
+        if (grow <= 0f) return true;
+
+        var q = PhysicsRayQueryParameters3D.Create(
+            GlobalPosition + Vector3.Up * cap.Height,
+            GlobalPosition + Vector3.Up * (height + 0.05f),
+            PhysicsLayers.World);
+        q.Exclude = new Godot.Collections.Array<Rid> { GetRid() };
+        return space.IntersectRay(q).Count == 0;
+    }
+
+    /// Head travel below standing before a crouch registers at all.
+    private const float CrouchDeadband = 0.10f;
+    /// How much of the player's height a full crouch takes off the capsule.
+    private const float MaxCrouchFraction = 0.55f;
+    private const float MinCapsuleHeight = 0.55f;
+
+    /// The IK target for hand `i` — where the wrist is, and which way it is turned.
+    ///
+    /// Falls back to a rotation derived from the forearm when wrist tracking is off, by handing
+    /// the solver a basis it will recognise as "no opinion": the controller's own position with
+    /// the play space's orientation. `VrAvatarIk` clamps wrist twist against the anatomical
+    /// solution regardless, so a runtime with an unexpected grip convention degrades to stiff
+    /// rather than to backwards.
+    private Transform3D HandTarget(int i, XRController3D hand)
+    {
+        bool bare = _handTrack[i].Active && UI.DeviceProfile.Settings.VrHandTracking;
+        var xform = bare && _handTrack[i].TryGetWrist(out var wrist) ? wrist : hand.GlobalTransform;
+        if (UI.DeviceProfile.Settings.VrWristTracking) return xform;
+        return new Transform3D(GlobalTransform.Basis, xform.Origin);
     }
 
     // ---------------------------------------------------------------- hands
@@ -1776,6 +2010,7 @@ void fragment() {
                 // independently, so the shape it sees IS the shape, and classification is the
                 // right way round.
                 System.Array.Copy(track.Curl, _target[i], _target[i].Length);
+                System.Array.Copy(track.Splay, _targetSplay[i], _targetSplay[i].Length);
                 next = HandGestures.Classify(track.Curl, _gesture[i]);
             }
             else
@@ -1784,14 +2019,6 @@ void fragment() {
                 // table and the fingers are posed from the gesture — never the other way round.
                 // See `HandGestures.FromController` for why measuring curls here cannot work.
                 // Thumb rest is a TOUCH, not a press.
-                //
-                // Reading only `IsButtonPressed` meant a thumb laid on A/B — which is how a hand
-                // actually sits on a Touch controller — did not count as thumb-down, so the hand
-                // read as `Open` and the avatar sat there with a flat palm whenever the player
-                // was not actively clicking something. Touch controllers publish capacitive touch
-                // on the face buttons and the stick, and Godot's action map binds all of it; this
-                // is the difference between hands that idle correctly and hands that look
-                // permanently surprised.
                 bool thumbDown = hand.IsButtonPressed(ActPrimaryBtnTouch)
                                  || hand.IsButtonPressed(ActSecondaryBtnTouch)
                                  || hand.IsButtonPressed(ActStickTouch)
@@ -1803,22 +2030,15 @@ void fragment() {
                 float grip = GripOf(hand, left: i == 0);
 
                 next = HandGestures.FromController(thumbDown, trigger > GestureThreshold, grip > GestureThreshold);
-                // The SHAPE is discrete, the DEPTH is analogue.
-                //
-                // Snapping straight to a canonical pose threw away everything the hardware knows:
-                // squeezing the grip halfway left the fingers wherever the last shape put them
-                // until the threshold tripped, and then the whole hand jumped. Real controllers
-                // report how far each axis has travelled and VRChat uses it — a fist follows the
-                // grip continuously. So the gesture picks WHICH fingers close and the analogue
-                // axes decide HOW FAR, with each finger driven by the axis that physically sits
-                // under it.
                 HandGestures.CurlsForGesture(next, _target[i]);
                 HandGestures.ApplyAnalogue(next, trigger, grip, thumbDown, _target[i]);
+                HandGestures.SplaysForGesture(next, _targetSplay[i]);
             }
 
             // Fingers travel to the target rather than snapping to it. A hand that changes shape
             // in a single frame is correct in every screenshot and wrong in motion.
             HandGestures.Approach(_curl[i], _target[i], (float)delta);
+            HandGestures.Approach(_splay[i], _targetSplay[i], (float)delta);
 
             if (next != _gesture[i])
             {

@@ -2225,7 +2225,14 @@ public partial class Main : Node3D
         var player = avatar.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer");
         if (player == null)
         {
-            player = new AudioStreamPlayer3D { Name = "VoicePlayer", MaxDistance = 15f, UnitSize = 8f };
+            player = new AudioStreamPlayer3D
+            {
+                Name = "VoicePlayer",
+                MaxDistance = 20f,
+                UnitSize = 5f,
+                AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance,
+                Position = new Vector3(0, 1.5f, 0)
+            };
             avatar.AddChild(player);
         }
         _voice.PlayFrame(player, frame.Payload);
@@ -2611,6 +2618,34 @@ public partial class Main : Node3D
 
         // Re-push rich presence on an interval.
         RpcPresence.Poll(delta);
+
+        // Drive local player avatar mouth visemes from live mic capture
+        var localAv = _localDesktop?.Avatar ?? _localVr?.Avatar;
+        if (localAv != null && _voice != null)
+        {
+            localAv.SetVoiceLipSync(
+                _voice.InputRms,
+                _voice.LocalVisemeAa,
+                _voice.LocalVisemeIh,
+                _voice.LocalVisemeOu,
+                _voice.LocalVisemeEe,
+                _voice.LocalVisemeOh
+            );
+        }
+
+        // Drive remote player avatar mouth visemes from remote playback audio volume
+        if (_voice != null && _remotes.Count > 0)
+        {
+            foreach (var remote in _remotes.Values)
+            {
+                var voicePlayer = remote.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer");
+                if (voicePlayer != null && remote.Avatar != null)
+                {
+                    float vol = _voice.GetSpeakerVolume(voicePlayer);
+                    remote.Avatar.SetVoiceLipSync(vol);
+                }
+            }
+        }
     }
 
     public override void _PhysicsProcess(double delta)

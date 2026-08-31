@@ -272,7 +272,15 @@ public static partial class VrSimDiagnostic
                 Expect(_vr.HeightCalibrated, "CALIB: a worn, moving headset is accepted");
                 Expect(Mathf.Abs(_vr.MeasuredEyeHeight - 1.65f) < 0.06f,
                        "CALIB: the measured height is the height it is actually worn at");
-            }, shoot: false, frames: 150);
+            // Long enough for the settle window to clear the PICKUP as well as to fill.
+            //
+            // The headset jumps from the table to head height on this phase's first frame, and
+            // `TryAutoCalibrate` now discards any window spanning that much travel — a window
+            // straddling the lift averages the desk and the face and calibrates the player at
+            // 1.29 m. So the first usable window can only start after the jump, and the phase has
+            // to outlast one full settle period on top of it. At 150 frames this asserted during
+            // the deliberate wait and read "never calibrated".
+            }, shoot: false, frames: 260);
 
             Add("boot", () =>
             {
@@ -444,11 +452,14 @@ public static partial class VrSimDiagnostic
                 Expect(_actionCount == 0, "BIND: a tap does not also open the action menu");
             }, shoot: false);
 
+            // Held well past the 0.35 s threshold. The default settle phase is ~0.4 s of wall
+            // clock, a 50 ms margin, so this failed intermittently on any run where the renderer
+            // was a little slower — a flaky check that cries wolf is worse than no check.
             Add("bind_actionmenu", () => { _dev.ClearInputs(); _dev.SecondaryButton[1] = true; }, () =>
             {
                 Expect(_actionCount >= 1, "BIND: holding B opens the action menu");
                 _dev.ClearInputs();
-            }, shoot: false);
+            }, shoot: false, frames: 90);
 
             Add("bind_actionmenu_release", () =>
             {

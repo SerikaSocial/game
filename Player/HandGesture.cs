@@ -95,6 +95,22 @@ public static class HandGestures
         System.Array.Copy(shape, dst, 5);
     }
 
+    /// Natural finger splay (abduction / lateral spreading) in radians for each gesture.
+    public static void SplaysForGesture(HandGesture gesture, float[] dst)
+    {
+        if (dst == null || dst.Length < 5) return;
+        var shape = gesture switch
+        {
+            HandGesture.Open      => new[] { 0.15f, -0.12f, 0f, 0.12f, 0.22f },
+            HandGesture.Peace     => new[] { 0.05f, -0.22f, 0.10f, 0f, 0f },
+            HandGesture.RockNRoll => new[] { 0.05f, -0.20f, 0f, 0f, 0.25f },
+            HandGesture.Gun       => new[] { 0.25f, -0.05f, 0f, 0f, 0f },
+            HandGesture.ThumbsUp  => new[] { 0.35f, 0f, 0f, 0f, 0f },
+            _                     => new[] { 0.05f, -0.04f, 0f, 0.04f, 0.08f },
+        };
+        System.Array.Copy(shape, dst, 5);
+    }
+
     /// Blend `current` toward `target` at a fixed rate, in place.
     ///
     /// Curls used to be assigned outright, so a finger crossed its whole range in one frame. That

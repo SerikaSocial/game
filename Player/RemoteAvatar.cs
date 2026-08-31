@@ -16,6 +16,7 @@ public partial class RemoteAvatar : Node3D
     private bool _hasRealAvatar;
 
     public uint PeerId { get; private set; }
+    public AvatarInstance Avatar => _avatar;
 
     private MeshInstance3D _capsule;
     private AvatarInstance _avatar;

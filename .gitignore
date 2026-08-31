@@ -28,3 +28,5 @@ Assets/Avatars/*.ska
 
 # Launcher build output (bin/* above is anchored to the repo root)
 Launcher/bin/
+Net/Codec/Tests/bin/
+Net/Codec/Tests/obj/

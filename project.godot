@@ -11,13 +11,17 @@ config_version=5
 [application]
 
 config/name="Serika Social"
-config/version="1.7.8"
+config/version="1.8.0"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.7", "C#", "Forward Plus")
 boot_splash/bg_color=Color(0.055, 0.04, 0.1, 1)
 boot_splash/stretch_mode=0
 boot_splash/image="res://Assets/splash.png"
 config/icon="res://icon.svg"
+
+[audio]
+
+driver/enable_input=true
 
 [autoload]
 

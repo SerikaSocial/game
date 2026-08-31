@@ -401,6 +401,35 @@ public static class DeviceProfile
         /// player's view while they are just standing in a world, which some people want.
         public static bool VrWristHud = true;
 
+        /// Plant the avatar's feet in the world and step them, instead of playing a walk cycle
+        /// underneath a body that slides to follow the headset.
+        ///
+        /// On by default because the alternative is visibly wrong to everyone *except* the player
+        /// wearing it: without it the feet skate whenever their owner leans, and the legs keep
+        /// walking on the spot while the body stands still. It costs two downward raycasts per
+        /// frame, so it is a setting rather than an invariant.
+        public static bool VrFootIk = true;
+
+        /// Let the avatar's wrists take the controllers' rotation.
+        ///
+        /// Only a setting because the neutral alignment depends on the runtime publishing grip
+        /// poses in Godot's −Z-forward convention; a runtime that does not would leave the hands
+        /// rotated off-square, and turning this off falls back to wrists that follow the forearm.
+        /// Relative wrist motion is correct either way — see `VrAvatarIk.BuildHandFromController`.
+        public static bool VrWristTracking = true;
+
+        /// Bend the avatar — and shrink the player's collider — when the player physically
+        /// crouches. Off pins the body upright and keeps a fixed-height capsule.
+        public static bool VrPhysicalCrouch = true;
+
+        /// How far the head may turn before the body follows it, in degrees.
+        ///
+        /// Zero makes the body a slave to the gaze, which is what this used to be: every glance
+        /// over your shoulder slowly swung your whole avatar round, and every peer watched you
+        /// pirouette. A real person turns their head first and their shoulders only if they keep
+        /// looking. Past this angle the body catches up.
+        public static float VrBodyTurnDeadzone = 40f;
+
         /// Back-compat shim for the old `VrTeleport` bool. Reading and writing the enum through
         /// this keeps every existing call site working while there is one source of truth.
         public static bool VrTeleport
@@ -487,6 +516,10 @@ public static class DeviceProfile
             if (storedVersion >= 1)
                 VrArmScaling = (bool)cfg.GetValue("vr", "arm_scaling", VrArmScaling);
             VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
+            VrFootIk = (bool)cfg.GetValue("vr", "foot_ik", VrFootIk);
+            VrWristTracking = (bool)cfg.GetValue("vr", "wrist_tracking", VrWristTracking);
+            VrPhysicalCrouch = (bool)cfg.GetValue("vr", "physical_crouch", VrPhysicalCrouch);
+            VrBodyTurnDeadzone = (float)cfg.GetValue("vr", "body_turn_deadzone", VrBodyTurnDeadzone);
             VrHaptics = (bool)cfg.GetValue("vr", "haptics", VrHaptics);
             VrHeightOffset = (float)cfg.GetValue("vr", "height_offset", VrHeightOffset);
 
@@ -528,6 +561,10 @@ public static class DeviceProfile
             cfg.SetValue("vr", "finger_posing", VrFingerPosing);
             cfg.SetValue("vr", "arm_scaling", VrArmScaling);
             cfg.SetValue("vr", "wrist_hud", VrWristHud);
+            cfg.SetValue("vr", "foot_ik", VrFootIk);
+            cfg.SetValue("vr", "wrist_tracking", VrWristTracking);
+            cfg.SetValue("vr", "physical_crouch", VrPhysicalCrouch);
+            cfg.SetValue("vr", "body_turn_deadzone", VrBodyTurnDeadzone);
             cfg.SetValue("vr", "haptics", VrHaptics);
             cfg.SetValue("vr", "height_offset", VrHeightOffset);
             cfg.SetValue("meta", "settings_version", SettingsVersion);

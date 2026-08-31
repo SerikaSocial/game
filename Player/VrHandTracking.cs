@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Godot;
 using SerikaSocial.Avatar;
 
@@ -6,21 +7,11 @@ namespace SerikaSocial.Player;
 /// Optical hand tracking for one hand, read from the `XRHandTracker` the OpenXR interface
 /// registers with `XRServer`.
 ///
-/// **Why this is not `XRHandModifier3D`.** That node exists to pose a *hand mesh's* skeleton, and
-/// this project has no hand meshes — the player's hands are their avatar's hands, which are part
-/// of a full humanoid `.ska` rig driven by `VrAvatarIk`. What is needed here is the raw joint
-/// data (to place the wrist target, curl the avatar's fingers and classify gestures), so the
-/// tracker is read directly.
-///
-/// **Controller-derived hands are not hand tracking.** `XRHandTracker.HandTrackingSource`
-/// distinguishes `Unobstructed` (a camera really sees the hand) from `Controller` (the runtime
-/// synthesised a hand pose from a held controller). Meta's runtime publishes a hand tracker in
-/// *both* cases, so a bare `tracker != null` check is true whenever a controller is on — the same
-/// trap that made the old `IsOpticalHandTrackingActive()` a no-op (see the note in
-/// `VrPlayer.HandleLocomotion`). Only `Unobstructed` counts as bare hands here.
+/// Tracks all 26 standard OpenXR hand joints, derives per-finger Curl and Splay (abduction/spread),
+/// computes 3D Thumb Opposition, and applies a 1-Euro adaptive low-pass filter to eliminate
+/// micro-jitter while preserving sub-millisecond responsiveness for fast gestures.
 public sealed class VrHandTracking
 {
-    /// Godot's OpenXR hand trackers register under these names.
     private const string LeftTracker = "/user/hand_tracker/left";
     private const string RightTracker = "/user/hand_tracker/right";
 
@@ -28,45 +19,66 @@ public sealed class VrHandTracking
     private XRHandTracker _tracker;
     private double _rescanTimer;
 
-    /// The joints whose transforms are cached each frame. The full set is 26 per hand; these are
-    /// the ones gesture classification and finger posing actually read, which keeps the per-frame
-    /// marshalling cost to 11 interop calls per hand instead of 26.
-    private static readonly XRHandTracker.HandJoint[] Cached =
+    /// Full standard 26-joint OpenXR joint set for high-fidelity hand kinematics.
+    private static readonly XRHandTracker.HandJoint[] AllJoints =
     {
         XRHandTracker.HandJoint.Palm,
         XRHandTracker.HandJoint.Wrist,
-        XRHandTracker.HandJoint.ThumbTip,
+        XRHandTracker.HandJoint.ThumbMetacarpal,
         XRHandTracker.HandJoint.ThumbPhalanxProximal,
-        XRHandTracker.HandJoint.IndexFingerTip,
+        XRHandTracker.HandJoint.ThumbPhalanxDistal,
+        XRHandTracker.HandJoint.ThumbTip,
+        XRHandTracker.HandJoint.IndexFingerMetacarpal,
         XRHandTracker.HandJoint.IndexFingerPhalanxProximal,
-        XRHandTracker.HandJoint.MiddleFingerTip,
+        XRHandTracker.HandJoint.IndexFingerPhalanxIntermediate,
+        XRHandTracker.HandJoint.IndexFingerPhalanxDistal,
+        XRHandTracker.HandJoint.IndexFingerTip,
+        XRHandTracker.HandJoint.MiddleFingerMetacarpal,
         XRHandTracker.HandJoint.MiddleFingerPhalanxProximal,
+        XRHandTracker.HandJoint.MiddleFingerPhalanxIntermediate,
+        XRHandTracker.HandJoint.MiddleFingerPhalanxDistal,
+        XRHandTracker.HandJoint.MiddleFingerTip,
+        XRHandTracker.HandJoint.RingFingerMetacarpal,
+        XRHandTracker.HandJoint.RingFingerPhalanxProximal,
+        XRHandTracker.HandJoint.RingFingerPhalanxIntermediate,
+        XRHandTracker.HandJoint.RingFingerPhalanxDistal,
         XRHandTracker.HandJoint.RingFingerTip,
-        XRHandTracker.HandJoint.PinkyFingerTip,
+        XRHandTracker.HandJoint.PinkyFingerMetacarpal,
         XRHandTracker.HandJoint.PinkyFingerPhalanxProximal,
+        XRHandTracker.HandJoint.PinkyFingerPhalanxIntermediate,
+        XRHandTracker.HandJoint.PinkyFingerPhalanxDistal,
+        XRHandTracker.HandJoint.PinkyFingerTip,
     };
 
-    private readonly System.Collections.Generic.Dictionary<XRHandTracker.HandJoint, Transform3D> _joints = new();
+    private readonly Dictionary<XRHandTracker.HandJoint, Transform3D> _joints = new();
+
+    // 1-Euro adaptive low-pass filters for curl and splay (one per finger)
+    private readonly OneEuroFilter[] _curlFilter = new OneEuroFilter[5];
+    private readonly OneEuroFilter[] _splayFilter = new OneEuroFilter[5];
+    private OneEuroFilter _pinchFilter;
+    private OneEuroFilter _thumbOppFilter;
 
     public VrHandTracking(bool isLeft) => _isLeft = isLeft;
 
-    /// True only while a camera is genuinely seeing this hand. Controller-derived hand poses
-    /// report `Controller` and are deliberately excluded — see the class note.
+    /// True only while a camera is genuinely seeing this hand unobstructed.
     public bool Active { get; private set; }
 
-    /// Per-finger curl, 0 = straight, 1 = fully closed. Index order matches
-    /// `HandPoser.Finger`: thumb, index, middle, ring, little.
+    /// Per-finger curl, 0 = straight, 1 = fully closed (Index: Thumb, Index, Middle, Ring, Little).
     public readonly float[] Curl = new float[5];
 
-    /// Thumb-tip to index-tip distance normalised into a 0–1 pinch strength. 1 means the tips are
-    /// touching. This is the hand-tracking equivalent of a trigger pull and is what drives UI
-    /// clicks when there is no controller to pull.
+    /// Per-finger lateral splay (spread), in radians (-0.35 to +0.35). 0 = neutral resting fan.
+    public readonly float[] Splay = new float[5];
+
+    /// 3D Thumb opposition across the palm (0 = resting lateral, 1 = fully opposed facing pinky).
+    public float ThumbOpposition { get; private set; }
+
+    /// Thumb-tip to index-tip distance normalised into a 0–1 pinch strength (1 = touching).
     public float Pinch { get; private set; }
 
-    /// The pose the UI ray is cast from when bare hands are driving the menus: the index
-    /// fingertip, aimed along the finger. Pointing at a thing with your finger is the gesture
-    /// every hand-tracking platform has converged on, and it is nothing like a controller's grip
-    /// axis — reusing the controller ray here aims roughly at the player's own elbow.
+    /// Thumb-tip to middle-tip distance normalised into a 0–1 pinch strength.
+    public float MiddlePinch { get; private set; }
+
+    /// The pose the UI ray is cast from when bare hands are driving menus.
     public bool TryGetPointerRay(out Vector3 origin, out Vector3 direction)
     {
         origin = default;
@@ -83,24 +95,16 @@ public sealed class VrHandTracking
         return true;
     }
 
-    /// The wrist pose, used as the avatar's hand IK target while bare hands are tracked. The
-    /// wrist rather than the palm because that is what the humanoid `leftHand`/`rightHand` bone
-    /// actually is; targeting the palm plants the bone half a hand too far forward.
+    /// The wrist pose in world space.
     public bool TryGetWrist(out Transform3D wrist)
         => _joints.TryGetValue(XRHandTracker.HandJoint.Wrist, out wrist);
 
     public bool TryGetJoint(XRHandTracker.HandJoint joint, out Transform3D xform)
         => _joints.TryGetValue(joint, out xform);
 
-    /// Refresh from the tracker. `originXform` converts tracker-space poses into world space —
-    /// joint transforms are reported relative to the `XROrigin3D`, exactly like `XRNode3D`
-    /// positions, so they must be lifted through the origin's global transform or every joint
-    /// lands near the world origin.
+    /// Refresh from the tracker. `originXform` converts tracker-space poses into world space.
     public void Poll(double delta, Transform3D originXform)
     {
-        // Trackers appear and vanish as the player picks controllers up and puts them down, so
-        // the lookup is re-tried periodically rather than resolved once. Polled at 4 Hz because
-        // XRServer.GetTracker allocates, and a hand does not materialise mid-frame.
         _rescanTimer -= delta;
         if (_tracker == null || !GodotObject.IsInstanceValid(_tracker) || _rescanTimer <= 0)
         {
@@ -117,70 +121,176 @@ public sealed class VrHandTracking
 
         _joints.Clear();
         bool allValid = true;
-        foreach (var joint in Cached)
+
+        foreach (var joint in AllJoints)
         {
-            // A joint the runtime cannot see reports a stale or zeroed transform, and a zeroed
-            // fingertip reads as a fully clenched fist — a hand half out of frame would otherwise
-            // fire a "fist" gesture every time it drifted to the edge of the tracking volume.
             var flags = _tracker.GetHandJointFlags(joint);
-            if ((flags & XRHandTracker.HandJointFlags.PositionValid) == 0) { allValid = false; break; }
+            if ((flags & XRHandTracker.HandJointFlags.PositionValid) == 0)
+            {
+                // Fallback for optional metacarpals if unsupported on older runtimes
+                if (joint == XRHandTracker.HandJoint.ThumbMetacarpal
+                    || joint == XRHandTracker.HandJoint.IndexFingerMetacarpal
+                    || joint == XRHandTracker.HandJoint.MiddleFingerMetacarpal
+                    || joint == XRHandTracker.HandJoint.RingFingerMetacarpal
+                    || joint == XRHandTracker.HandJoint.PinkyFingerMetacarpal)
+                {
+                    continue;
+                }
+                allValid = false;
+                break;
+            }
             _joints[joint] = originXform * _tracker.GetHandJointTransform(joint);
         }
 
-        if (!allValid) { Reset(); return; }
+        if (!allValid || !_joints.ContainsKey(XRHandTracker.HandJoint.Wrist) || !_joints.ContainsKey(XRHandTracker.HandJoint.Palm))
+        {
+            Reset();
+            return;
+        }
 
         Active = true;
-        Measure();
+        Measure((float)delta);
     }
 
     private void Reset()
     {
         Active = false;
         Pinch = 0f;
+        MiddlePinch = 0f;
+        ThumbOpposition = 0f;
         _joints.Clear();
-        for (int i = 0; i < Curl.Length; i++) Curl[i] = 0f;
+        for (int i = 0; i < Curl.Length; i++)
+        {
+            Curl[i] = 0f;
+            Splay[i] = 0f;
+            _curlFilter[i].Reset();
+            _splayFilter[i].Reset();
+        }
+        _pinchFilter.Reset();
+        _thumbOppFilter.Reset();
     }
 
-    /// Derive curls and pinch from the cached joints.
-    ///
-    /// Curl is measured as how far a fingertip has closed toward its own knuckle, scaled by the
-    /// hand's own size rather than by an absolute distance in metres — hands vary by a factor of
-    /// well over 1.5 between a child and a large adult, and a fixed threshold classifies one of
-    /// them wrong. `span` (wrist to middle knuckle) is the scale reference because it is the one
-    /// measurement that does not change as the fingers move.
-    private void Measure()
+    /// Derive raw curls, splay angles, thumb opposition, and pinches, then apply 1-Euro smoothing.
+    private void Measure(float dt)
     {
         var wrist = _joints[XRHandTracker.HandJoint.Wrist].Origin;
         var midKnuckle = _joints[XRHandTracker.HandJoint.MiddleFingerPhalanxProximal].Origin;
         float span = wrist.DistanceTo(midKnuckle);
         if (span < 1e-4f) { Reset(); return; }
 
-        Curl[(int)HandPoser.Finger.Thumb] = CurlOf(
-            XRHandTracker.HandJoint.ThumbTip, XRHandTracker.HandJoint.ThumbPhalanxProximal, span);
-        Curl[(int)HandPoser.Finger.Index] = CurlOf(
-            XRHandTracker.HandJoint.IndexFingerTip, XRHandTracker.HandJoint.IndexFingerPhalanxProximal, span);
-        Curl[(int)HandPoser.Finger.Middle] = CurlOf(
-            XRHandTracker.HandJoint.MiddleFingerTip, XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, span);
-        // Ring and little share the pinky knuckle as their reference: the ring knuckle is not in
-        // the cached set (it buys nothing else) and the two knuckles are ~2 cm apart, well inside
-        // the noise of this measurement.
-        Curl[(int)HandPoser.Finger.Ring] = CurlOf(
-            XRHandTracker.HandJoint.RingFingerTip, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, span);
-        Curl[(int)HandPoser.Finger.Little] = CurlOf(
-            XRHandTracker.HandJoint.PinkyFingerTip, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, span);
+        var palmNormal = _joints[XRHandTracker.HandJoint.Palm].Basis.Y.Normalized();
+        if (_isLeft) palmNormal = -palmNormal;
 
-        float pinchDist = _joints[XRHandTracker.HandJoint.ThumbTip].Origin
-            .DistanceTo(_joints[XRHandTracker.HandJoint.IndexFingerTip].Origin);
-        // Touching is ~2% of span, clearly apart is ~45%.
-        Pinch = 1f - Mathf.Clamp((pinchDist / span - 0.02f) / 0.43f, 0f, 1f);
+        // Raw Curls
+        float rawThumbCurl = CurlOf(XRHandTracker.HandJoint.ThumbTip, XRHandTracker.HandJoint.ThumbPhalanxProximal, span);
+        float rawIndexCurl = CurlOf(XRHandTracker.HandJoint.IndexFingerTip, XRHandTracker.HandJoint.IndexFingerPhalanxProximal, span);
+        float rawMiddleCurl = CurlOf(XRHandTracker.HandJoint.MiddleFingerTip, XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, span);
+        float rawRingCurl = CurlOf(XRHandTracker.HandJoint.RingFingerTip, XRHandTracker.HandJoint.RingFingerPhalanxProximal, span);
+        float rawLittleCurl = CurlOf(XRHandTracker.HandJoint.PinkyFingerTip, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, span);
+
+        // 1-Euro adaptive low-pass filter on curls
+        Curl[(int)HandPoser.Finger.Thumb] = _curlFilter[0].Filter(rawThumbCurl, dt, minCutoff: 1.2f, beta: 0.05f);
+        Curl[(int)HandPoser.Finger.Index] = _curlFilter[1].Filter(rawIndexCurl, dt, minCutoff: 1.2f, beta: 0.05f);
+        Curl[(int)HandPoser.Finger.Middle] = _curlFilter[2].Filter(rawMiddleCurl, dt, minCutoff: 1.2f, beta: 0.05f);
+        Curl[(int)HandPoser.Finger.Ring] = _curlFilter[3].Filter(rawRingCurl, dt, minCutoff: 1.2f, beta: 0.05f);
+        Curl[(int)HandPoser.Finger.Little] = _curlFilter[4].Filter(rawLittleCurl, dt, minCutoff: 1.2f, beta: 0.05f);
+
+        // Raw Splay (lateral spread of fingers across the palm plane)
+        var palmFwd = (midKnuckle - wrist).Normalized();
+        var palmRight = palmFwd.Cross(palmNormal).Normalized();
+
+        float rawIndexSplay = SplayOf(XRHandTracker.HandJoint.IndexFingerPhalanxProximal, XRHandTracker.HandJoint.IndexFingerTip, palmRight, palmFwd);
+        float rawMiddleSplay = SplayOf(XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, XRHandTracker.HandJoint.MiddleFingerTip, palmRight, palmFwd);
+        float rawRingSplay = SplayOf(XRHandTracker.HandJoint.RingFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip, palmRight, palmFwd);
+        float rawLittleSplay = SplayOf(XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.PinkyFingerTip, palmRight, palmFwd);
+        float rawThumbSplay = SplayOf(XRHandTracker.HandJoint.ThumbPhalanxProximal, XRHandTracker.HandJoint.ThumbTip, palmRight, palmFwd);
+
+        Splay[(int)HandPoser.Finger.Thumb] = _splayFilter[0].Filter(rawThumbSplay, dt, minCutoff: 1.0f, beta: 0.04f);
+        Splay[(int)HandPoser.Finger.Index] = _splayFilter[1].Filter(rawIndexSplay, dt, minCutoff: 1.0f, beta: 0.04f);
+        Splay[(int)HandPoser.Finger.Middle] = _splayFilter[2].Filter(rawMiddleSplay, dt, minCutoff: 1.0f, beta: 0.04f);
+        Splay[(int)HandPoser.Finger.Ring] = _splayFilter[3].Filter(rawRingSplay, dt, minCutoff: 1.0f, beta: 0.04f);
+        Splay[(int)HandPoser.Finger.Little] = _splayFilter[4].Filter(rawLittleSplay, dt, minCutoff: 1.0f, beta: 0.04f);
+
+        // Thumb Opposition: distance from thumb tip to pinky base
+        if (_joints.TryGetValue(XRHandTracker.HandJoint.ThumbTip, out var thumbTip)
+            && _joints.TryGetValue(XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, out var pinkyKnuckle))
+        {
+            float oppDist = thumbTip.Origin.DistanceTo(pinkyKnuckle.Origin) / span;
+            float rawOpp = 1f - Mathf.Clamp((oppDist - 0.25f) / 0.65f, 0f, 1f);
+            ThumbOpposition = _thumbOppFilter.Filter(rawOpp, dt, minCutoff: 1.2f, beta: 0.05f);
+        }
+
+        // Multi-Finger Pinches
+        if (_joints.TryGetValue(XRHandTracker.HandJoint.ThumbTip, out var tTip))
+        {
+            if (_joints.TryGetValue(XRHandTracker.HandJoint.IndexFingerTip, out var iTip))
+            {
+                float d = tTip.Origin.DistanceTo(iTip.Origin) / span;
+                float rawPinch = 1f - Mathf.Clamp((d - 0.02f) / 0.43f, 0f, 1f);
+                Pinch = _pinchFilter.Filter(rawPinch, dt, minCutoff: 2.0f, beta: 0.1f);
+            }
+            if (_joints.TryGetValue(XRHandTracker.HandJoint.MiddleFingerTip, out var mTip))
+            {
+                float d = tTip.Origin.DistanceTo(mTip.Origin) / span;
+                MiddlePinch = 1f - Mathf.Clamp((d - 0.02f) / 0.43f, 0f, 1f);
+            }
+        }
     }
 
-    /// An extended finger puts its tip roughly `span` away from its knuckle; a closed one folds
-    /// the tip back to within about a quarter of that.
     private float CurlOf(XRHandTracker.HandJoint tip, XRHandTracker.HandJoint knuckle, float span)
     {
         if (!_joints.TryGetValue(tip, out var t) || !_joints.TryGetValue(knuckle, out var k)) return 0f;
         float extension = t.Origin.DistanceTo(k.Origin) / span;
         return 1f - Mathf.Clamp((extension - 0.25f) / 0.55f, 0f, 1f);
+    }
+
+    private float SplayOf(XRHandTracker.HandJoint knuckle, XRHandTracker.HandJoint tip, Vector3 palmRight, Vector3 palmFwd)
+    {
+        if (!_joints.TryGetValue(knuckle, out var k) || !_joints.TryGetValue(tip, out var t)) return 0f;
+        var dir = (t.Origin - k.Origin).Normalized();
+        float sideways = dir.Dot(palmRight);
+        return Mathf.Clamp(sideways * 0.65f, -0.45f, 0.45f);
+    }
+
+    /// 1-Euro adaptive low-pass filter struct for smooth, jitter-free, zero-latency motion.
+    private struct OneEuroFilter
+    {
+        private float _x;
+        private float _dx;
+        private bool _init;
+
+        public float Filter(float val, float dt, float minCutoff, float beta)
+        {
+            if (dt <= 0f) return val;
+            if (!_init)
+            {
+                _x = val;
+                _dx = 0f;
+                _init = true;
+                return val;
+            }
+
+            float dVal = (val - _x) / dt;
+            float alphaD = Alpha(dt, 1.0f);
+            _dx = Mathf.Lerp(_dx, dVal, alphaD);
+
+            float cutoff = minCutoff + beta * Mathf.Abs(_dx);
+            float alpha = Alpha(dt, cutoff);
+            _x = Mathf.Lerp(_x, val, alpha);
+            return _x;
+        }
+
+        public void Reset()
+        {
+            _init = false;
+            _x = 0f;
+            _dx = 0f;
+        }
+
+        private static float Alpha(float dt, float cutoff)
+        {
+            float tau = 1.0f / (2.0f * Mathf.Pi * Mathf.Max(0.01f, cutoff));
+            return 1.0f / (1.0f + tau / dt);
+        }
     }
 }

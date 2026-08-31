@@ -217,6 +217,7 @@ public sealed class VrSimDevice
         // skips the ring knuckle deliberately, the two being ~2 cm apart. Placing them against
         // anything else here would make the round trip disagree with the real measurement.
         var knuckle = wrist + along * (Span * 0.95f);
+        var ringKnuckle = knuckle + across * -0.019f;
         var pinkyKnuckle = knuckle + across * -0.038f;
         PlaceFinger(tracker, knuckle + across * 0.022f,
                     XRHandTracker.HandJoint.IndexFingerPhalanxProximal, XRHandTracker.HandJoint.IndexFingerTip,
@@ -224,11 +225,12 @@ public sealed class VrSimDevice
         PlaceFinger(tracker, knuckle,
                     XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, XRHandTracker.HandJoint.MiddleFingerTip,
                     HandCurl[i][(int)HandPoser.Finger.Middle], along, palmward, basis);
-        PlaceFinger(tracker, pinkyKnuckle,
-                    XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip,
+        PlaceFinger(tracker, ringKnuckle,
+                    XRHandTracker.HandJoint.RingFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip,
                     HandCurl[i][(int)HandPoser.Finger.Ring], along, palmward, basis);
-        SetTip(tracker, XRHandTracker.HandJoint.PinkyFingerTip, pinkyKnuckle, along, palmward,
-               HandCurl[i][(int)HandPoser.Finger.Little], basis);
+        PlaceFinger(tracker, pinkyKnuckle,
+                    XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.PinkyFingerTip,
+                    HandCurl[i][(int)HandPoser.Finger.Little], along, palmward, basis);
 
         // The thumb sits low on the palm and folds across it rather than into it.
         var thumbKnuckle = wrist + along * (Span * 0.35f) + across * 0.035f;
@@ -311,10 +313,9 @@ public sealed class VrSimDevice
         (XRHandTracker.HandJoint.MiddleFingerMetacarpal, XRHandTracker.HandJoint.Wrist, XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, 0.5f),
         (XRHandTracker.HandJoint.MiddleFingerPhalanxIntermediate, XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, XRHandTracker.HandJoint.MiddleFingerTip, 0.45f),
         (XRHandTracker.HandJoint.MiddleFingerPhalanxDistal, XRHandTracker.HandJoint.MiddleFingerPhalanxProximal, XRHandTracker.HandJoint.MiddleFingerTip, 0.75f),
-        (XRHandTracker.HandJoint.RingFingerMetacarpal, XRHandTracker.HandJoint.Wrist, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, 0.5f),
-        (XRHandTracker.HandJoint.RingFingerPhalanxProximal, XRHandTracker.HandJoint.Wrist, XRHandTracker.HandJoint.RingFingerTip, 0.55f),
-        (XRHandTracker.HandJoint.RingFingerPhalanxIntermediate, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip, 0.45f),
-        (XRHandTracker.HandJoint.RingFingerPhalanxDistal, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip, 0.75f),
+        (XRHandTracker.HandJoint.RingFingerMetacarpal, XRHandTracker.HandJoint.Wrist, XRHandTracker.HandJoint.RingFingerPhalanxProximal, 0.5f),
+        (XRHandTracker.HandJoint.RingFingerPhalanxIntermediate, XRHandTracker.HandJoint.RingFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip, 0.45f),
+        (XRHandTracker.HandJoint.RingFingerPhalanxDistal, XRHandTracker.HandJoint.RingFingerPhalanxProximal, XRHandTracker.HandJoint.RingFingerTip, 0.75f),
         (XRHandTracker.HandJoint.PinkyFingerMetacarpal, XRHandTracker.HandJoint.Wrist, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, 0.5f),
         (XRHandTracker.HandJoint.PinkyFingerPhalanxIntermediate, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.PinkyFingerTip, 0.45f),
         (XRHandTracker.HandJoint.PinkyFingerPhalanxDistal, XRHandTracker.HandJoint.PinkyFingerPhalanxProximal, XRHandTracker.HandJoint.PinkyFingerTip, 0.75f),

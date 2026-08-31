@@ -209,6 +209,8 @@ public sealed partial class AvatarInstance : Node3D
         // Folded in here rather than called alongside at the one call site, so a second
         // construction path cannot forget it and silently leave every rig fingerless on the wire.
         ResolveFingerBones();
+        ResolveFaceAndJaw();
+        ResolveFootBones();
     }
 
     public int BoneOf(string role) => _roleToBone.GetValueOrDefault(role, -1);
@@ -292,6 +294,16 @@ public sealed partial class AvatarInstance : Node3D
     /// why looking down showed the inside of the avatar's own chest. Measured from the eye bones
     /// when the rig has them, so it scales with the avatar rather than being a fixed nudge.
     public float EyeOffsetY { get; private set; } = 0.08f;
+
+    /// The rest-pose offset from the head BONE to the eye midpoint, in skeleton space.
+    ///
+    /// Exposed because a VR body solve needs it in the opposite direction to the first-person
+    /// camera: the camera asks "given this head bone, where are the eyes", while `VrAvatarIk`
+    /// knows where the eyes are — the headset is there — and has to work back to where the head
+    /// bone belongs. Targeting the bone at the headset instead stands the whole skeleton up by
+    /// this offset, which is 8–15 cm of extra height on every avatar, and fights the play-space
+    /// calibration that had already aligned the eyes correctly.
+    public Vector3 EyeRestOffset => _eyeRestOffsetSkeleton;
 
     // The rest-pose offset from the head bone's origin to the eye midpoint, measured in
     // *skeleton* space, plus the head bone's index for per-frame queries.
@@ -1299,6 +1311,12 @@ public sealed partial class AvatarInstance : Node3D
         // Avatar/HeadAim.cs. Nothing happens here unless the player is looking around or has
         // asked for a gesture — this is not the free-running head sway that was removed above.
         ApplyHeadAim(dt);
+
+        // ── Facial dynamics & Gaze ──────────────────────────────────────────────────
+        UpdateFacialDynamics(dt);
+
+        // ── Terrain Slope & Ground Foot Conformance ─────────────────────────────────
+        ApplyGroundSlopeIk(dt, onFloor);
     }
 
     /// Map movement + emote state to a retargeter animation state.
@@ -1433,5 +1451,284 @@ public sealed partial class AvatarInstance : Node3D
             if (found != null) return found;
         }
         return null;
+    }
+
+    // ── Gaze, Blinking & Audio-Driven Visemes ──────────────────────────────────────
+
+    private readonly struct FaceMeshBlendShapes
+    {
+        public readonly MeshInstance3D Mesh;
+        public readonly int Blink;
+        public readonly int BlinkL;
+        public readonly int BlinkR;
+        public readonly int LookUp;
+        public readonly int LookDown;
+        public readonly int LookLeft;
+        public readonly int LookRight;
+        public readonly int VisemeAa;
+        public readonly int VisemeIh;
+        public readonly int VisemeOu;
+        public readonly int VisemeEe;
+        public readonly int VisemeOh;
+
+        public FaceMeshBlendShapes(MeshInstance3D mesh)
+        {
+            Mesh = mesh;
+            Blink = FindShape(mesh, "blink", "eyeblink", "fcl_eye_close", "blendshape1.blink");
+            BlinkL = FindShape(mesh, "blink_l", "blinkleft", "eyeblink_l", "fcl_eye_close_l", "blendshape1.blink_l");
+            BlinkR = FindShape(mesh, "blink_r", "blinkright", "eyeblink_r", "fcl_eye_close_r", "blendshape1.blink_r");
+            LookUp = FindShape(mesh, "lookup", "look_up", "eye_up", "fcl_eye_up");
+            LookDown = FindShape(mesh, "lookdown", "look_down", "eye_down", "fcl_eye_down");
+            LookLeft = FindShape(mesh, "lookleft", "look_left", "eye_left", "fcl_eye_left");
+            LookRight = FindShape(mesh, "lookright", "look_right", "eye_right", "fcl_eye_right");
+            VisemeAa = FindShape(mesh, "aa", "a", "vrm.aa", "fcl_mth_a", "mouth_open", "jaw_open");
+            VisemeIh = FindShape(mesh, "ih", "i", "vrm.ih", "fcl_mth_i");
+            VisemeOu = FindShape(mesh, "ou", "u", "vrm.ou", "fcl_mth_u");
+            VisemeEe = FindShape(mesh, "ee", "e", "vrm.ee", "fcl_mth_e");
+            VisemeOh = FindShape(mesh, "oh", "o", "vrm.oh", "fcl_mth_o");
+        }
+
+        private static int FindShape(MeshInstance3D mesh, params string[] candidates)
+        {
+            if (mesh?.Mesh is not ArrayMesh am) return -1;
+            int count = am.GetBlendShapeCount();
+            for (int i = 0; i < count; i++)
+            {
+                string name = am.GetBlendShapeName(i).ToString().ToLowerInvariant();
+                foreach (var c in candidates)
+                {
+                    if (name == c || name.EndsWith("." + c) || name.EndsWith("_" + c))
+                        return i;
+                }
+            }
+            return -1;
+        }
+    }
+
+    private readonly List<FaceMeshBlendShapes> _faceMeshes = new();
+    private int _jawBone = -1;
+    private Quaternion _restJawRot;
+
+    // Gaze and Blink state
+    private float _blinkTimer = 3.0f;
+    private float _blinkProgress = 1.0f;
+    private bool _isBlinking;
+    private float _saccadeTimer = 1.2f;
+    private Vector2 _saccadeOffset;
+    private Vector2 _gazeDirection;
+
+    // Live Viseme state
+    private float _voiceVolume;
+    private float _visemeAa, _visemeIh, _visemeOu, _visemeEe, _visemeOh;
+
+    private void ResolveFaceAndJaw()
+    {
+        _jawBone = BoneOf("jaw");
+        if (_jawBone >= 0 && Skeleton != null)
+            _restJawRot = Skeleton.GetBoneGlobalRest(_jawBone).Basis.GetRotationQuaternion();
+
+        _faceMeshes.Clear();
+        var allMeshes = new List<MeshInstance3D>();
+        CollectMeshInstances(this, allMeshes);
+        foreach (var m in allMeshes)
+        {
+            if (m?.Mesh is ArrayMesh am && am.GetBlendShapeCount() > 0)
+            {
+                _faceMeshes.Add(new FaceMeshBlendShapes(m));
+            }
+        }
+    }
+
+    /// Live facial dynamics: natural spontaneous blinking, micro-saccades / ocular gaze,
+    /// and audio-driven viseme mouth shapes.
+    public void UpdateFacialDynamics(float dt)
+    {
+        if (_faceMeshes.Count == 0 && !HasEyeBones && _jawBone < 0) return;
+
+        // 1. Spontaneous Blinking (Poisson distribution ~2.8 to 4.8s)
+        _blinkTimer -= dt;
+        if (_blinkTimer <= 0f)
+        {
+            _isBlinking = true;
+            _blinkProgress = 0f;
+            _blinkTimer = (float)GD.RandRange(2.8, 4.8);
+        }
+
+        float blinkWeight = 0f;
+        if (_isBlinking)
+        {
+            _blinkProgress += dt / 0.16f; // full blink ~160ms
+            if (_blinkProgress >= 1f)
+            {
+                _isBlinking = false;
+                _blinkProgress = 1f;
+                blinkWeight = 0f;
+            }
+            else
+            {
+                blinkWeight = _blinkProgress < 0.35f
+                    ? _blinkProgress / 0.35f
+                    : 1f - (_blinkProgress - 0.35f) / 0.65f;
+                blinkWeight = Mathf.Clamp(blinkWeight, 0f, 1f);
+            }
+        }
+
+        // 2. Micro-Saccadic Gaze Exploration
+        _saccadeTimer -= dt;
+        if (_saccadeTimer <= 0f)
+        {
+            float yawRange = Mathf.DegToRad(3.0f);
+            float pitchRange = Mathf.DegToRad(2.0f);
+            _saccadeOffset = new Vector2(
+                (float)GD.RandRange(-yawRange, yawRange),
+                (float)GD.RandRange(-pitchRange, pitchRange)
+            );
+            _saccadeTimer = (float)GD.RandRange(0.8, 2.2);
+        }
+
+        Vector2 effectiveGaze = _gazeDirection + _saccadeOffset;
+        float lookUp = Mathf.Clamp(effectiveGaze.Y, 0f, 1f);
+        float lookDown = Mathf.Clamp(-effectiveGaze.Y, 0f, 1f);
+        float lookLeft = Mathf.Clamp(-effectiveGaze.X, 0f, 1f);
+        float lookRight = Mathf.Clamp(effectiveGaze.X, 0f, 1f);
+
+        // Apply to eye bones if present
+        if (Skeleton != null && (_leftEyeBone >= 0 || _rightEyeBone >= 0))
+        {
+            var eyeRot = Basis.FromEuler(new Vector3(effectiveGaze.Y * 0.45f, effectiveGaze.X * 0.45f, 0f)).GetRotationQuaternion();
+            if (_leftEyeBone >= 0)
+            {
+                var rest = Skeleton.GetBoneGlobalRest(_leftEyeBone).Basis.GetRotationQuaternion();
+                Skeleton.SetBonePoseRotation(_leftEyeBone, rest * eyeRot);
+            }
+            if (_rightEyeBone >= 0)
+            {
+                var rest = Skeleton.GetBoneGlobalRest(_rightEyeBone).Basis.GetRotationQuaternion();
+                Skeleton.SetBonePoseRotation(_rightEyeBone, rest * eyeRot);
+            }
+        }
+
+        // Apply to Jaw bone if present
+        if (_jawBone >= 0 && Skeleton != null)
+        {
+            float jawAngle = (_voiceVolume * 0.35f + _visemeAa * 0.25f);
+            var jawPitch = new Quaternion(Vector3.Right, jawAngle);
+            Skeleton.SetBonePoseRotation(_jawBone, _restJawRot * jawPitch);
+        }
+
+        // 3. Apply Blend Shapes to all face meshes
+        foreach (var fm in _faceMeshes)
+        {
+            if (fm.Mesh == null || !GodotObject.IsInstanceValid(fm.Mesh)) continue;
+
+            if (fm.Blink >= 0) fm.Mesh.SetBlendShapeValue(fm.Blink, blinkWeight);
+            if (fm.BlinkL >= 0) fm.Mesh.SetBlendShapeValue(fm.BlinkL, blinkWeight);
+            if (fm.BlinkR >= 0) fm.Mesh.SetBlendShapeValue(fm.BlinkR, blinkWeight);
+
+            if (fm.LookUp >= 0) fm.Mesh.SetBlendShapeValue(fm.LookUp, lookUp);
+            if (fm.LookDown >= 0) fm.Mesh.SetBlendShapeValue(fm.LookDown, lookDown);
+            if (fm.LookLeft >= 0) fm.Mesh.SetBlendShapeValue(fm.LookLeft, lookLeft);
+            if (fm.LookRight >= 0) fm.Mesh.SetBlendShapeValue(fm.LookRight, lookRight);
+
+            if (fm.VisemeAa >= 0) fm.Mesh.SetBlendShapeValue(fm.VisemeAa, _visemeAa);
+            if (fm.VisemeIh >= 0) fm.Mesh.SetBlendShapeValue(fm.VisemeIh, _visemeIh);
+            if (fm.VisemeOu >= 0) fm.Mesh.SetBlendShapeValue(fm.VisemeOu, _visemeOu);
+            if (fm.VisemeEe >= 0) fm.Mesh.SetBlendShapeValue(fm.VisemeEe, _visemeEe);
+            if (fm.VisemeOh >= 0) fm.Mesh.SetBlendShapeValue(fm.VisemeOh, _visemeOh);
+        }
+    }
+
+    /// Set live audio lip-sync parameters from VoiceManager (local or remote).
+    public void SetVoiceLipSync(float volume, float aa = 0f, float ih = 0f, float ou = 0f, float ee = 0f, float oh = 0f)
+    {
+        _voiceVolume = volume;
+        _visemeAa = Mathf.Clamp(aa > 0f ? aa : volume * 0.7f, 0f, 1f);
+        _visemeIh = Mathf.Clamp(ih, 0f, 1f);
+        _visemeOu = Mathf.Clamp(ou, 0f, 1f);
+        _visemeEe = Mathf.Clamp(ee, 0f, 1f);
+        _visemeOh = Mathf.Clamp(oh, 0f, 1f);
+    }
+
+    /// Set commanded ocular gaze direction (yaw and pitch in radians relative to head forward).
+    public void SetGazeDirection(Vector2 gazeRadians)
+    {
+        _gazeDirection = gazeRadians;
+    }
+
+    // ── Terrain Ground & Slope Foot Conformance (Genshin / AAA Style) ──────────────
+
+    private int _lFootBone = -1, _rFootBone = -1;
+    private int _lToesBone = -1, _rToesBone = -1;
+    private Quaternion _restLFootRot, _restRFootRot;
+    private Quaternion _restLToesRot, _restRToesRot;
+    private bool _feetBonesResolved;
+
+    private void ResolveFootBones()
+    {
+        _lFootBone = BoneOf("leftFoot");
+        _rFootBone = BoneOf("rightFoot");
+        _lToesBone = BoneOf("leftToes");
+        _rToesBone = BoneOf("rightToes");
+        if (Skeleton != null)
+        {
+            if (_lFootBone >= 0) _restLFootRot = Skeleton.GetBoneGlobalRest(_lFootBone).Basis.GetRotationQuaternion();
+            if (_rFootBone >= 0) _restRFootRot = Skeleton.GetBoneGlobalRest(_rFootBone).Basis.GetRotationQuaternion();
+            if (_lToesBone >= 0) _restLToesRot = Skeleton.GetBoneGlobalRest(_lToesBone).Basis.GetRotationQuaternion();
+            if (_rToesBone >= 0) _restRToesRot = Skeleton.GetBoneGlobalRest(_rToesBone).Basis.GetRotationQuaternion();
+        }
+        _feetBonesResolved = true;
+    }
+
+    /// Adapt feet and toes to terrain slopes and stairs (Genshin / AAA ground conformance).
+    public void ApplyGroundSlopeIk(float dt, bool onFloor)
+    {
+        if (!onFloor || Skeleton == null) return;
+        if (!_feetBonesResolved) ResolveFootBones();
+        if (_lFootBone < 0 && _rFootBone < 0) return;
+
+        var space = Skeleton.GetWorld3D()?.DirectSpaceState;
+        if (space == null) return;
+
+        var skelXform = Skeleton.GlobalTransform;
+        var skelInv = skelXform.AffineInverse();
+
+        AdaptFootToGround(space, _lFootBone, _lToesBone, _restLFootRot, _restLToesRot, skelXform, skelInv);
+        AdaptFootToGround(space, _rFootBone, _rToesBone, _restRFootRot, _restRToesRot, skelXform, skelInv);
+    }
+
+    private void AdaptFootToGround(PhysicsDirectSpaceState3D space, int footBone, int toesBone,
+                                   Quaternion restFoot, Quaternion restToes,
+                                   Transform3D skelXform, Transform3D skelInv)
+    {
+        if (footBone < 0) return;
+
+        var footGlobal = skelXform * Skeleton.GetBoneGlobalPose(footBone).Origin;
+        var q = PhysicsRayQueryParameters3D.Create(
+            footGlobal + Vector3.Up * 0.35f, footGlobal + Vector3.Down * 0.8f, 1 /* ground layer */);
+        var hit = space.IntersectRay(q);
+        if (hit.Count == 0) return;
+
+        var normalWorld = hit["normal"].AsVector3();
+        if (normalWorld.Dot(Vector3.Up) < 0.3f) return; // ignore vertical walls
+
+        var normalSkel = (skelInv.Basis * normalWorld).Normalized();
+        if (normalSkel.LengthSquared() < 1e-4f) return;
+
+        // Angle difference with Up in skeleton space
+        float tiltAngle = Mathf.Acos(Mathf.Clamp(Vector3.Up.Dot(normalSkel), -1f, 1f));
+        if (tiltAngle < Mathf.DegToRad(0.8f)) return; // already flat
+        tiltAngle = Mathf.Min(tiltAngle, Mathf.DegToRad(45f));
+
+        var tiltAxis = Vector3.Up.Cross(normalSkel).Normalized();
+        var tiltQuat = new Quaternion(tiltAxis, tiltAngle);
+
+        var currentFootRot = Skeleton.GetBonePoseRotation(footBone);
+        Skeleton.SetBonePoseRotation(footBone, currentFootRot * (restFoot.Inverse() * tiltQuat * restFoot));
+
+        if (toesBone >= 0)
+        {
+            var currentToesRot = Skeleton.GetBonePoseRotation(toesBone);
+            Skeleton.SetBonePoseRotation(toesBone, currentToesRot * (restToes.Inverse() * tiltQuat * restToes));
+        }
     }
 }
