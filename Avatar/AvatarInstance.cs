@@ -1755,19 +1755,21 @@ public sealed partial class AvatarInstance : Node3D
         bool hitL = ProbeTerrain(space, lFootPoseWorld, mask, out var hitLPos, out var hitLNormal);
         bool hitR = ProbeTerrain(space, rFootPoseWorld, mask, out var hitRPos, out var hitRNormal);
 
-        float targetLDrop = hitL ? (hitLPos.Y + _ankleHeightLeft - lFootPoseWorld.Y) : 0f;
-        float targetRDrop = hitR ? (hitRPos.Y + _ankleHeightRight - rFootPoseWorld.Y) : 0f;
+        float targetYL = hitL ? (hitLPos.Y + _ankleHeightLeft) : lFootPoseWorld.Y;
+        float targetYR = hitR ? (hitRPos.Y + _ankleHeightRight) : rFootPoseWorld.Y;
 
-        // Limit maximum extension and drop
-        targetLDrop = Mathf.Clamp(targetLDrop, -1.0f, 0.45f);
-        targetRDrop = Mathf.Clamp(targetRDrop, -1.0f, 0.45f);
+        float targetLDrop = Mathf.Clamp(targetYL - lFootPoseWorld.Y, -1.2f, 0.45f);
+        float targetRDrop = Mathf.Clamp(targetYR - rFootPoseWorld.Y, -1.2f, 0.45f);
 
         // Calculate hips drop when one foot is on a lower surface / ledge
-        float targetHipDrop = Mathf.Min(0f, Mathf.Min(targetLDrop, targetRDrop)) * 0.40f;
-        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.22f, 0f);
+        float avatarBaseAnkleY = skelXform.Origin.Y + Mathf.Min(_ankleHeightLeft, _ankleHeightRight);
+        float dropErrorL = targetYL - avatarBaseAnkleY;
+        float dropErrorR = targetYR - avatarBaseAnkleY;
+        float targetHipDrop = Mathf.Min(0f, Mathf.Min(dropErrorL, dropErrorR)) * 0.45f;
+        targetHipDrop = Mathf.Clamp(targetHipDrop, -0.25f, 0f);
 
         // Smooth damping
-        float smoothRate = dt * 16f;
+        float smoothRate = dt * 18f;
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
         _smoothedLFootDrop = Mathf.Lerp(_smoothedLFootDrop, targetLDrop, smoothRate);
         _smoothedRFootDrop = Mathf.Lerp(_smoothedRFootDrop, targetRDrop, smoothRate);
@@ -1855,7 +1857,7 @@ public sealed partial class AvatarInstance : Node3D
         // Lateral bend axis (+X). Knee must ALWAYS bend forward (-Z).
         var axis = Vector3.Right;
         var upperDir = aim.Rotated(axis, a).Normalized();
-        if (upperDir.Z > aim.Z)
+        if (upperDir.Z > -1e-4f)
         {
             upperDir = aim.Rotated(axis, -a).Normalized();
         }
