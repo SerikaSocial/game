@@ -1316,7 +1316,7 @@ public sealed partial class AvatarInstance : Node3D
         UpdateFacialDynamics(dt);
 
         // ── Terrain Slope & Ground Foot Conformance ─────────────────────────────────
-        ApplyGroundSlopeIk(dt, onFloor);
+        ApplyGroundSlopeIk(dt, onFloor, speed);
     }
 
     /// Map movement + emote state to a retargeter animation state.
@@ -1730,7 +1730,7 @@ public sealed partial class AvatarInstance : Node3D
     private bool _targetsInitialized = false;
 
     /// Adapt feet, legs, and pelvis to terrain slopes, ledges, and steps (Genshin / AAA ground conformance).
-    public void ApplyGroundSlopeIk(float dt, bool onFloor)
+    public void ApplyGroundSlopeIk(float dt, bool onFloor, float speed = 0f)
     {
         if (Skeleton == null) return;
         if (!_feetBonesResolved) ResolveFootBones();
@@ -1750,16 +1750,22 @@ public sealed partial class AvatarInstance : Node3D
             return;
         }
 
-        var lFootPoseWorld = skelXform * Skeleton.GetBoneGlobalPose(_lFootBone).Origin;
-        var rFootPoseWorld = skelXform * Skeleton.GetBoneGlobalPose(_rFootBone).Origin;
+        var lFootGlobalPose = Skeleton.GetBoneGlobalPose(_lFootBone);
+        var rFootGlobalPose = Skeleton.GetBoneGlobalPose(_rFootBone);
+        var lFootPoseWorld = skelXform * lFootGlobalPose.Origin;
+        var rFootPoseWorld = skelXform * rFootGlobalPose.Origin;
+
+        // Animated foot lift above rest floor level during walk / step swing phase
+        float animLiftL = Mathf.Max(0f, lFootGlobalPose.Origin.Y - _ankleHeightLeft);
+        float animLiftR = Mathf.Max(0f, rFootGlobalPose.Origin.Y - _ankleHeightRight);
 
         // Cast rays down under each foot to find true terrain / prop surface
         uint mask = 1 | (1 << 2); // World + Props/Remote
         bool hitL = ProbeTerrain(space, lFootPoseWorld, skelXform, mask, out var hitLPos, out var hitLNormal);
         bool hitR = ProbeTerrain(space, rFootPoseWorld, skelXform, mask, out var hitRPos, out var hitRNormal);
 
-        float desiredYL = hitL ? (hitLPos.Y + _ankleHeightLeft) : (skelXform.Origin.Y + _ankleHeightLeft);
-        float desiredYR = hitR ? (hitRPos.Y + _ankleHeightRight) : (skelXform.Origin.Y + _ankleHeightRight);
+        float desiredYL = (hitL ? hitLPos.Y : skelXform.Origin.Y) + _ankleHeightLeft + animLiftL;
+        float desiredYR = (hitR ? hitRPos.Y : skelXform.Origin.Y) + _ankleHeightRight + animLiftR;
 
         if (!_targetsInitialized)
         {
@@ -1768,15 +1774,15 @@ public sealed partial class AvatarInstance : Node3D
             _targetsInitialized = true;
         }
 
-        // Smoothly track the target world Y
-        float smoothRate = dt * 18f;
+        // Smoothly track the target world Y (faster response when moving over stairs and steps)
+        float smoothRate = dt * (speed > 0.1f ? 28f : 18f);
         _smoothedTargetWorldYL = Mathf.Lerp(_smoothedTargetWorldYL, desiredYL, smoothRate);
         _smoothedTargetWorldYR = Mathf.Lerp(_smoothedTargetWorldYR, desiredYR, smoothRate);
 
         // Calculate hips drop so the reaching leg has full physical reach to touch the ground
         float avatarBaseAnkleY = skelXform.Origin.Y + Mathf.Min(_ankleHeightLeft, _ankleHeightRight);
-        float dropErrorL = _smoothedTargetWorldYL - avatarBaseAnkleY;
-        float dropErrorR = _smoothedTargetWorldYR - avatarBaseAnkleY;
+        float dropErrorL = (_smoothedTargetWorldYL - animLiftL) - avatarBaseAnkleY;
+        float dropErrorR = (_smoothedTargetWorldYR - animLiftR) - avatarBaseAnkleY;
         float minDrop = Mathf.Min(0f, Mathf.Min(dropErrorL, dropErrorR));
         float targetHipDrop = Mathf.Clamp(minDrop * 1.0f, -0.55f, 0f);
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
@@ -1793,7 +1799,10 @@ public sealed partial class AvatarInstance : Node3D
         {
             var targetWorldL = new Vector3(lFootPoseWorld.X, _smoothedTargetWorldYL, lFootPoseWorld.Z);
             var targetSkelL = skelInv * targetWorldL;
-            var footRotL = FootSoleRotation(hitL ? hitLNormal : Vector3.Up, skelXform, _restRotLFoot);
+            var targetFootRotL = FootSoleRotation(hitL ? hitLNormal : Vector3.Up, skelXform, _restRotLFoot);
+            float groundWeightL = Mathf.Clamp(1f - (animLiftL / 0.10f), 0f, 1f);
+            var footRotL = _restRotLFoot.Slerp(targetFootRotL, groundWeightL);
+
             SolveTwoBoneLeg(Skeleton, _lUpLegBone, _lLowLegBone, _lFootBone, _lToesBone,
                             targetSkelL, footRotL, _lLegL1, _lLegL2,
                             _restDirLUp, _restDirLLow, _restRotLUp, _restRotLLow, _restRotLFoot, _restRotLToes);
@@ -1804,7 +1813,10 @@ public sealed partial class AvatarInstance : Node3D
         {
             var targetWorldR = new Vector3(rFootPoseWorld.X, _smoothedTargetWorldYR, rFootPoseWorld.Z);
             var targetSkelR = skelInv * targetWorldR;
-            var footRotR = FootSoleRotation(hitR ? hitRNormal : Vector3.Up, skelXform, _restRotRFoot);
+            var targetFootRotR = FootSoleRotation(hitR ? hitRNormal : Vector3.Up, skelXform, _restRotRFoot);
+            float groundWeightR = Mathf.Clamp(1f - (animLiftR / 0.10f), 0f, 1f);
+            var footRotR = _restRotRFoot.Slerp(targetFootRotR, groundWeightR);
+
             SolveTwoBoneLeg(Skeleton, _rUpLegBone, _rLowLegBone, _rFootBone, _rToesBone,
                             targetSkelR, footRotR, _rLegL1, _rLegL2,
                             _restDirRUp, _restDirRLow, _restRotRUp, _restRotRLow, _restRotRFoot, _restRotRToes);
