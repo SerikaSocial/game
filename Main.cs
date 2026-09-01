@@ -93,9 +93,6 @@ public partial class Main : Node3D
     private SpatialAudioManager _audio;
     private VoiceManager _voice;
     private bool _micActive;
-    /// Push-to-talk key. V toggles the mic; B is the hold. Not on V because a key that both
-    /// toggles and gates is ambiguous the first time you hold it.
-    private const Key PushToTalkKey = Key.B;
     private Updater _updater;
     private StrokeCanvas _strokeCanvas;
     private readonly List<HeldItemController> _heldItemControllers = new();
@@ -201,6 +198,11 @@ public partial class Main : Node3D
         if (args.ContainsKey("serika-fptest"))
         {
             Avatar.EyeProbeDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
+            return;
+        }
+        if (args.ContainsKey("serika-keytest"))
+        {
+            Player.KeyBindDiagnostic.Run(this);
             return;
         }
         if (args.ContainsKey("serika-voicetest"))
@@ -468,6 +470,11 @@ public partial class Main : Node3D
         _settingsMenu.Closed += SyncMenuHold;
         _settingsMenu.SettingChanged += OnSettingChanged;
         _settingsMenu.VoiceSettingsChanged += ApplyVoiceSettings;
+        _settingsMenu.VrSpaceProbe = () => _localVr == null
+            ? null
+            : ((bool, bool, float)?)(_localVr.UsingSeatedSpaceFallback,
+                                     _localVr.HeightCalibrated,
+                                     _localVr.MeasuredEyeHeight);
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddUi(_inWorldHud, chrome: true);
@@ -2660,6 +2667,12 @@ public partial class Main : Node3D
             case "sensitivity":
                 if (_local != null) _local.MouseSensitivity = UI.DeviceProfile.Settings.MouseSensitivity;
                 break;
+
+            // Ticking the seated-space fix must move the play space now, not on the next world
+            // load — the player is looking at their own feet while they tick it.
+            case "vr_space":
+                _localVr?.ReapplyHeightOffset();
+                break;
             case "vr_height":
                 // Height is the one VR setting that must be pushed rather than polled: the play
                 // space offset is written once when it changes, so a slider that only updated the
@@ -2725,69 +2738,85 @@ public partial class Main : Node3D
             GetViewport().SetInputAsHandled();
             return;
         }
-        if (AnyMenuOpen && k.Keycode is not (Key.M or Key.R or Key.C)) return;
+        // Only the three menu keys stay live while a menu is up — everything else would act on a
+        // world the player is not currently looking at.
+        if (AnyMenuOpen && !(UI.KeyBindings.Matches("main_menu", k.Keycode)
+                             || UI.KeyBindings.Matches("action_menu", k.Keycode)
+                             || UI.KeyBindings.Matches("camera_menu", k.Keycode))) return;
 
-        switch (k.Keycode)
+        // Rebindable, so this is a chain of comparisons rather than a switch on literals.
+        var kc = k.Keycode;
+        if (UI.KeyBindings.Matches("main_menu", kc))
         {
-            case Key.M:
-                if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide(); else _mainMenu?.Open(_username, 1);
-                SyncMenuHold();
+            if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide(); else _mainMenu?.Open(_username, 1);
+            SyncMenuHold();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (UI.KeyBindings.Matches("action_menu", kc))
+        {
+            if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide(); else _actionMenu?.Open();
+            SyncMenuHold();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (UI.KeyBindings.Matches("camera_menu", kc))
+        {
+            if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); SyncMenuHold(); }
+            else OpenCameraMenu();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
+        // Frees the cursor without giving up movement, so you can click on world UI (or just
+        // alt-tab-lite) mid-walk. Ignored while a menu is up — the cursor is already free there
+        // and toggling would only desync the flag.
+        if (UI.KeyBindings.Matches("free_cursor", kc))
+        {
+            if (UI.InputMode.ToggleManualCursor())
+            {
+                string name = UI.KeyBindings.Name(UI.KeyBindings.KeyFor("free_cursor"));
+                _inWorldHud?.Toast(
+                    UI.InputMode.CursorFree ? $"Mouse free · {name} to look again" : "Mouse captured", 2);
                 GetViewport().SetInputAsHandled();
-                return;
+            }
+            return;
+        }
+        if (UI.KeyBindings.Matches("interact", kc))
+        {
+            if (_interactor?.TryInteract() ?? false) GetViewport().SetInputAsHandled();
+            return;
+        }
 
-            case Key.R:
-                if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide(); else _actionMenu?.Open();
-                SyncMenuHold();
+        // The video queue panel, but only in a world that actually has a screen.
+        if (UI.KeyBindings.Matches("video_queue", kc))
+        {
+            if (_videoQueuePanel?.HasVideo ?? false)
+            {
+                if (_videoQueuePanel.IsOpen) _videoQueuePanel.Hide();
+                else _videoQueuePanel.Open();
                 GetViewport().SetInputAsHandled();
-                return;
-
-            case Key.C:
-                if (_cameraMenu?.IsOpen ?? false) { _cameraMenu.Hide(); SyncMenuHold(); }
-                else OpenCameraMenu();
-                GetViewport().SetInputAsHandled();
-                return;
-
-            // Tab frees the cursor without giving up movement, so you can click on world UI
-            // (or just alt-tab-lite) mid-walk. Ignored while a menu is up — the cursor is
-            // already free there and toggling would only desync the flag.
-            case Key.Tab:
-                if (UI.InputMode.ToggleManualCursor())
-                {
-                    _inWorldHud?.Toast(
-                        UI.InputMode.CursorFree ? "Mouse free · Tab to look again" : "Mouse captured", 2);
-                    GetViewport().SetInputAsHandled();
-                }
-                return;
-
-            case Key.E:
-                if (_interactor?.TryInteract() ?? false) GetViewport().SetInputAsHandled();
-                return;
-
-            // P toggles the video queue panel, but only in a world that actually has a screen.
-            case Key.P:
-                if (_videoQueuePanel?.HasVideo ?? false)
-                {
-                    if (_videoQueuePanel.IsOpen) _videoQueuePanel.Hide();
-                    else _videoQueuePanel.Open();
-                    GetViewport().SetInputAsHandled();
-                }
-                return;
-
-            case Key.V:
-                ToggleMic();
-                GetViewport().SetInputAsHandled();
-                return;
-
-            case Key.F5:
-                if (_localDesktop != null) { ToggleCameraView(); GetViewport().SetInputAsHandled(); }
-                return;
+            }
+            return;
+        }
+        if (UI.KeyBindings.Matches("mic_toggle", kc))
+        {
+            ToggleMic();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (UI.KeyBindings.Matches("toggle_view", kc))
+        {
+            if (_localDesktop != null) { ToggleCameraView(); GetViewport().SetInputAsHandled(); }
+            return;
         }
     }
 
     public override void _UnhandledInput(InputEvent @event)
     {
         // T opens the text chat (in Home or a world), when not already typing.
-        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.T }
+        if (@event is InputEventKey { Pressed: true, Echo: false } ck
+            && UI.KeyBindings.Matches("chat", ck.Keycode)
             && (_inWorld || _inHome) && _chat is { IsTyping: false })
         {
             OpenChat();
@@ -2828,7 +2857,7 @@ public partial class Main : Node3D
         // focus would never reach us, and the mic would latch open. Polling can't latch.
         if (_voice != null && _voice.Mode == MicMode.PushToTalk)
         {
-            _voice.PushToTalkHeld = Input.IsKeyPressed(PushToTalkKey)
+            _voice.PushToTalkHeld = Input.IsKeyPressed(UI.KeyBindings.KeyFor("push_to_talk"))
                                     && !AnyMenuOpen
                                     && !(_chat?.IsTyping ?? false);
         }

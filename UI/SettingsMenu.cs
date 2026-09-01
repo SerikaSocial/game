@@ -20,10 +20,10 @@ public partial class SettingsMenu : CanvasLayer
 
     private ColorRect _scrim;
     private PanelContainer _card;
-    private VBoxContainer _graphics, _audio, _controls, _iface;
+    private VBoxContainer _graphics, _audio, _controls, _iface, _keys;
     // The VR tab and its section are null outside a headset — see the guard in _Ready.
     private VBoxContainer _vr;
-    private Button _tabG, _tabA, _tabC, _tabI, _tabV;
+    private Button _tabG, _tabA, _tabC, _tabI, _tabV, _tabK;
 
     public override void _Ready()
     {
@@ -77,7 +77,8 @@ public partial class SettingsMenu : CanvasLayer
         _tabA = Tab(Icons.Kind.Speaker, "Audio", () => Switch(1));
         _tabC = Tab(Icons.Kind.Gamepad, "Controls", () => Switch(2));
         _tabI = Tab(Icons.Kind.Image, "Interface", () => Switch(3));
-        tabs.AddChild(_tabG); tabs.AddChild(_tabA); tabs.AddChild(_tabC); tabs.AddChild(_tabI);
+        _tabK = Tab(Icons.Kind.Gamepad, "Keybinds", () => Switch(5));
+        tabs.AddChild(_tabG); tabs.AddChild(_tabA); tabs.AddChild(_tabC); tabs.AddChild(_tabK); tabs.AddChild(_tabI);
         // The VR tab only exists in a headset. On desktop every control on it is inert, and a tab
         // of settings that cannot do anything is worse than no tab.
         if (VrUiSurface.Active)
@@ -98,7 +99,9 @@ public partial class SettingsMenu : CanvasLayer
         _audio = BuildAudio();
         _controls = BuildControls();
         _iface = BuildInterface();
-        stack.AddChild(_graphics); stack.AddChild(_audio); stack.AddChild(_controls); stack.AddChild(_iface);
+        _keys = BuildKeybinds();
+        stack.AddChild(_graphics); stack.AddChild(_audio); stack.AddChild(_controls);
+        stack.AddChild(_keys); stack.AddChild(_iface);
         if (_tabV != null) { _vr = BuildVr(); stack.AddChild(_vr); }
 
         root.AddChild(new HSeparator());
@@ -473,9 +476,54 @@ public partial class SettingsMenu : CanvasLayer
     private HSlider _vrHeight; private Label _vrHeightVal;
     private CheckButton _vrVignetteChk, _vrDashChk, _vrHandsChk, _vrFingersChk, _vrWristChk, _vrHapticsChk;
 
+    private CheckButton _vrForceSeated;
+    private Label _vrSpaceStatus;
+
+    /// Supplied by Main so the tab can report what the tracking space is actually doing right now.
+    /// A callback rather than a stored rig because the VR player is created and destroyed around
+    /// world changes, so a captured reference goes stale.
+    public Func<(bool seated, bool calibrated, float eyeHeight)?> VrSpaceProbe;
+
+    private void RefreshVrSpaceStatus()
+    {
+        if (_vrSpaceStatus == null) return;
+        var p = VrSpaceProbe?.Invoke();
+        if (p == null) { _vrSpaceStatus.Text = "VR rig not active."; return; }
+
+        var (seated, calibrated, eye) = p.Value;
+        _vrSpaceStatus.Text = seated
+            ? "Tracking space: SEATED — compensating, your view is placed at your avatar's eye height."
+            : calibrated
+                ? $"Tracking space: floor-relative. Measured eye height {eye:0.00} m."
+                : "Tracking space: floor-relative. Measuring your height — put the headset on and stand up.";
+    }
+
     private VBoxContainer BuildVr()
     {
         var v = Section();
+
+        // ── Play space ──────────────────────────────────────────────────────────────────
+        // First, because when this is wrong nothing else on the tab matters: the player is
+        // looking at their avatar's feet and no amount of turn-speed tuning helps.
+        v.AddChild(Heading("Play space & height"));
+
+        _vrSpaceStatus = Caption("");
+        v.AddChild(_vrSpaceStatus);
+
+        _vrForceSeated = new CheckButton();
+        _vrForceSeated.Toggled += on =>
+        {
+            DeviceProfile.Settings.VrForceSeatedSpace = on;
+            DeviceProfile.Settings.Save();
+            SettingChanged?.Invoke("vr_space");
+            RefreshVrSpaceStatus();
+        };
+        v.AddChild(Row("My view is at my feet (fix)", _vrForceSeated));
+        v.AddChild(Caption(
+            "Some headsets do not give the game a floor-relative tracking space, which puts your " +
+            "viewpoint on the ground. This is detected automatically — tick it only if it was not."));
+
+        v.AddChild(Heading("Movement"));
 
         _vrLocoOpt = new OptionButton();
         _vrLocoOpt.AddItem("Smooth"); _vrLocoOpt.AddItem("Teleport");
@@ -601,8 +649,34 @@ public partial class SettingsMenu : CanvasLayer
         Closed?.Invoke();
     }
 
+    /// Key capture for the rebind UI.
+    ///
+    /// This must be `_Input`, not `_UnhandledInput`. The key being bound is by definition a key
+    /// something else wants: the game's own handler, or the focused Button's "activate on Space".
+    /// `_UnhandledInput` runs after both, so a player rebinding to Space would toggle the button
+    /// they just clicked instead of binding it, and rebinding to `M` would open the world menu
+    /// behind the settings screen.
+    public override void _Input(InputEvent e)
+    {
+        if (_rebinding == null || !IsOpen) return;
+        if (e is not InputEventKey { Pressed: true, Echo: false } k) return;
+
+        GetViewport().SetInputAsHandled();
+
+        if (k.Keycode == Key.Escape) { CancelRebind(); return; }
+
+        KeyBindings.Rebind(_rebinding, k.Keycode);
+        DeviceProfile.Settings.Save();
+        // Movement bindings go through Godot's InputMap; the rest are read back by `Main`. Both
+        // are already live at this point — `Rebind` applied them — so there is nothing to restart.
+        CancelRebind();
+    }
+
     public override void _UnhandledInput(InputEvent e)
     {
+        // While capturing, Escape belongs to the rebind (handled in `_Input` above) — closing the
+        // whole settings screen on it would be a surprising way to cancel one key.
+        if (_rebinding != null) return;
         if (IsOpen && e is InputEventKey { Pressed: true, Keycode: Key.Escape })
         {
             Hide();
@@ -636,6 +710,9 @@ public partial class SettingsMenu : CanvasLayer
         if (_micGainVal != null) _micGainVal.Text = $"{(int)(DeviceProfile.Settings.VoiceMicGain * 100)}%";
         _micSens?.SetValueNoSignal(DeviceProfile.Settings.VoiceSensitivity * 100f);
         if (_micSensVal != null) _micSensVal.Text = $"{(int)(DeviceProfile.Settings.VoiceSensitivity * 100)}%";
+
+        _vrForceSeated?.SetPressedNoSignal(DeviceProfile.Settings.VrForceSeatedSpace);
+        RefreshVrSpaceStatus();
 
         _outputMode?.Select((int)DeviceProfile.Settings.AudioOutputMode);
         _nightMode?.SetPressedNoSignal(DeviceProfile.Settings.NightMode);
@@ -733,6 +810,11 @@ public partial class SettingsMenu : CanvasLayer
         Style(_tabG, i == 0); Style(_tabA, i == 1); Style(_tabC, i == 2); Style(_tabI, i == 3);
         if (_vr != null) _vr.Visible = i == 4;
         if (_tabV != null) Style(_tabV, i == 4);
+        _keys.Visible = i == 5;
+        Style(_tabK, i == 5);
+        // Leaving the tab must never strand the UI waiting for a keypress that will now be
+        // interpreted as a game input.
+        if (i != 5) CancelRebind();
     }
 
     // ── small builders ──────────────────────────────────────────────────────────────────
@@ -821,6 +903,88 @@ public partial class SettingsMenu : CanvasLayer
         var row = Row(label, s, v);
         row.AddChild(mute);
         return row;
+    }
+
+    // ── Keybinds tab ────────────────────────────────────────────────────────────────────
+    //
+    // Capture happens in `_Input` while `_rebinding` is set, so the next key the player presses is
+    // swallowed and assigned rather than acted on. That is the whole subtlety of a rebind UI: the
+    // key you are trying to bind is, by definition, a key the game also wants to handle.
+
+    private string _rebinding;
+    private Button _rebindButton;
+    private Label _keyHint;
+    private readonly System.Collections.Generic.Dictionary<string, Button> _keyButtons = new();
+
+    private VBoxContainer BuildKeybinds()
+    {
+        var v = Section();
+
+        _keyHint = Caption("Click a key to change it. Escape cancels. A key already in use is " +
+                           "taken from whatever held it, so you never have to clear one first.");
+        v.AddChild(_keyHint);
+
+        string category = null;
+        foreach (var b in KeyBindings.All)
+        {
+            if (b.Category != category)
+            {
+                category = b.Category;
+                v.AddChild(Heading(category));
+            }
+
+            var btn = Brand.Ghost_(new Button
+            {
+                Text = KeyBindings.Name(b.Current),
+                CustomMinimumSize = new Vector2(160, 34),
+                Disabled = b.Locked,
+            });
+            btn.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+            string id = b.Id;
+            btn.Pressed += () => BeginRebind(id);
+            _keyButtons[b.Id] = btn;
+
+            var row = Row(b.Label + (b.Locked ? "  (fixed)" : ""), new Control(), btn);
+            v.AddChild(row);
+        }
+
+        var reset = Brand.Ghost_(new Button { Text = "Reset all keys", CustomMinimumSize = new Vector2(150, 34) });
+        reset.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+        reset.Pressed += () =>
+        {
+            KeyBindings.ResetAll();
+            DeviceProfile.Settings.Save();
+            RefreshKeyButtons();
+        };
+        v.AddChild(reset);
+
+        return v;
+    }
+
+    private void BeginRebind(string id)
+    {
+        CancelRebind();
+        _rebinding = id;
+        _keyButtons.TryGetValue(id, out _rebindButton);
+        if (_rebindButton != null) _rebindButton.Text = "press a key…";
+        if (_keyHint != null) _keyHint.Text = "Press the key you want. Escape cancels.";
+    }
+
+    private void CancelRebind()
+    {
+        _rebinding = null;
+        _rebindButton = null;
+        if (_keyHint != null)
+            _keyHint.Text = "Click a key to change it. Escape cancels. A key already in use is " +
+                            "taken from whatever held it, so you never have to clear one first.";
+        RefreshKeyButtons();
+    }
+
+    private void RefreshKeyButtons()
+    {
+        foreach (var b in KeyBindings.All)
+            if (_keyButtons.TryGetValue(b.Id, out var btn))
+                btn.Text = KeyBindings.Name(b.Current);
     }
 
     private static HBoxContainer Row(string label, Control control, Control trailing = null)

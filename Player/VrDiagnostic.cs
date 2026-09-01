@@ -191,6 +191,50 @@ public static partial class VrDiagnostic
                          $"{(ok ? "ok" : $"FAIL — peers would see this avatar floating {aboveFeet:F2} m up")}");
             });
 
+            // ── SPACE ────────────────────────────────────────────────────────────────
+            // The reference-space failure that reached a Quest: the runtime hands back a SEATED
+            // (LOCAL) space instead of a floor-relative one, so the camera's Y is measured from
+            // wherever the headset was at session start — near zero — rather than from the floor.
+            // Nothing errors. The height calibrator simply never fires, the play space is never
+            // lifted, and the player's viewpoint sits at their avatar's ANKLES.
+            //
+            // The old harness could not catch this because it handed the rig a perfect 1.62 m
+            // headset from the first frame, which is a floor-relative reading by construction.
+            // Simulating the wrong *space* is the state it never presented.
+            Add("space-seated", () => { Recentre(); _head = new Vector3(0, 0.04f, 0); },
+                // Long enough to clear SeatedConfirmSeconds (4 s) at 60 Hz, plus slack.
+                330,
+                () =>
+                {
+                    bool detected = _vr.UsingSeatedSpaceFallback;
+                    float feetY = _vr.GlobalPosition.Y;
+                    float headY = _cam.GlobalPosition.Y;
+                    float aboveFeet = headY - feetY;
+
+                    // The whole point: the eyes must be up where eyes go, not on the floor.
+                    bool lifted = aboveFeet > 1.0f;
+                    _ok &= detected && lifted;
+                    GD.Print($"VRTEST SPACE  seated space detected={detected}, " +
+                             $"viewpoint {aboveFeet * 100f:F0} cm above the feet  " +
+                             $"{(detected && lifted ? "ok" : "FAIL — this is the 'camera at my feet' bug")}");
+                },
+                // Keep the head jittering slightly so it reads as worn rather than put down.
+                f => _head = new Vector3(0, 0.04f + Mathf.Sin(f * 0.3f) * 0.01f, 0));
+
+            // ...and it must LEAVE the fallback when a real floor-relative reading appears, or a
+            // runtime that gains a boundary mid-session leaves the player permanently 1.6 m tall
+            // on top of their own height.
+            Add("space-recover", () => { _head = new Vector3(0, 1.62f, 0); }, 200, () =>
+            {
+                bool recovered = !_vr.UsingSeatedSpaceFallback;
+                float aboveFeet = _cam.GlobalPosition.Y - _vr.GlobalPosition.Y;
+                bool sane = aboveFeet > 1.0f && aboveFeet < 2.2f;
+                _ok &= recovered && sane;
+                GD.Print($"VRTEST SPACE  recovered to floor space={recovered}, " +
+                         $"viewpoint {aboveFeet * 100f:F0} cm above the feet  " +
+                         $"{(recovered && sane ? "ok" : "FAIL")}");
+            }, f => _head = new Vector3(0, 1.62f + Mathf.Sin(f * 0.3f) * 0.01f, 0));
+
             // ── SPRINT ───────────────────────────────────────────────────────────────
             // Half-stick forward with the left grip fully squeezed: a player walking while
             // carrying something. Must be walk speed, and must match the ungripped case.

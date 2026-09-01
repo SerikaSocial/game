@@ -440,6 +440,15 @@ public static class DeviceProfile
         /// player's view while they are just standing in a world, which some people want.
         public static bool VrWristHud = true;
 
+        /// Force the seated-reference-space compensation on, regardless of what the runtime
+        /// reports.
+        ///
+        /// `VrPlayer.DetectReferenceSpace` works this out on its own and is right on every runtime
+        /// tested, but "my view is at my feet" is severe enough — and the detection depends on the
+        /// runtime honestly reporting user presence — that a player hitting it needs a switch they
+        /// can find, not a bug report and a wait. Off means auto-detect.
+        public static bool VrForceSeatedSpace;
+
         /// Plant the avatar's feet in the world and step them, instead of playing a walk cycle
         /// underneath a body that slides to follow the headset.
         ///
@@ -529,6 +538,7 @@ public static class DeviceProfile
             DiscordConsent = (DiscordConsentKind)(int)cfg.GetValue("discord", "consent", (int)DiscordConsent);
 
             VoiceMicMode = (Player.MicMode)(int)cfg.GetValue("voice", "mic_mode", (int)VoiceMicMode);
+            KeyBindings.Load(cfg);
             VolVoice = (float)cfg.GetValue("mix", "voice", VolVoice);
             VolWorld = (float)cfg.GetValue("mix", "world", VolWorld);
             VolSfx = (float)cfg.GetValue("mix", "sfx", VolSfx);
@@ -569,6 +579,7 @@ public static class DeviceProfile
             if (storedVersion >= 1)
                 VrArmScaling = (bool)cfg.GetValue("vr", "arm_scaling", VrArmScaling);
             VrWristHud = (bool)cfg.GetValue("vr", "wrist_hud", VrWristHud);
+            VrForceSeatedSpace = (bool)cfg.GetValue("vr", "force_seated_space", VrForceSeatedSpace);
             VrFootIk = (bool)cfg.GetValue("vr", "foot_ik", VrFootIk);
             VrWristTracking = (bool)cfg.GetValue("vr", "wrist_tracking", VrWristTracking);
             VrPhysicalCrouch = (bool)cfg.GetValue("vr", "physical_crouch", VrPhysicalCrouch);
@@ -602,6 +613,7 @@ public static class DeviceProfile
             cfg.SetValue("discord", "consent", (int)DiscordConsent);
 
             cfg.SetValue("voice", "mic_mode", (int)VoiceMicMode);
+            KeyBindings.Save(cfg);
             cfg.SetValue("mix", "voice", VolVoice);
             cfg.SetValue("mix", "world", VolWorld);
             cfg.SetValue("mix", "sfx", VolSfx);
@@ -628,6 +640,7 @@ public static class DeviceProfile
             cfg.SetValue("vr", "finger_posing", VrFingerPosing);
             cfg.SetValue("vr", "arm_scaling", VrArmScaling);
             cfg.SetValue("vr", "wrist_hud", VrWristHud);
+            cfg.SetValue("vr", "force_seated_space", VrForceSeatedSpace);
             cfg.SetValue("vr", "foot_ik", VrFootIk);
             cfg.SetValue("vr", "wrist_tracking", VrWristTracking);
             cfg.SetValue("vr", "physical_crouch", VrPhysicalCrouch);

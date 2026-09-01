@@ -553,6 +553,19 @@ void fragment() {
         // truer to how a person stands than a locked-knee mannequin.
         float knees = _ik?.StandingCrouchMetres ?? 0f;
         float y = manualOffset + autoOffset - knees;
+
+        // Seated space: the camera's Y is measured from the headset's start pose, not the floor,
+        // so it hovers around zero however tall the player is. `autoOffset` is then meaningless
+        // (it compares an avatar's eye height against a number that is not a height), and leaving
+        // the origin near zero puts the viewpoint at the avatar's ANKLES — the reported bug.
+        //
+        // Lift the play space by the full eye height instead, so the camera lands where a pair of
+        // eyes belongs. Room-scale walking is degraded in this mode because the runtime is not
+        // giving us a floor, but standing height is right, which is the difference between
+        // "playable" and "staring at my own shoes".
+        if (_seatedSpace)
+            y = manualOffset + avatarEyeHeight - knees;
+
         _origin.Position = new Vector3(_origin.Position.X, y, _origin.Position.Z);
     }
 
@@ -582,6 +595,11 @@ void fragment() {
 
         float camY = _camera.Position.Y;
         float dt = 1f / Mathf.Max(1, Engine.PhysicsTicksPerSecond);
+
+        // In a seated space the camera's Y is not a floor distance at all, so there is nothing
+        // here to calibrate — `ApplyHeightOffset` lifts the play space by the avatar's eye height
+        // instead. Running the calibrator would only spam the "outside the worn range" warning.
+        if (_seatedSpace) return;
 
         // A headset below this is on a desk, on the floor, or being carried — not being worn.
         // Sitting players are the reason it is not higher: a seated adult's eyes are around 1.2 m.
@@ -678,6 +696,90 @@ void fragment() {
         GD.Print($"VR: {(first ? "auto-calibrated" : "re-calibrated")} eye height = {measured:0.00}m");
         ApplyHeightOffset();
     }
+
+    // ── Reference-space detection ─────────────────────────────────────────────────────
+
+    /// True when the runtime gave us a SEATED (`LOCAL`) space instead of a floor-relative one, so
+    /// the camera's Y is measured from wherever the headset happened to be at session start rather
+    /// than from the floor.
+    private bool _seatedSpace;
+    private bool _seatedSpaceLogged;
+    private float _seatedSuspicion;
+
+    /// A worn headset in a floor-relative space essentially never reads below this. On the floor
+    /// it reads ~0.1 m, on a desk ~1.15 m, worn ~1.6 m — but *worn* is the only case we ask about,
+    /// because `UserIsWearingHeadset` has already gated it.
+    private const float FloorSpaceWornFloor = 0.9f;
+
+    /// How long the contradiction has to persist before we act on it. Long enough that a player
+    /// crouching to tie a shoelace at the exact moment of launch cannot trip it.
+    private const float SeatedConfirmSeconds = 4f;
+
+    /// Work out whether the camera's Y is actually a floor distance.
+    ///
+    /// This exists because the answer cannot be read from configuration. `xr/openxr/reference_space`
+    /// states a *preference*; `XR_EXT_local_floor` may be absent; a runtime may refuse the play
+    /// area mode. The only reliable signal is the contradiction between two things we can observe:
+    /// the runtime says a human is wearing the headset, and the camera claims that human's eyes are
+    /// 5 cm off the floor. Both cannot be true, and in that case it is the *space* that is wrong.
+    ///
+    /// Getting this wrong in the safe direction costs nothing: a false positive lifts the play
+    /// space by the avatar's eye height, which is where a seated-space player wants it anyway.
+    private void DetectReferenceSpace(float camY, float dt)
+    {
+        // The manual override wins outright. Someone who has ticked this is looking at their own
+        // shoes and wants it fixed now, not after a four-second confirmation window.
+        if (UI.DeviceProfile.Settings.VrForceSeatedSpace)
+        {
+            if (!_seatedSpace) { _seatedSpace = true; ApplyHeightOffset(); }
+            return;
+        }
+
+        if (!UserIsWearingHeadset())
+        {
+            // Only accumulate suspicion about a headset that is genuinely on a face. A headset on
+            // a desk legitimately reads a low-but-nonzero height in a floor space.
+            _seatedSuspicion = 0f;
+            return;
+        }
+
+        if (camY < FloorSpaceWornFloor)
+        {
+            _seatedSuspicion += dt;
+            if (_seatedSuspicion >= SeatedConfirmSeconds && !_seatedSpace)
+            {
+                _seatedSpace = true;
+                if (!_seatedSpaceLogged)
+                {
+                    _seatedSpaceLogged = true;
+                    GD.PrintErr(
+                        $"VR: headset is being worn but reads {camY:0.00}m above the origin — this " +
+                        "runtime did NOT give a floor-relative reference space (LOCAL, not " +
+                        "LOCAL_FLOOR/STAGE). Compensating by placing the play space at the " +
+                        "avatar's eye height; without this the viewpoint sits at the avatar's feet. " +
+                        "Recentre (both menu buttons, 1s) to re-measure.");
+                }
+                ApplyHeightOffset();
+            }
+        }
+        else
+        {
+            // A plausible worn height proves the space IS floor-relative. Recovering from a
+            // mistaken seated verdict matters: a runtime can start seated and gain a floor space
+            // once guardian/boundary is set up mid-session.
+            _seatedSuspicion = 0f;
+            if (_seatedSpace)
+            {
+                _seatedSpace = false;
+                GD.Print($"VR: floor-relative space now reporting {camY:0.00}m — leaving seated fallback");
+                ApplyHeightOffset();
+            }
+        }
+    }
+
+    /// Whether the rig is compensating for a seated reference space. Surfaced for the VR settings
+    /// screen and the diagnostics.
+    public bool UsingSeatedSpaceFallback => _seatedSpace;
 
     /// How long the headset must read as worn before its height is trusted.
     private const float CalibrateSettleSeconds = 1.5f;
@@ -800,6 +902,12 @@ void fragment() {
         // frame; nothing here needs to simulate a real 30-second step.
         float dt = Mathf.Min((float)delta, 0.1f);
 
+        // Deliberately OUTSIDE TryAutoCalibrate, and ahead of it. The calibrator bails early when
+        // `XRServer` has no "head" tracker, which is the right guard for *measuring a height* —
+        // but the reference-space question is about the camera's own reported Y, and it must still
+        // be answered when tracking is injected rather than published as a tracker (the headless
+        // harness), or the check is unreachable in the one place it can be regression-tested.
+        DetectReferenceSpace(_camera.Position.Y, dt);
         TryAutoCalibrate();
         UpdateFbtTrackers();
         UpdateHands(dt);
@@ -2261,6 +2369,34 @@ void fragment() {
             GD.Print($"TryInitVr: after Initialize, IsInitialized = {iface.IsInitialized()}");
 
             if (!iface.IsInitialized()) { GD.Print("TryInitVr: IsInitialized still false after Initialize"); return false; }
+
+            // Ask for a FLOOR-RELATIVE play space, and say out loud what we actually got.
+            //
+            // Everything about the rig's height maths assumes `XRCamera3D.Position.Y` is the
+            // headset's distance above the physical floor. That is only true in a floor-relative
+            // space. `xr/openxr/reference_space=2` (Local Floor) requests one, but Local Floor is
+            // an OpenXR *extension* (`XR_EXT_local_floor`) and a runtime that lacks it silently
+            // falls back to LOCAL — a seated space whose origin is wherever the headset was when
+            // the session began. In LOCAL the camera reads ~0 m, the play space is never lifted,
+            // and the player's viewpoint ends up **at their avatar's feet**, which is exactly the
+            // symptom reported from a Quest. Requesting the play area mode as well gives the
+            // runtime a second, non-extension route to the same thing.
+            //
+            // This is belt-and-braces, not the fix: `DetectReferenceSpace` below copes at runtime
+            // whatever happens here, because the only thing that can be trusted is what the camera
+            // actually reports once someone is wearing the headset.
+            foreach (var want in new[] { XRInterface.PlayAreaMode.Roomscale, XRInterface.PlayAreaMode.Stage })
+            {
+                if (iface.SupportsPlayAreaMode(want))
+                {
+                    bool ok = iface.SetPlayAreaMode(want);
+                    GD.Print($"TryInitVr: play area mode {want} -> {(ok ? "set" : "REFUSED")}");
+                    if (ok) break;
+                }
+                else GD.Print($"TryInitVr: play area mode {want} not supported by this runtime");
+            }
+            GD.Print($"TryInitVr: play area mode is now {iface.GetPlayAreaMode()}, " +
+                     $"reference_space setting = {ProjectSettings.GetSetting("xr/openxr/reference_space", "unset")}");
 
             tree.Root.UseXR = true;
             Engine.MaxFps = 0;
