@@ -706,10 +706,16 @@ void fragment() {
     private bool _seatedSpaceLogged;
     private float _seatedSuspicion;
 
-    /// A worn headset in a floor-relative space essentially never reads below this. On the floor
-    /// it reads ~0.1 m, on a desk ~1.15 m, worn ~1.6 m — but *worn* is the only case we ask about,
-    /// because `UserIsWearingHeadset` has already gated it.
-    private const float FloorSpaceWornFloor = 0.9f;
+    /// Below this, a *worn* headset's reported height cannot be a floor distance.
+    ///
+    /// Set well under a plausible human eye height on purpose. The two populations being separated
+    /// are "seated reference space", where the reading hovers around **zero** because it is
+    /// relative to the session's start pose, and "floor-relative space", where even a player
+    /// sitting cross-legged on the ground reads ~0.85–1.0 m. A threshold near the latter would
+    /// false-positive on somebody sitting on the floor — an entirely normal thing to do in VR —
+    /// and yank their viewpoint up by a whole avatar height. Half a metre sits in the empty gap
+    /// between the two and belongs to neither.
+    private const float FloorSpaceWornFloor = 0.5f;
 
     /// How long the contradiction has to persist before we act on it. Long enough that a player
     /// crouching to tie a shoelace at the exact moment of launch cannot trip it.

@@ -235,6 +235,19 @@ public static partial class VrDiagnostic
                          $"{(recovered && sane ? "ok" : "FAIL")}");
             }, f => _head = new Vector3(0, 1.62f + Mathf.Sin(f * 0.3f) * 0.01f, 0));
 
+            // A player sitting cross-legged on the floor reads ~0.9 m in a *correct* floor-relative
+            // space. That must not be mistaken for a seated reference space — doing so would lift
+            // their viewpoint by a whole avatar height for the crime of sitting down, which is an
+            // entirely normal thing to do in VR. This is the false-positive guard on the check
+            // above, and it is the reason the threshold is 0.5 m and not something "safer" sounding.
+            Add("space-sitting", () => { Recentre(); _head = new Vector3(0, 0.92f, 0); }, 330, () =>
+            {
+                bool stillFloor = !_vr.UsingSeatedSpaceFallback;
+                _ok &= stillFloor;
+                GD.Print($"VRTEST SPACE  player sat on the floor (0.92 m) → seated fallback " +
+                         $"{(stillFloor ? "not triggered  ok" : "TRIGGERED  FAIL — sitting down breaks the view")}");
+            }, f => _head = new Vector3(0, 0.92f + Mathf.Sin(f * 0.3f) * 0.01f, 0));
+
             // ── SPRINT ───────────────────────────────────────────────────────────────
             // Half-stick forward with the left grip fully squeezed: a player walking while
             // carrying something. Must be walk speed, and must match the ungripped case.
