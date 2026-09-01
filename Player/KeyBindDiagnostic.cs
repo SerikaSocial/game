@@ -77,6 +77,34 @@ public static class KeyBindDiagnostic
             $"joypad kept={joypadKept}");
 
         UI.KeyBindings.ResetAll();
+
+        // ── Settings search ───────────────────────────────────────────────────────────
+        // Search hides and shows controls across every tab, so a mistake here does not throw —
+        // it silently leaves part of the settings screen invisible after the box is cleared,
+        // which the player then reports as "settings are missing".
+        var menu = new UI.SettingsMenu();
+        host.AddChild(menu);
+
+        int all = menu.VisibleRowCountForDiagnostics();
+        Check("settings build with rows", all > 0, $"{all} rows on the open tab");
+
+        menu.SearchForDiagnostics("volume");
+        int vol = menu.VisibleRowCountForDiagnostics();
+        Check("search narrows", vol > 0 && vol < all + 1, $"{vol} rows match 'volume'");
+
+        menu.SearchForDiagnostics("push to talk");
+        int ptt = menu.VisibleRowCountForDiagnostics();
+        Check("search finds a keybind row from another tab", ptt >= 1, $"{ptt} match");
+
+        menu.SearchForDiagnostics("zzzznope");
+        Check("no matches hides everything", menu.VisibleRowCountForDiagnostics() == 0);
+
+        menu.SearchForDiagnostics("");
+        int restored = menu.VisibleRowCountForDiagnostics();
+        Check("clearing search restores the tab", restored == all, $"{restored} vs {all} originally");
+
+        menu.QueueFree();
+
         GD.Print(fails == 0 ? "KEYTEST PASS" : $"KEYTEST FAIL — {fails} check(s) failed");
         host.GetTree().Quit(fails == 0 ? 0 : 1);
     }

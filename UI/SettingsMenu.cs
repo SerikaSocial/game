@@ -24,6 +24,10 @@ public partial class SettingsMenu : CanvasLayer
     // The VR tab and its section are null outside a headset — see the guard in _Ready.
     private VBoxContainer _vr;
     private Button _tabG, _tabA, _tabC, _tabI, _tabV, _tabK;
+    private LineEdit _search;
+    private HBoxContainer _tabsRow;
+    private int _tabBeforeSearch;
+    private Label _searchEmpty;
 
     public override void _Ready()
     {
@@ -65,6 +69,14 @@ public partial class SettingsMenu : CanvasLayer
         title.AddThemeFontSizeOverride("font_size", Brand.Fs(22));
         title.AddThemeColorOverride("font_color", Brand.TextHi);
         header.AddChild(title);
+        _search = new LineEdit
+        {
+            PlaceholderText = "Search settings…",
+            CustomMinimumSize = new Vector2(200, 32),
+        };
+        _search.TextChanged += ApplySearch;
+        header.AddChild(_search);
+
         var detected = new Label { Text = $"Detected: {DeviceProfile.Current} tier" };
         detected.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
         detected.AddThemeColorOverride("font_color", Brand.TextDim);
@@ -72,6 +84,7 @@ public partial class SettingsMenu : CanvasLayer
         root.AddChild(header);
 
         var tabs = new HBoxContainer();
+        _tabsRow = tabs;
         tabs.AddThemeConstantOverride("separation", 8);
         _tabG = Tab(Icons.Kind.Display, "Graphics", () => Switch(0));
         _tabA = Tab(Icons.Kind.Speaker, "Audio", () => Switch(1));
@@ -103,6 +116,10 @@ public partial class SettingsMenu : CanvasLayer
         stack.AddChild(_graphics); stack.AddChild(_audio); stack.AddChild(_controls);
         stack.AddChild(_keys); stack.AddChild(_iface);
         if (_tabV != null) { _vr = BuildVr(); stack.AddChild(_vr); }
+
+        _searchEmpty = Caption("No settings match that.");
+        _searchEmpty.Visible = false;
+        stack.AddChild(_searchEmpty);
 
         root.AddChild(new HSeparator());
         var footer = new HBoxContainer();
@@ -804,6 +821,96 @@ public partial class SettingsMenu : CanvasLayer
             if (node is Light3D l) l.ShadowEnabled = on;
     }
 
+    /// Filter every tab at once by row label.
+    ///
+    /// Deliberately cross-tab. A settings screen with six tabs has the same problem every settings
+    /// screen has: you know what the thing is called and not which tab someone filed it under.
+    /// So a search shows all tabs' matching rows together, and the tab strip disappears while it
+    /// is active — leaving it visible would imply the results are scoped to the current tab.
+    ///
+    /// It filters in place rather than building a results list, because the controls are live and
+    /// stateful; cloning them would produce a second set of sliders that do not reflect (or write
+    /// back) the real values.
+    /// Drive the search from a diagnostic. There is no test-only logic behind it — this calls the
+    /// same method the LineEdit does.
+    public void SearchForDiagnostics(string query) => ApplySearch(query);
+
+    /// Visible, searchable rows across every tab, for the diagnostic to count.
+    public int VisibleRowCountForDiagnostics()
+    {
+        int n = 0;
+        foreach (var section in Sections())
+        {
+            if (!section.Visible) continue;
+            foreach (var child in section.GetChildren())
+                if (child is Control c && c.Visible && c.HasMeta("search")) n++;
+        }
+        return n;
+    }
+
+    private void ApplySearch(string query)
+    {
+        string q = query.Trim().ToLower();
+        bool searching = q.Length > 0;
+
+        if (searching && _tabsRow.Visible) _tabBeforeSearch = CurrentTab();
+        _tabsRow.Visible = !searching;
+
+        if (!searching)
+        {
+            // Restore everything, then re-show whichever single tab was in front.
+            foreach (var section in Sections())
+                foreach (var child in section.GetChildren())
+                    if (child is Control c) c.Visible = true;
+            _searchEmpty.Visible = false;
+            Switch(_tabBeforeSearch);
+            return;
+        }
+
+        int hits = 0;
+        foreach (var section in Sections())
+        {
+            int sectionHits = 0;
+            foreach (var child in section.GetChildren())
+            {
+                if (child is not Control c) continue;
+                // Only tagged rows are searchable. Headings, captions and loose buttons are
+                // chrome for the unfiltered view and would be meaningless floating in results.
+                if (c.HasMeta("search"))
+                {
+                    bool match = ((string)c.GetMeta("search")).Contains(q);
+                    c.Visible = match;
+                    if (match) sectionHits++;
+                }
+                else c.Visible = false;
+            }
+            section.Visible = sectionHits > 0;
+            hits += sectionHits;
+        }
+
+        _searchEmpty.Visible = hits == 0;
+    }
+
+    private System.Collections.Generic.IEnumerable<VBoxContainer> Sections()
+    {
+        yield return _graphics;
+        yield return _audio;
+        yield return _controls;
+        yield return _keys;
+        yield return _iface;
+        if (_vr != null) yield return _vr;
+    }
+
+    private int CurrentTab()
+    {
+        if (_audio.Visible) return 1;
+        if (_controls.Visible) return 2;
+        if (_iface.Visible) return 3;
+        if (_vr != null && _vr.Visible) return 4;
+        if (_keys.Visible) return 5;
+        return 0;
+    }
+
     private void Switch(int i)
     {
         _graphics.Visible = i == 0; _audio.Visible = i == 1; _controls.Visible = i == 2; _iface.Visible = i == 3;
@@ -991,6 +1098,9 @@ public partial class SettingsMenu : CanvasLayer
     {
         var row = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         row.AddThemeConstantOverride("separation", 14);
+        // Tagged so the search box can match a row without re-deriving its label from the
+        // first child, which breaks the moment a row's layout changes.
+        row.SetMeta("search", label.ToLower());
         var l = new Label { Text = label, CustomMinimumSize = new Vector2(220, 0) };
         l.AddThemeColorOverride("font_color", Brand.TextHi);
         row.AddChild(l);
