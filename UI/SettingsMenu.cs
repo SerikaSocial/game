@@ -165,10 +165,25 @@ public partial class SettingsMenu : CanvasLayer
     private HSlider _master; private Label _masterVal;
     private OptionButton _outputOpt;
     private OptionButton _inputOpt;
+    private OptionButton _micMode; private Label _micModeHint;
+    private HSlider _micGain; private Label _micGainVal;
+    private HSlider _micSens; private Label _micSensVal;
+    private OptionButton _outputMode;
+    private CheckButton _nightMode;
+    private HSlider _volVoice; private Label _volVoiceVal;
+    private HSlider _volWorld; private Label _volWorldVal;
+    private HSlider _volSfx; private Label _volSfxVal;
+    private HSlider _volMusic; private Label _volMusicVal;
+    private HSlider _volMedia; private Label _volMediaVal;
+    private HSlider _volUi; private Label _volUiVal;
 
     private VBoxContainer BuildAudio()
     {
+        Audio.AudioBuses.Ensure();
+
         var v = Section();
+
+        v.AddChild(Heading("Output"));
         _master = new HSlider { MinValue = 0, MaxValue = 100, Step = 1, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         _masterVal = ValLabel();
         _master.ValueChanged += x =>
@@ -205,8 +220,187 @@ public partial class SettingsMenu : CanvasLayer
         };
         v.AddChild(Row("Microphone / Input", _inputOpt));
 
+        // Speaker layout is negotiated by the OS and the driver — the game cannot switch a stereo
+        // output into 5.1. Saying what was detected keeps the mode below from looking inert.
+        _outputMode = new OptionButton();
+        _outputMode.AddItem("Auto", 0);
+        _outputMode.AddItem("Headphones", 1);
+        _outputMode.AddItem("Stereo speakers", 2);
+        _outputMode.AddItem("Surround", 3);
+        _outputMode.ItemSelected += idx =>
+        {
+            DeviceProfile.Settings.AudioOutputMode = (Audio.AudioBuses.Output)(int)idx;
+            Audio.AudioBuses.ApplyOutput(DeviceProfile.Settings.AudioOutputMode);
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Listening on", _outputMode));
+        v.AddChild(Caption(
+            $"Detected: {Audio.AudioBuses.DetectedOutput()}. This tunes how wide positional audio " +
+            "is panned — the channel count itself comes from your system's sound settings."));
+
+        _nightMode = new CheckButton();
+        _nightMode.Toggled += on =>
+        {
+            DeviceProfile.Settings.NightMode = on;
+            Audio.AudioBuses.SetNightMode(on);
+            DeviceProfile.Settings.Save();
+        };
+        v.AddChild(Row("Night mode", _nightMode));
+        v.AddChild(Caption("Evens out loud worlds and loud players so nothing spikes. Good on headphones."));
+
+        // ── Mixer ───────────────────────────────────────────────────────────────────────
+        // Each of these is its own audio bus, so turning a world down genuinely does not turn the
+        // people you're talking to down with it.
+        v.AddChild(Heading("Mixer"));
+        v.AddChild(MixRow("Player voices", Audio.AudioBuses.Voice,
+            () => DeviceProfile.Settings.VolVoice, x => DeviceProfile.Settings.VolVoice = x,
+            out _volVoice, out _volVoiceVal));
+        v.AddChild(MixRow("World & ambience", Audio.AudioBuses.World,
+            () => DeviceProfile.Settings.VolWorld, x => DeviceProfile.Settings.VolWorld = x,
+            out _volWorld, out _volWorldVal));
+        v.AddChild(MixRow("Sound effects", Audio.AudioBuses.Sfx,
+            () => DeviceProfile.Settings.VolSfx, x => DeviceProfile.Settings.VolSfx = x,
+            out _volSfx, out _volSfxVal));
+        v.AddChild(MixRow("Music", Audio.AudioBuses.Music,
+            () => DeviceProfile.Settings.VolMusic, x => DeviceProfile.Settings.VolMusic = x,
+            out _volMusic, out _volMusicVal));
+        v.AddChild(MixRow("Video screens", Audio.AudioBuses.Media,
+            () => DeviceProfile.Settings.VolMedia, x => DeviceProfile.Settings.VolMedia = x,
+            out _volMedia, out _volMediaVal));
+        v.AddChild(MixRow("Menus & alerts", Audio.AudioBuses.Ui,
+            () => DeviceProfile.Settings.VolUi, x => DeviceProfile.Settings.VolUi = x,
+            out _volUi, out _volUiVal));
+
+        var soloVoice = Brand.Ghost_(new Button { Text = "Voices only", CustomMinimumSize = new Vector2(150, 34) });
+        soloVoice.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+        soloVoice.Pressed += () =>
+        {
+            // The state people actually want mid-conversation, and tedious to reach by dragging
+            // five sliders to zero.
+            DeviceProfile.Settings.VolWorld = 0f;
+            DeviceProfile.Settings.VolSfx = 0f;
+            DeviceProfile.Settings.VolMusic = 0f;
+            DeviceProfile.Settings.VolMedia = 0f;
+            DeviceProfile.Settings.VolVoice = 1f;
+            ApplyMix();
+            RebuildValues();
+            DeviceProfile.Settings.Save();
+        };
+        var resetMix = Brand.Ghost_(new Button { Text = "Reset mix", CustomMinimumSize = new Vector2(130, 34) });
+        resetMix.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+        resetMix.Pressed += () =>
+        {
+            DeviceProfile.Settings.VolVoice = 1f;
+            DeviceProfile.Settings.VolWorld = 1f;
+            DeviceProfile.Settings.VolSfx = 1f;
+            DeviceProfile.Settings.VolMusic = 0.7f;
+            DeviceProfile.Settings.VolMedia = 1f;
+            DeviceProfile.Settings.VolUi = 0.8f;
+            ApplyMix();
+            RebuildValues();
+            DeviceProfile.Settings.Save();
+        };
+        var mixBtns = new HBoxContainer();
+        mixBtns.AddThemeConstantOverride("separation", 8);
+        mixBtns.AddChild(soloVoice);
+        mixBtns.AddChild(resetMix);
+        v.AddChild(mixBtns);
+
+        // ── Voice chat ──────────────────────────────────────────────────────────────────
+        v.AddChild(Heading("Microphone"));
+        _micMode = new OptionButton();
+        _micMode.AddItem("Voice activated (open mic)", 0);
+        _micMode.AddItem("Push to talk (hold B)", 1);
+        _micMode.AddItem("Always on (no gate)", 2);
+        _micMode.ItemSelected += idx =>
+        {
+            // The enum's Muted member is the "mic off" state, not a mode the user picks here —
+            // that is what the V toggle does. This chooses what ON means.
+            DeviceProfile.Settings.VoiceMicMode = idx switch
+            {
+                1 => Player.MicMode.PushToTalk,
+                2 => Player.MicMode.Always,
+                _ => Player.MicMode.Open,
+            };
+            DeviceProfile.Settings.Save();
+            VoiceSettingsChanged?.Invoke();
+            RefreshVoiceRowVisibility();
+        };
+        v.AddChild(Row("Voice mode", _micMode));
+        _micModeHint = Caption("");
+        v.AddChild(_micModeHint);
+
+        _micGain = new HSlider { MinValue = 25, MaxValue = 300, Step = 5, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _micGainVal = ValLabel();
+        _micGain.ValueChanged += x =>
+        {
+            DeviceProfile.Settings.VoiceMicGain = (float)x / 100f;
+            _micGainVal.Text = $"{(int)x}%";
+            DeviceProfile.Settings.Save();
+            VoiceSettingsChanged?.Invoke();
+        };
+        v.AddChild(Row("Mic gain", _micGain, _micGainVal));
+
+        _micSens = new HSlider { MinValue = 25, MaxValue = 300, Step = 5, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _micSensVal = ValLabel();
+        _micSens.ValueChanged += x =>
+        {
+            // Higher = a louder voice is needed to open the gate. Phrased as "gate threshold"
+            // in the label because "sensitivity" is ambiguous about which way it runs.
+            DeviceProfile.Settings.VoiceSensitivity = (float)x / 100f;
+            _micSensVal.Text = $"{(int)x}%";
+            DeviceProfile.Settings.Save();
+            VoiceSettingsChanged?.Invoke();
+        };
+        v.AddChild(Row("Voice gate threshold", _micSens, _micSensVal));
+
+        // Playback volume for other people lives in the mixer's "Player voices" channel above —
+        // it is a bus, not a per-node gain, so it belongs with the rest of the mix.
+
+        RefreshVoiceRowVisibility();
         return v;
     }
+
+    private static void SyncMix(HSlider s, Label l, float linear)
+    {
+        s?.SetValueNoSignal(linear * 100f);
+        if (l != null) l.Text = $"{(int)(linear * 100)}%";
+    }
+
+    /// Push the whole saved mix onto the buses. Called on boot and by the mix presets.
+    public static void ApplyMix()
+    {
+        Audio.AudioBuses.Ensure();
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.Voice, DeviceProfile.Settings.VolVoice);
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.World, DeviceProfile.Settings.VolWorld);
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.Sfx, DeviceProfile.Settings.VolSfx);
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.Music, DeviceProfile.Settings.VolMusic);
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.Media, DeviceProfile.Settings.VolMedia);
+        Audio.AudioBuses.SetVolume(Audio.AudioBuses.Ui, DeviceProfile.Settings.VolUi);
+        Audio.AudioBuses.ApplyOutput(DeviceProfile.Settings.AudioOutputMode);
+        Audio.AudioBuses.SetNightMode(DeviceProfile.Settings.NightMode);
+    }
+
+    /// The gate sliders only mean something when a gate is running, so hide them in Always-on
+    /// rather than leaving two controls that visibly do nothing.
+    private void RefreshVoiceRowVisibility()
+    {
+        var mode = DeviceProfile.Settings.VoiceMicMode;
+        bool gated = mode != Player.MicMode.Always;
+        if (_micSens != null) _micSens.GetParent<Control>().Visible = gated;
+        if (_micModeHint != null)
+            _micModeHint.Text = mode switch
+            {
+                Player.MicMode.PushToTalk => "Hold B to talk. Nothing is transmitted otherwise.",
+                Player.MicMode.Always => "Your mic transmits constantly while unmuted (~32 KB/s). " +
+                                          "Use this if voice activation keeps clipping your first word.",
+                _ => "Transmits when you speak. Raise the gate threshold in a noisy room.",
+            };
+    }
+
+    /// Raised when any voice setting changes so Main can push it into the live VoiceManager —
+    /// a setting that only takes effect on restart is a setting people conclude is broken.
+    public event System.Action VoiceSettingsChanged;
 
     // ── Controls tab ────────────────────────────────────────────────────────────────────
     private HSlider _sens; private Label _sensVal; private CheckButton _thirdPerson;
@@ -432,6 +626,28 @@ public partial class SettingsMenu : CanvasLayer
         _master.SetValueNoSignal(DeviceProfile.Settings.MasterVolume * 100f);
         _masterVal.Text = $"{(int)(DeviceProfile.Settings.MasterVolume * 100)}%";
 
+        _micMode?.Select(DeviceProfile.Settings.VoiceMicMode switch
+        {
+            Player.MicMode.PushToTalk => 1,
+            Player.MicMode.Always => 2,
+            _ => 0,
+        });
+        _micGain?.SetValueNoSignal(DeviceProfile.Settings.VoiceMicGain * 100f);
+        if (_micGainVal != null) _micGainVal.Text = $"{(int)(DeviceProfile.Settings.VoiceMicGain * 100)}%";
+        _micSens?.SetValueNoSignal(DeviceProfile.Settings.VoiceSensitivity * 100f);
+        if (_micSensVal != null) _micSensVal.Text = $"{(int)(DeviceProfile.Settings.VoiceSensitivity * 100)}%";
+
+        _outputMode?.Select((int)DeviceProfile.Settings.AudioOutputMode);
+        _nightMode?.SetPressedNoSignal(DeviceProfile.Settings.NightMode);
+
+        SyncMix(_volVoice, _volVoiceVal, DeviceProfile.Settings.VolVoice);
+        SyncMix(_volWorld, _volWorldVal, DeviceProfile.Settings.VolWorld);
+        SyncMix(_volSfx, _volSfxVal, DeviceProfile.Settings.VolSfx);
+        SyncMix(_volMusic, _volMusicVal, DeviceProfile.Settings.VolMusic);
+        SyncMix(_volMedia, _volMediaVal, DeviceProfile.Settings.VolMedia);
+        SyncMix(_volUi, _volUiVal, DeviceProfile.Settings.VolUi);
+        RefreshVoiceRowVisibility();
+
         PopulateDevices();
 
         _sens.SetValueNoSignal(DeviceProfile.Settings.MouseSensitivity / 0.001f);
@@ -545,6 +761,68 @@ public partial class SettingsMenu : CanvasLayer
         l.AddThemeColorOverride("font_color", Brand.Accent);
         return l;
     }
+    /// A section heading inside a settings tab. The audio tab grew four distinct groups (devices,
+    /// the mixer, voice, output shaping) and without headings it reads as one undifferentiated
+    /// column of sliders.
+    private static Control Heading(string text)
+    {
+        var v = new VBoxContainer();
+        v.AddThemeConstantOverride("separation", 4);
+        var l = new Label { Text = text.ToUpperInvariant() };
+        l.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
+        l.AddThemeColorOverride("font_color", Brand.Accent);
+        v.AddChild(l);
+        v.AddChild(new HSeparator());
+        return v;
+    }
+
+    /// Small muted caption under a control, for the things that genuinely need a sentence.
+    private static Label Caption(string text)
+    {
+        var l = new Label
+        {
+            Text = text,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        l.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
+        l.AddThemeColorOverride("font_color", Brand.TextDim);
+        return l;
+    }
+
+    /// One channel of the mixer: a slider, a live percentage, and a mute toggle. Returns the row
+    /// and hands back the slider/label so `SyncFromSettings` can drive them.
+    private HBoxContainer MixRow(string label, string bus, Func<float> get, Action<float> set,
+                                 out HSlider slider, out Label value)
+    {
+        var s = new HSlider { MinValue = 0, MaxValue = 200, Step = 5, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        var v = ValLabel();
+        var mute = Brand.Ghost_(new Button { Text = "Mute", ToggleMode = true, CustomMinimumSize = new Vector2(70, 32) });
+        mute.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
+
+        s.ValueChanged += x =>
+        {
+            set((float)x / 100f);
+            v.Text = $"{(int)x}%";
+            Audio.AudioBuses.SetVolume(bus, (float)x / 100f);
+            // A slider moved off zero is an unmute; leaving the toggle stuck on would make the
+            // slider look broken.
+            if (x > 0 && mute.ButtonPressed) mute.SetPressedNoSignal(false);
+            DeviceProfile.Settings.Save();
+        };
+        mute.Toggled += on =>
+        {
+            Audio.AudioBuses.SetMuted(bus, on);
+            if (!on) Audio.AudioBuses.SetVolume(bus, get());
+        };
+
+        slider = s;
+        value = v;
+        var row = Row(label, s, v);
+        row.AddChild(mute);
+        return row;
+    }
+
     private static HBoxContainer Row(string label, Control control, Control trailing = null)
     {
         var row = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };

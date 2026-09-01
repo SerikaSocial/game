@@ -313,6 +313,45 @@ public static class DeviceProfile
         /// Discord Social SDK rich presence. Off skips the Authorize popup entirely.
         public static bool DiscordPresence = true;
 
+        // ── Voice ─────────────────────────────────────────────────────────────────────
+        //
+        /// How the mic gates when it is on. Open-mic (voice-activated) is the default because it
+        /// is what a social space is for; push-to-talk is the setting people in shared rooms
+        /// reach for, and Always transmits with no gate at all.
+        public static Player.MicMode VoiceMicMode = Player.MicMode.Open;
+
+        // ── Audio mix ─────────────────────────────────────────────────────────────────
+        //
+        // Per-category volumes, 0..2 linear. These map onto the buses in `Audio.AudioBuses`, so
+        // "mute the world but keep voices" is a real state rather than a compromise on one slider.
+        public static float VolVoice = 1f;
+        public static float VolWorld = 1f;
+        public static float VolSfx = 1f;
+        public static float VolMusic = 0.7f;
+        public static float VolMedia = 1f;
+        public static float VolUi = 0.8f;
+
+        /// Headphones / speakers / surround. Governs positional panning width, not channel count —
+        /// see `AudioBuses.ApplyOutput`.
+        public static Audio.AudioBuses.Output AudioOutputMode = Audio.AudioBuses.Output.Auto;
+
+        /// Master compression so nothing can spike over everything else.
+        public static bool NightMode;
+
+        /// Multiplier on the VAD gate threshold. Above 1 needs a louder voice to open (noisy
+        /// room), below 1 opens more readily.
+        public static float VoiceSensitivity = 1f;
+
+        /// Linear gain applied to captured audio before transmit.
+        public static float VoiceMicGain = 1f;
+
+        /// Playback volume for everyone else's voice, 0..2.
+        public static float VoiceOutputGain = 1f;
+
+        /// Start each session with the mic live rather than muted. Off by default: joining a
+        /// world with a hot mic you did not know was hot is the failure people actually mind.
+        public static bool VoiceStartUnmuted;
+
         /// Last answer to Discord's in-client Authorize prompt. `Declined` is sticky — we do
         /// not pop the overlay again until the player turns presence back on in Settings.
         public enum DiscordConsentKind { Unknown = 0, Granted = 1, Declined = 2 }
@@ -489,6 +528,20 @@ public static class DeviceProfile
             DiscordPresence = (bool)cfg.GetValue("discord", "presence", DiscordPresence);
             DiscordConsent = (DiscordConsentKind)(int)cfg.GetValue("discord", "consent", (int)DiscordConsent);
 
+            VoiceMicMode = (Player.MicMode)(int)cfg.GetValue("voice", "mic_mode", (int)VoiceMicMode);
+            VolVoice = (float)cfg.GetValue("mix", "voice", VolVoice);
+            VolWorld = (float)cfg.GetValue("mix", "world", VolWorld);
+            VolSfx = (float)cfg.GetValue("mix", "sfx", VolSfx);
+            VolMusic = (float)cfg.GetValue("mix", "music", VolMusic);
+            VolMedia = (float)cfg.GetValue("mix", "media", VolMedia);
+            VolUi = (float)cfg.GetValue("mix", "ui", VolUi);
+            AudioOutputMode = (Audio.AudioBuses.Output)(int)cfg.GetValue("mix", "output_mode", (int)AudioOutputMode);
+            NightMode = (bool)cfg.GetValue("mix", "night_mode", NightMode);
+            VoiceSensitivity = (float)cfg.GetValue("voice", "sensitivity", VoiceSensitivity);
+            VoiceMicGain = (float)cfg.GetValue("voice", "mic_gain", VoiceMicGain);
+            VoiceOutputGain = (float)cfg.GetValue("voice", "output_gain", VoiceOutputGain);
+            VoiceStartUnmuted = (bool)cfg.GetValue("voice", "start_unmuted", VoiceStartUnmuted);
+
             VrSnapTurn = (bool)cfg.GetValue("vr", "snap_turn", VrSnapTurn);
             VrSnapTurnAngle = (float)cfg.GetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
             VrSmoothTurnSpeed = (float)cfg.GetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);
@@ -547,6 +600,20 @@ public static class DeviceProfile
             cfg.SetValue("ui", "pfp", ProfilePictures);
             cfg.SetValue("discord", "presence", DiscordPresence);
             cfg.SetValue("discord", "consent", (int)DiscordConsent);
+
+            cfg.SetValue("voice", "mic_mode", (int)VoiceMicMode);
+            cfg.SetValue("mix", "voice", VolVoice);
+            cfg.SetValue("mix", "world", VolWorld);
+            cfg.SetValue("mix", "sfx", VolSfx);
+            cfg.SetValue("mix", "music", VolMusic);
+            cfg.SetValue("mix", "media", VolMedia);
+            cfg.SetValue("mix", "ui", VolUi);
+            cfg.SetValue("mix", "output_mode", (int)AudioOutputMode);
+            cfg.SetValue("mix", "night_mode", NightMode);
+            cfg.SetValue("voice", "sensitivity", VoiceSensitivity);
+            cfg.SetValue("voice", "mic_gain", VoiceMicGain);
+            cfg.SetValue("voice", "output_gain", VoiceOutputGain);
+            cfg.SetValue("voice", "start_unmuted", VoiceStartUnmuted);
             cfg.SetValue("vr", "snap_turn", VrSnapTurn);
             cfg.SetValue("vr", "snap_turn_angle", VrSnapTurnAngle);
             cfg.SetValue("vr", "smooth_turn_speed", VrSmoothTurnSpeed);

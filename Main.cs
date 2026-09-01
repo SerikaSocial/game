@@ -93,6 +93,9 @@ public partial class Main : Node3D
     private SpatialAudioManager _audio;
     private VoiceManager _voice;
     private bool _micActive;
+    /// Push-to-talk key. V toggles the mic; B is the hold. Not on V because a key that both
+    /// toggles and gates is ambiguous the first time you hold it.
+    private const Key PushToTalkKey = Key.B;
     private Updater _updater;
     private StrokeCanvas _strokeCanvas;
     private readonly List<HeldItemController> _heldItemControllers = new();
@@ -135,9 +138,15 @@ public partial class Main : Node3D
         AddChild(_worldRoot);
         _audio = new SpatialAudioManager { Name = "SpatialAudio" };
         AddChild(_audio);
-        _voice = new VoiceManager { Name = "VoiceManager" };
+        _voice = new VoiceManager
+        {
+            Name = "VoiceManager",
+            VadSensitivity = UI.DeviceProfile.Settings.VoiceSensitivity,
+            MicGain = UI.DeviceProfile.Settings.VoiceMicGain,
+        };
         AddChild(_voice);
         _voice.VoiceFrameReady += OnVoiceFrameReady;
+        ApplyVoiceSettings();
         Worlds.BuildLoginBackdrop(_worldRoot); // neutral backdrop behind the login screen
         if (_vrMode)
         {
@@ -156,6 +165,10 @@ public partial class Main : Node3D
         bool diagnosticRun = System.Linq.Enumerable.Any(args.Keys, k => k.StartsWith("serika-"));
         if (!diagnosticRun && DisplayServer.GetName() != "headless")
             UI.DeviceProfile.Settings.ApplyAudioDevices();
+        // The bus graph is process-local (not machine-global like device routing), so it is safe
+        // and useful to build it even for diagnostics — anything that plays a sound expects its
+        // bus to exist.
+        UI.SettingsMenu.ApplyMix();
         if (args.ContainsKey("serika-animtest"))
         {
             AnimDiagnostic.Run(this, args.GetValueOrDefault("clip", "Walk"),
@@ -188,6 +201,11 @@ public partial class Main : Node3D
         if (args.ContainsKey("serika-fptest"))
         {
             Avatar.EyeProbeDiagnostic.Run(this, args.GetValueOrDefault("ska", null));
+            return;
+        }
+        if (args.ContainsKey("serika-voicetest"))
+        {
+            Player.VoiceDiagnostic.Run(this);
             return;
         }
         if (args.ContainsKey("serika-phystest"))
@@ -338,9 +356,23 @@ public partial class Main : Node3D
         AddUi(_socialPanel);
         _socialPanel.BlocksChanged += RefreshBlockVisibility;
         _socialPanel.Closed += OnPauseClosed;
+        _socialPanel.InviteAccepted += n => _ = AcceptInviteAsync(n);
+        _socialPanel.UnreadChanged += UpdateNotificationBadge;
 
         _playerCard = new UI.PlayerCard { Name = "PlayerCard" };
         AddUi(_playerCard);
+        _playerCard.CurrentInstanceId = () => _currentInstanceId;
+        _playerCard.CurrentWorldName = () => _worldName;
+        _playerCard.IsVoiceMuted = userId =>
+        {
+            uint? peer = PeerIdForUser(userId);
+            return peer.HasValue ? _voice?.IsPeerMuted(peer.Value) : null;
+        };
+        _playerCard.SetVoiceMuted = (userId, muted) =>
+        {
+            uint? peer = PeerIdForUser(userId);
+            if (peer.HasValue) _voice?.SetPeerMuted(peer.Value, muted);
+        };
         _playerCard.BlocksChanged += RefreshBlockVisibility;
         _playerCard.ReportRequested = (userId, name) =>
         {
@@ -435,6 +467,7 @@ public partial class Main : Node3D
         AddUi(_settingsMenu);
         _settingsMenu.Closed += SyncMenuHold;
         _settingsMenu.SettingChanged += OnSettingChanged;
+        _settingsMenu.VoiceSettingsChanged += ApplyVoiceSettings;
 
         _inWorldHud = new InWorldHud { Name = "InWorldHud" };
         AddUi(_inWorldHud, chrome: true);
@@ -570,6 +603,7 @@ public partial class Main : Node3D
         // there is no pump, and the SDK's IPC session would otherwise linger until process
         // exit. Idempotent, so both this and a WM-close path can call it.
         Discord.DiscordRichPresence.Shutdown();
+        _gateway?.Close();
         ClearInstanceLock();
     }
 
@@ -1478,6 +1512,11 @@ public partial class Main : Node3D
     /// Route after a fresh login or session restore: deep-linked world, or Home.
     private async Task RouteAfterLogin()
     {
+        // Every login path converges here, so this is the one place the control-plane socket has
+        // to be opened. Without it the gateway has no socket for this user and every push aimed
+        // at them — invites included — is dropped as "offline".
+        CallDeferred(nameof(ConnectGateway));
+
         if (_pendingIntent.Kind == DeepLink.Kind.World)
         {
             await JoinWorldById(_pendingIntent.Arg);
@@ -1489,11 +1528,118 @@ public partial class Main : Node3D
         }
     }
 
+    // ── Gateway control plane (presence, notifications, invites) ──────────────────────
+
+    private GatewayClient _gateway;
+    private double _gatewayPingTimer;
+
+    private string GatewayWsUrl
+    {
+        get
+        {
+            string explicitUrl = OrDefault("SERIKA_GATEWAY_URL", null);
+            if (!string.IsNullOrEmpty(explicitUrl)) return explicitUrl;
+            // Derive from the API base so a local dev override of one implies the other:
+            // https://api-social.… -> wss://gateway-social.…/gateway
+            string b = ApiBaseUrl;
+            string ws = b.StartsWith("https://") ? "wss://" + b.Substring(8)
+                      : b.StartsWith("http://") ? "ws://" + b.Substring(7)
+                      : b;
+            return ws.Replace("api-social", "gateway-social").TrimEnd('/') + "/gateway";
+        }
+    }
+
+    private void ConnectGateway()
+    {
+        if (_api?.SessionToken == null) return;
+        if (_gateway != null) return;
+
+        _gateway = new GatewayClient();
+        _gateway.Ready += OnGatewayReady;
+        _gateway.NotificationReceived += OnNotificationReceived;
+        _gateway.ConnectionChanged += open =>
+            GD.Print(open ? "[gateway] connected" : "[gateway] disconnected — will retry");
+        _gateway.Connect(GatewayWsUrl, _api.SessionToken);
+        GD.Print($"[gateway] connecting to {GatewayWsUrl}");
+    }
+
+    /// Fires on connect AND on every reconnect. Re-fetching is the point: anything pushed while
+    /// the socket was down exists only in the database.
+    private void OnGatewayReady()
+    {
+        _socialPanel?.Configure(_api);
+        _ = RefreshNotificationsAsync();
+    }
+
+    private async Task RefreshNotificationsAsync()
+    {
+        if (_socialPanel == null) return;
+        await _socialPanel.LoadNotificationsAsync();
+        UpdateNotificationBadge(_socialPanel.Unread);
+    }
+
+    private void OnNotificationReceived(SerikaNotification n, int unread)
+    {
+        _socialPanel?.PushNotification(n, unread);
+        UpdateNotificationBadge(unread);
+
+        // A toast is the only part of this the player sees if they never open the panel, so it
+        // carries the actionable text rather than a bare "you have a notification".
+        string text = n.Kind switch
+        {
+            "invite" => $"{n.ActorName ?? "Someone"} invited you to {n.WorldName ?? "a world"}",
+            "friend_request" => $"{n.ActorName ?? "Someone"} sent you a friend request",
+            "friend_accepted" => $"{n.ActorName ?? "Someone"} accepted your friend request",
+            _ => n.Title,
+        };
+        _inWorldHud?.Toast(text, 6);
+    }
+
+    private void UpdateNotificationBadge(int unread) => _quickMenu?.SetNotificationCount(unread);
+
+    /// Join the instance an invite points at, rather than the world generally — otherwise the
+    /// invitee can match into a different instance of the same world and arrive alone.
+    private async Task AcceptInviteAsync(SerikaNotification n)
+    {
+        if (n == null || _api == null) return;
+        if (n.IsExpired)
+        {
+            _inWorldHud?.Toast("That invite has expired.", 4);
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(n.InstanceId))
+        {
+            try
+            {
+                ShowLoading("Joining your friend…");
+                var joined = await _api.JoinInstanceByIdAsync(n.InstanceId);
+                _currentWorldId = n.WorldId;
+                _currentInstanceId = n.InstanceId;
+                string endpoint = joined.GetProperty("endpoint").GetString();
+                string ticket = joined.GetProperty("ticket").GetString();
+                string worldName = n.WorldName ?? "the world";
+                CallDeferred(nameof(OnJoinReady), endpoint, ticket, _username, worldName);
+                return;
+            }
+            catch (Exception e)
+            {
+                // The instance may have closed or filled since the invite was sent. Fall back to
+                // the world so the player still ends up somewhere sensible.
+                GD.PrintErr($"invite instance join failed, falling back to world: {e.Message}");
+            }
+        }
+
+        if (!string.IsNullOrEmpty(n.WorldId)) await JoinWorldById(n.WorldId);
+    }
+
     /// Create/join an instance of a specific world and connect to its relay.
     /// Downloads the world file first if a downloadUrl is available (VRChat-style caching).
     /// The id of the multiplayer world we're currently in, for building invite deep links.
     /// Null while in Home (single-player, nothing to invite to).
     private string _currentWorldId;
+    /// The instance we are actually in, needed to invite someone into it. Null in Home.
+    private string _currentInstanceId;
 
     private async Task JoinWorldById(string worldId)
     {
@@ -1534,6 +1680,12 @@ public partial class Main : Node3D
             // Match into an existing open instance if one has room (so players actually meet),
             // else this creates a fresh one.
             var joined = await _api.JoinWorldInstanceAsync(worldId);
+            // Remember which instance we landed in — an invite has to name the instance, not just
+            // the world, or the invitee matches into a different copy of it and finds nobody.
+            _currentInstanceId = joined.TryGetProperty("instance", out var inst) &&
+                                 inst.TryGetProperty("id", out var iid) && iid.ValueKind == JsonValueKind.String
+                ? iid.GetString()
+                : null;
             string endpoint = joined.GetProperty("endpoint").GetString();
             string ticket = joined.GetProperty("ticket").GetString();
             string worldName = joined.TryGetProperty("worldName", out var wn) ? wn.GetString() : "the world";
@@ -1577,6 +1729,7 @@ public partial class Main : Node3D
             _inHome = true;
             _inWorld = false;
             _currentWorldId = null;
+            _currentInstanceId = null; // Home is single-player: there is nothing to invite into
             TeardownRemotes();
             _transport?.Disconnect();
             _transport = null;
@@ -2182,7 +2335,14 @@ public partial class Main : Node3D
 
     private void OnPeerLeft(uint peerId)
     {
-        if (_remotes.Remove(peerId, out var a)) a.QueueFree();
+        if (_remotes.Remove(peerId, out var a))
+        {
+            _voice?.ForgetSpeaker(a.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer"));
+            a.QueueFree();
+        }
+        // Relay peer ids are per-session, so leaving stale voice state keyed by one would apply
+        // a previous occupant's mute/gain to whoever inherits the id next.
+        _voice?.ForgetPeer(peerId);
         _peerUserIds.Remove(peerId);
         _beanedPeers.Remove(peerId);
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
@@ -2203,11 +2363,39 @@ public partial class Main : Node3D
     private void ToggleMic()
     {
         _micActive = !_micActive;
-        if (_micActive) _voice.StartRecording();
-        else _voice.StopRecording();
+        // Muted vs the user's chosen live mode (open or push-to-talk), not a bare start/stop —
+        // push-to-talk still needs capture running so the gate can open on the key.
+        _voice.Mode = _micActive ? UI.DeviceProfile.Settings.VoiceMicMode : MicMode.Muted;
         _inWorldHud?.SetMicEnabled(_micActive);
         if (!_micActive) _inWorldHud?.SetMicLevel(0f);
-        _inWorldHud?.Toast(_micActive ? "Microphone ON" : "Microphone OFF");
+        _inWorldHud?.Toast(_micActive
+            ? (_voice.Mode == Player.MicMode.PushToTalk ? "Microphone ON (push to talk)" : "Microphone ON")
+            : "Microphone OFF");
+    }
+
+    /// Resolve an account id to the relay peer id currently carrying their voice, or null when
+    /// they aren't in our instance.
+    private uint? PeerIdForUser(string userId)
+    {
+        if (string.IsNullOrEmpty(userId)) return null;
+        foreach (var (peerId, uid) in _peerUserIds)
+            if (uid == userId) return peerId;
+        return null;
+    }
+
+    /// Push the saved voice settings into the live VoiceManager. Called on boot and whenever the
+    /// settings menu changes one, so nothing here needs a restart to take effect.
+    private void ApplyVoiceSettings()
+    {
+        if (_voice == null) return;
+        _voice.VadSensitivity = UI.DeviceProfile.Settings.VoiceSensitivity;
+        _voice.MicGain = UI.DeviceProfile.Settings.VoiceMicGain;
+        // Only re-mode a live mic: flipping to Open here would un-mute someone who had toggled
+        // the mic off, which is the one thing a settings screen must never do.
+        if (_micActive) _voice.Mode = UI.DeviceProfile.Settings.VoiceMicMode;
+
+        // Playback level for other people is the Voice bus, applied by the mixer — nothing to do
+        // per-node here.
     }
 
     private void OnVoiceFrameReady(byte[] pcm)
@@ -2231,11 +2419,14 @@ public partial class Main : Node3D
                 MaxDistance = 20f,
                 UnitSize = 5f,
                 AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance,
-                Position = new Vector3(0, 1.5f, 0)
+                Position = new Vector3(0, 1.5f, 0),
+                // Other people's speech goes on its own bus, so turning a loud world down never
+                // turns down the person you're talking to.
+                Bus = Audio.AudioBuses.Voice,
             };
             avatar.AddChild(player);
         }
-        _voice.PlayFrame(player, frame.Payload);
+        _voice.PlayFrame(peerId, player, frame.Payload);
     }
 
     private static byte ComputeRms(byte[] pcm)
@@ -2619,6 +2810,29 @@ public partial class Main : Node3D
         // Re-push rich presence on an interval.
         RpcPresence.Poll(delta);
 
+        // Control plane: dispatch queued gateway messages on the game thread and keep the socket
+        // warm. The ping matters — an idle WebSocket through Cloudflare gets reaped, and a reaped
+        // socket is an invite that silently never arrives.
+        if (_gateway != null)
+        {
+            _gateway.Poll(delta);
+            _gatewayPingTimer += delta;
+            if (_gatewayPingTimer >= 30.0)
+            {
+                _gatewayPingTimer = 0;
+                _gateway.Ping();
+            }
+        }
+
+        // Push-to-talk is polled rather than event-driven: a key-up that arrives while a menu has
+        // focus would never reach us, and the mic would latch open. Polling can't latch.
+        if (_voice != null && _voice.Mode == MicMode.PushToTalk)
+        {
+            _voice.PushToTalkHeld = Input.IsKeyPressed(PushToTalkKey)
+                                    && !AnyMenuOpen
+                                    && !(_chat?.IsTyping ?? false);
+        }
+
         // Drive local player avatar mouth visemes from live mic capture
         var localAv = _localDesktop?.Avatar ?? _localVr?.Avatar;
         if (localAv != null && _voice != null)
@@ -2633,10 +2847,12 @@ public partial class Main : Node3D
             );
         }
 
-        // Drive remote player avatar mouth visemes from remote playback audio volume
+        // Drive remote player avatar mouth visemes from remote playback audio volume, and light
+        // the nametag of whoever is talking. Without the indicator a room of avatars gives no clue
+        // which one the voice is coming from — the single most-missed cue in a social space.
         if (_voice != null && _remotes.Count > 0)
         {
-            foreach (var remote in _remotes.Values)
+            foreach (var (peerId, remote) in _remotes)
             {
                 var voicePlayer = remote.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer");
                 if (voicePlayer != null && remote.Avatar != null)
@@ -2644,6 +2860,7 @@ public partial class Main : Node3D
                     float vol = _voice.GetSpeakerVolume(voicePlayer);
                     remote.Avatar.SetVoiceLipSync(vol);
                 }
+                remote.SetSpeaking(_voice.IsPeerSpeaking(peerId), _voice.IsPeerMuted(peerId));
             }
         }
     }

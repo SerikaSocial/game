@@ -479,6 +479,59 @@ public sealed class ApiClient
         return json.TryGetProperty("error", out var e) ? e.GetString() : $"http {(int)res.StatusCode}";
     }
 
+    // ── Notifications ─────────────────────────────────────────────────────────────────
+
+    /// Fetch the inbox. This is the authoritative read — the gateway push is only a fast path,
+    /// and anything that arrived while the socket was down is here and nowhere else.
+    public async Task<(SerikaNotification[] Items, int Unread)> GetNotificationsAsync(int limit = 50)
+    {
+        var json = await GetAuthedAsync($"/v1/notifications?limit={limit}");
+        if (!json.TryGetProperty("notifications", out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return (System.Array.Empty<SerikaNotification>(), 0);
+
+        var list = new List<SerikaNotification>();
+        foreach (var e in arr.EnumerateArray()) list.Add(SerikaNotification.FromJson(e));
+        int unread = json.TryGetProperty("unread", out var u) && u.TryGetInt32(out int n) ? n : 0;
+        return (list.ToArray(), unread);
+    }
+
+    /// Just the badge number, for the poll fallback when the gateway socket is down.
+    public async Task<int> GetUnreadCountAsync()
+    {
+        var json = await GetAuthedAsync("/v1/notifications/unread");
+        return json.TryGetProperty("unread", out var u) && u.TryGetInt32(out int n) ? n : 0;
+    }
+
+    /// Mark one read; returns the new unread count.
+    public async Task<int> MarkNotificationReadAsync(string id)
+    {
+        var json = await PostAuthedAsync($"/v1/notifications/{Uri.EscapeDataString(id)}/read", "{}");
+        return json.TryGetProperty("unread", out var u) && u.TryGetInt32(out int n) ? n : 0;
+    }
+
+    public async Task MarkAllNotificationsReadAsync() =>
+        await PostAuthedAsync("/v1/notifications/read-all", "{}");
+
+    public async Task DeleteNotificationAsync(string id) =>
+        await DeleteAuthedAsync($"/v1/notifications/{Uri.EscapeDataString(id)}");
+
+    public async Task ClearNotificationsAsync() => await DeleteAuthedAsync("/v1/notifications");
+
+    // ── Invites ───────────────────────────────────────────────────────────────────────
+
+    /// Invite a user to the instance we're in. Throws with the server's error string on refusal
+    /// (`rate_limited`, `blocked`, `not_permitted`, …) so the caller can show a real reason.
+    public async Task InviteToInstanceAsync(string targetUserId, string instanceId)
+    {
+        var body = JsonSerializer.Serialize(new { targetUserId, instanceId });
+        await PostAuthedAsync("/v1/social/invite", body);
+    }
+
+    /// Join one specific instance. An invite names an instance, and joining the world instead
+    /// would re-run matchmaking and can land the invitee in a different copy of it.
+    public async Task<JsonElement> JoinInstanceByIdAsync(string instanceId) =>
+        await PostAuthedAsync($"/v1/instances/{Uri.EscapeDataString(instanceId)}/join", "{}");
+
     private async Task<JsonElement> GetAsync(string path)
     {
         var res = await _http.GetAsync($"{_baseUrl}{path}");

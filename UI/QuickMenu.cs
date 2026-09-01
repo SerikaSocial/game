@@ -46,6 +46,8 @@ public partial class QuickMenu : CanvasLayer
     private Button _micBtn;
     private Button _inviteCard;
     private Button _reportWorldBtn;
+    private Button _socialPill;
+    private int _notificationCount;
 
     private double _clockTimer;
 
@@ -173,7 +175,9 @@ public partial class QuickMenu : CanvasLayer
         pillRow.AddChild(ActionPill(Icons.Kind.Home, "Home", () => { Hide(); HomePressed?.Invoke(); }));
         pillRow.AddChild(ActionPill(Icons.Kind.Refresh, "Respawn", () => { Hide(); RespawnPressed?.Invoke(); }));
         pillRow.AddChild(ActionPill(Icons.Kind.Smile, "Emotes", () => { Hide(); OpenRadialMenu?.Invoke(); }));
-        pillRow.AddChild(ActionPill(Icons.Kind.Users, "Social", () => { Hide(); OpenSocial?.Invoke(); }));
+        _socialPill = ActionPill(Icons.Kind.Users, "Social", () => { Hide(); OpenSocial?.Invoke(); });
+        pillRow.AddChild(_socialPill);
+        ApplyNotificationCount();
 
         vbox.AddChild(new HSeparator());
 
@@ -243,6 +247,26 @@ public partial class QuickMenu : CanvasLayer
     }
 
     // ── Data fed from Main ──────────────────────────────────────────────────────────────
+
+    /// Unread notification count shown on the Social pill.
+    ///
+    /// The count lives on the pill rather than in a corner badge because the pause menu is the
+    /// only surface that reliably gets looked at — an indicator the player has to go find is an
+    /// indicator that does not work.
+    public void SetNotificationCount(int unread)
+    {
+        _notificationCount = Math.Max(0, unread);
+        ApplyNotificationCount();
+    }
+
+    private void ApplyNotificationCount()
+    {
+        if (_socialPill == null) return;
+        _socialPill.Text = _notificationCount > 0 ? $"Social ({_notificationCount})" : "Social";
+        // Tint the whole pill when something is waiting; the label alone is easy to skim past.
+        _socialPill.AddThemeColorOverride("font_color",
+            _notificationCount > 0 ? Brand.Accent : Brand.TextMid);
+    }
 
     /// Set the world name + whether we're in a joinable world (controls the Invite and
     /// Report-world controls).

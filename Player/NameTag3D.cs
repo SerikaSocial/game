@@ -20,12 +20,25 @@ public partial class NameTag3D : Node3D
 	private bool _wantPfp = true;
 	private bool _hasPfp;
 	private bool _focused;
+	private bool _speaking;
+	private bool _muted;
 	private string _currentName = "";
 
 	private static readonly Color DefaultBorderColor = new(0.72f, 0.28f, 0.16f, 0.85f);
 	private static readonly Color FocusedBorderColor = new(1.0f, 0.38f, 0.14f, 1.0f);
 	private static readonly Color DefaultTextColor = new(0.68f, 0.74f, 0.82f, 0.80f);
 	private static readonly Color FocusedTextColor = new(1.0f, 1.0f, 1.0f, 1.0f);
+	private static readonly Color SpeakingBorderColor = new(0.35f, 0.92f, 0.55f, 1.0f);
+	private static readonly Color MutedBorderColor = new(0.45f, 0.45f, 0.50f, 0.70f);
+	private static readonly Color MutedTextColor = new(0.55f, 0.55f, 0.62f, 0.75f);
+
+	private void SetBorderWidth(int w)
+	{
+		_panelStyle.BorderWidthLeft = w;
+		_panelStyle.BorderWidthTop = w;
+		_panelStyle.BorderWidthRight = w;
+		_panelStyle.BorderWidthBottom = w;
+	}
 
 	public override void _Ready()
 	{
@@ -147,9 +160,44 @@ public partial class NameTag3D : Node3D
 		ApplyFocusStyle();
 	}
 
+	/// Voice state. `speaking` lights the card green while their audio is arriving; `muted` marks
+	/// someone this player has locally muted, so a silent avatar reads as "I muted them" rather
+	/// than "their mic is broken" — the two are indistinguishable otherwise and get reported as
+	/// voice bugs.
+	public void SetVoiceState(bool speaking, bool muted)
+	{
+		if (_speaking == speaking && _muted == muted) return;
+		_speaking = speaking;
+		_muted = muted;
+		ApplyFocusStyle();
+	}
+
 	private void ApplyFocusStyle()
 	{
 		if (_panelStyle == null || _nameLabel == null) return;
+
+		// Voice state outranks focus: who is talking right now is more useful than who you
+		// happen to be looking at, and they are frequently the same person anyway.
+		if (_muted)
+		{
+			_panelStyle.BorderColor = MutedBorderColor;
+			SetBorderWidth(2);
+			_panelStyle.BgColor = new Color(0.07f, 0.09f, 0.12f, 0.90f);
+			_nameLabel.AddThemeColorOverride("font_color", MutedTextColor);
+			_nameLabel.Text = $"🔇 {_currentName}";
+			return;
+		}
+
+		_nameLabel.Text = _currentName;
+
+		if (_speaking)
+		{
+			_panelStyle.BorderColor = SpeakingBorderColor;
+			SetBorderWidth(4);
+			_panelStyle.BgColor = new Color(0.06f, 0.14f, 0.10f, 0.94f);
+			_nameLabel.AddThemeColorOverride("font_color", FocusedTextColor);
+			return;
+		}
 
 		if (_focused)
 		{

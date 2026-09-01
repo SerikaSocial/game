@@ -133,6 +133,9 @@ public partial class RemoteAvatar : Node3D
     /// Toggle name-tag / profile-picture visibility from settings.
     public void SetTagPrefs(bool tags, bool pfp) => _nameTag?.SetPrefs(tags, pfp);
 
+    /// Light this peer's nameplate while their voice is arriving, or grey it when locally muted.
+    public void SetSpeaking(bool speaking, bool muted) => _nameTag?.SetVoiceState(speaking, muted);
+
     public void ApplyPose(PoseFrame f)
     {
         var (pos, rot) = AvatarPose.ToTransform(f);

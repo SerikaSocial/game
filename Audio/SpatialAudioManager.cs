@@ -17,11 +17,13 @@ public partial class SpatialAudioManager : Node
     public override void _Ready()
     {
         Instance = this;
+        AudioBuses.Ensure();
 
         _uiPlayer = new AudioStreamPlayer
         {
             Name = "UIPlayer",
             VolumeDb = -6f,
+            Bus = AudioBuses.Ui,
         };
         AddChild(_uiPlayer);
     }
@@ -47,6 +49,7 @@ public partial class SpatialAudioManager : Node
             AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance,
             UnitSize = 8f,
             Autoplay = true,
+            Bus = AudioBuses.Sfx,
         };
         AddChild(player);
         player.Finished += () => player.QueueFree();
@@ -71,6 +74,7 @@ public partial class SpatialAudioManager : Node
             AttenuationModel = AudioStreamPlayer3D.AttenuationModelEnum.InverseDistance,
             UnitSize = 6f,
             Autoplay = true,
+            Bus = AudioBuses.World,
         };
         AddChild(player);
         _ambientPlayers[name] = player;

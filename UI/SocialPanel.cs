@@ -31,7 +31,23 @@ public partial class SocialPanel : CanvasLayer
     private VBoxContainer _listBody;
     private bool _loading;
 
-    private enum SocialPanelTab { Friends, Requests, Blocked, Add }
+    private enum SocialPanelTab { Notifications, Friends, Requests, Blocked, Add }
+
+    /// Inbox state. Owned here but fed from two directions — a REST fetch on open, and live
+    /// gateway pushes via `PushNotification` — so the list is correct whether or not the socket
+    /// was up when something happened.
+    private List<SerikaNotification> _notifications = new();
+    private int _unread;
+
+    /// Raised when the user acts on an invite. Main joins the world; the panel has no business
+    /// knowing how joining works.
+    public event Action<SerikaNotification> InviteAccepted;
+
+    /// Raised whenever the unread count changes, so the quick-menu badge can follow it.
+    public event Action<int> UnreadChanged;
+
+    /// Current unread count, for a freshly-built badge.
+    public int Unread => _unread;
 
     public SocialPanel()
     {
@@ -75,6 +91,7 @@ public partial class SocialPanel : CanvasLayer
 
         header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
 
+        AddTab(header, SocialPanelTab.Notifications, "Notifications");
         AddTab(header, SocialPanelTab.Friends, "Friends");
         AddTab(header, SocialPanelTab.Requests, "Requests");
         AddTab(header, SocialPanelTab.Blocked, "Blocked");
@@ -147,7 +164,11 @@ public partial class SocialPanel : CanvasLayer
     public void Open()
     {
         _scrim.Visible = _card.Visible = Visible = true;
+        // Land on whatever the user opened this for: unread notifications if there are any,
+        // otherwise the friends list.
+        _tab = _unread > 0 ? SocialPanelTab.Notifications : SocialPanelTab.Friends;
         _ = ReloadAsync();
+        _ = LoadNotificationsAsync();
     }
 
     public new void Hide()
@@ -166,6 +187,202 @@ public partial class SocialPanel : CanvasLayer
         _tab = tab;
         Render();
         if (tab == SocialPanelTab.Friends) _ = ReloadAsync();
+        if (tab == SocialPanelTab.Notifications) _ = LoadNotificationsAsync();
+    }
+
+    // ── Notifications ─────────────────────────────────────────────────────────────────
+
+    /// Fetch the inbox. Called when the tab opens and after a reconnect, because pushes that
+    /// happened while the socket was down were never delivered anywhere but the database.
+    public async System.Threading.Tasks.Task LoadNotificationsAsync()
+    {
+        if (_api == null) return;
+        try
+        {
+            var (items, unread) = await _api.GetNotificationsAsync();
+            _notifications = new List<SerikaNotification>(items);
+            SetUnread(unread);
+            if (_tab == SocialPanelTab.Notifications) Render();
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"notifications load failed: {e.Message}");
+        }
+    }
+
+    /// A notification arrived over the gateway. Merge it in without a round trip.
+    public void PushNotification(SerikaNotification n, int unread)
+    {
+        if (n == null) return;
+        // The REST fetch and the push can race on the same row; keep one copy.
+        _notifications.RemoveAll(x => x.Id == n.Id);
+        _notifications.Insert(0, n);
+        SetUnread(unread);
+        if (IsOpen && _tab == SocialPanelTab.Notifications) Render();
+        else RefreshTabLabels();
+    }
+
+    private void SetUnread(int unread)
+    {
+        if (_unread == unread) { RefreshTabLabels(); return; }
+        _unread = unread;
+        RefreshTabLabels();
+        UnreadChanged?.Invoke(_unread);
+    }
+
+    /// The tab itself carries the count — a badge somewhere else is easy to miss when the panel
+    /// is already open.
+    private void RefreshTabLabels()
+    {
+        if (_tabButtons.TryGetValue(SocialPanelTab.Notifications.ToString(), out var btn))
+            btn.Text = _unread > 0 ? $"Notifications ({_unread})" : "Notifications";
+    }
+
+    private void RenderNotifications()
+    {
+        if (_notifications.Count == 0)
+        {
+            AddHint("Nothing here yet. Friend requests and world invites will show up");
+            AddHint("on this tab, and stay here if you were offline when they arrived.");
+            return;
+        }
+
+        if (_unread > 0)
+        {
+            var clear = Brand.Ghost_(new Button { Text = "Mark all read", CustomMinimumSize = new Vector2(140, 32) });
+            clear.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+            clear.Pressed += () => _ = MarkAllReadAsync();
+            _listBody.AddChild(clear);
+        }
+
+        foreach (var n in _notifications)
+            AddNotificationRow(n);
+    }
+
+    private void AddNotificationRow(SerikaNotification n)
+    {
+        var row = new PanelContainer();
+        // Unread rows get the accent border; read ones recede. Without that the list is a wall
+        // of identical cards and "what's new" has to be remembered rather than seen.
+        row.AddThemeStyleboxOverride("panel", n.Read
+            ? Brand.Panel(Brand.Bg2, 10, 1, Brand.BorderSoft)
+            : Brand.Panel(Brand.Bg2, 10, 1, Brand.Accent));
+        _listBody.AddChild(row);
+
+        var hbox = new HBoxContainer();
+        hbox.AddThemeConstantOverride("separation", 10);
+        row.AddChild(hbox);
+
+        var names = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        names.AddThemeConstantOverride("separation", 2);
+        hbox.AddChild(names);
+
+        var title = new Label { Text = n.Title, AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        title.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
+        title.AddThemeColorOverride("font_color", n.Read ? Brand.TextMid : Brand.TextHi);
+        names.AddChild(title);
+
+        string sub = n.Body;
+        string age = Ago(n.CreatedAt);
+        if (!string.IsNullOrEmpty(age)) sub = string.IsNullOrEmpty(sub) ? age : $"{sub} · {age}";
+        if (n.Kind == "invite" && n.IsExpired) sub += " · expired";
+
+        var subLabel = new Label { Text = sub, AutowrapMode = TextServer.AutowrapMode.WordSmart };
+        subLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+        subLabel.AddThemeColorOverride("font_color", Brand.TextDim);
+        names.AddChild(subLabel);
+
+        // An expired invite keeps its row as history but loses its button — the instance it
+        // points at has very likely emptied, and a Join that fails is worse than no Join.
+        if (n.Kind == "invite" && !n.IsExpired && !string.IsNullOrEmpty(n.WorldId))
+        {
+            var join = Brand.Primary_(new Button { Text = "Join", CustomMinimumSize = new Vector2(88, 36) });
+            join.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
+            join.Pressed += () =>
+            {
+                _ = MarkReadAsync(n);
+                Hide();
+                InviteAccepted?.Invoke(n);
+            };
+            hbox.AddChild(join);
+        }
+        else if (n.Kind == "friend_request" && !string.IsNullOrEmpty(n.ActorId))
+        {
+            var accept = Brand.Primary_(new Button { Text = "Accept", CustomMinimumSize = new Vector2(88, 36) });
+            accept.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
+            accept.Pressed += () => _ = AcceptFromNotificationAsync(n);
+            hbox.AddChild(accept);
+        }
+
+        if (!n.Read)
+        {
+            var read = Brand.Ghost_(new Button { Text = "Mark read", CustomMinimumSize = new Vector2(96, 36) });
+            read.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
+            read.Pressed += () => _ = MarkReadAsync(n);
+            hbox.AddChild(read);
+        }
+
+        var dismiss = Brand.Ghost_(new Button { Text = "×", CustomMinimumSize = new Vector2(36, 36) });
+        dismiss.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
+        dismiss.Pressed += () => _ = DismissAsync(n);
+        hbox.AddChild(dismiss);
+    }
+
+    private async System.Threading.Tasks.Task MarkReadAsync(SerikaNotification n)
+    {
+        if (_api == null || n.Read) return;
+        n.Read = true;             // optimistic: the row should dim on click, not on round trip
+        SetUnread(Math.Max(0, _unread - 1));
+        if (_tab == SocialPanelTab.Notifications) Render();
+        try { SetUnread(await _api.MarkNotificationReadAsync(n.Id)); }
+        catch (Exception e) { GD.PrintErr($"mark read failed: {e.Message}"); }
+    }
+
+    private async System.Threading.Tasks.Task MarkAllReadAsync()
+    {
+        if (_api == null) return;
+        foreach (var n in _notifications) n.Read = true;
+        SetUnread(0);
+        Render();
+        try { await _api.MarkAllNotificationsReadAsync(); }
+        catch (Exception e) { GD.PrintErr($"mark all read failed: {e.Message}"); }
+    }
+
+    private async System.Threading.Tasks.Task DismissAsync(SerikaNotification n)
+    {
+        if (_api == null) return;
+        _notifications.RemoveAll(x => x.Id == n.Id);
+        if (!n.Read) SetUnread(Math.Max(0, _unread - 1));
+        Render();
+        try { await _api.DeleteNotificationAsync(n.Id); }
+        catch (Exception e) { GD.PrintErr($"dismiss failed: {e.Message}"); }
+    }
+
+    /// Accept a friend request straight from its notification, so the common case never needs
+    /// the Requests tab.
+    private async System.Threading.Tasks.Task AcceptFromNotificationAsync(SerikaNotification n)
+    {
+        if (_api == null || string.IsNullOrEmpty(n.ActorId)) return;
+        try
+        {
+            await _api.AcceptFriendRequestAsync(n.ActorId);
+            await MarkReadAsync(n);
+            _status.Text = $"Accepted {n.ActorName ?? "friend request"}.";
+            await ReloadAsync();
+        }
+        catch (Exception e) { ShowError(e); }
+    }
+
+    /// Compact relative age. Absolute timestamps in a notification list are noise.
+    private static string Ago(DateTimeOffset when)
+    {
+        if (when == default) return "";
+        var d = DateTimeOffset.UtcNow - when;
+        if (d.TotalSeconds < 60) return "just now";
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes}m ago";
+        if (d.TotalHours < 24) return $"{(int)d.TotalHours}h ago";
+        if (d.TotalDays < 7) return $"{(int)d.TotalDays}d ago";
+        return when.LocalDateTime.ToString("d MMM");
     }
 
     private async System.Threading.Tasks.Task ReloadAsync()
@@ -199,8 +416,11 @@ public partial class SocialPanel : CanvasLayer
         _searchRow.Visible = _tab == SocialPanelTab.Add;
         foreach (var c in _listBody.GetChildren()) c.QueueFree();
 
+        RefreshTabLabels();
+
         switch (_tab)
         {
+            case SocialPanelTab.Notifications: RenderNotifications(); break;
             case SocialPanelTab.Friends: RenderFriends(); break;
             case SocialPanelTab.Requests: RenderRequests(); break;
             case SocialPanelTab.Blocked: RenderBlocked(); break;

@@ -148,6 +148,27 @@ public partial class PlayerCard : CanvasLayer
         }
         else
         {
+            // Invite goes first: it is the time-sensitive action, and the one this card exists
+            // for when you are standing next to someone. Only offered when we are actually in an
+            // instance — there is nothing to invite anyone to from Home.
+            if (!string.IsNullOrEmpty(CurrentInstanceId?.Invoke()))
+                AddAction($"Invite to {CurrentWorldName?.Invoke() ?? "this world"}",
+                    () => _ = InviteAsync(), Icons.Kind.PersonAdd, Brand.Accent);
+
+            // Local voice mute. Purely client-side and instant — this is the control someone
+            // reaches for mid-conversation, so it must not need a round trip or a moderator.
+            bool? muted = IsVoiceMuted?.Invoke(_user.Id);
+            if (muted.HasValue)
+            {
+                AddAction(muted.Value ? "Unmute voice" : "Mute voice",
+                    () =>
+                    {
+                        SetVoiceMuted?.Invoke(_user.Id, !muted.Value);
+                        _ = LoadStateAsync();
+                    },
+                    Icons.Kind.Speaker, muted.Value ? Brand.Accent : null);
+            }
+
             if (isFriend)
                 AddAction("Friends ✓ — remove", () => _ = RemoveFriendAsync(), Icons.Kind.Person, null);
             else if (incoming)
@@ -163,6 +184,45 @@ public partial class PlayerCard : CanvasLayer
             AddAction("Block", () => _ = BlockAsync(), Icons.Kind.Ban, Brand.Warning);
         }
         AddAction("Report player", () => RequestReport(), Icons.Kind.Flag, Brand.Danger);
+    }
+
+    /// Supplied by Main: the instance we're in, and its world's name. Callbacks rather than
+    /// stored values because the card outlives any single world — it is built once at boot and
+    /// re-opened per player, so a value captured at construction would be permanently stale.
+    public Func<string> CurrentInstanceId;
+    public Func<string> CurrentWorldName;
+
+    /// Local voice mute, keyed by account id. Returns null when the player is not in our
+    /// instance — there is no audio stream to mute, so the action is not offered.
+    public Func<string, bool?> IsVoiceMuted;
+    public Action<string, bool> SetVoiceMuted;
+
+    private async System.Threading.Tasks.Task InviteAsync()
+    {
+        string instanceId = CurrentInstanceId?.Invoke();
+        if (_api == null || string.IsNullOrEmpty(instanceId)) return;
+
+        _status.Text = "Sending invite…";
+        try
+        {
+            await _api.InviteToInstanceAsync(_user.Id, instanceId);
+            _status.Text = $"Invited {_user.Name}.";
+        }
+        catch (Exception e)
+        {
+            // Surface the server's actual reason — "rate_limited" and "not_permitted" are
+            // different problems and a generic failure message hides which one happened.
+            string reason = e.Message switch
+            {
+                "rate_limited" => "you're sending invites too quickly",
+                "not_permitted" => "you can only invite friends or people in your instance",
+                "blocked" => "you can't invite this player",
+                "instance_not_found" => "this instance has closed",
+                _ => e.Message,
+            };
+            _status.Text = $"Couldn't invite: {reason}";
+            GD.PrintErr($"invite failed: {e.Message}");
+        }
     }
 
     private void RequestReport()
