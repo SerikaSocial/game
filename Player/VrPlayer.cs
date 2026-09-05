@@ -530,7 +530,7 @@ void fragment() {
     /// auto-calibrate, so equipping a 1.2 m chibi shrinks the world and a 2 m giant expands it.
     private void ApplyHeightOffset()
     {
-        if (_origin == null) return;
+        if (_origin == null || _occupying != null) return;
 
         float manualOffset = UI.DeviceProfile.Settings.VrHeightOffset;
         float avatarEyeHeight = _avatar != null ? _avatar.Height * 0.93f : DefaultPlayerEyeHeight;
@@ -907,6 +907,7 @@ void fragment() {
         // through the floor before the first tracked frame arrives. Clamp to a long-but-sane
         // frame; nothing here needs to simulate a real 30-second step.
         float dt = Mathf.Min((float)delta, 0.1f);
+        if (UpdateSeat(dt)) return;
 
         // Deliberately OUTSIDE TryAutoCalibrate, and ahead of it. The calibrator bails early when
         // `XRServer` has no "head" tracker, which is the right guard for *measuring a height* —
@@ -1816,7 +1817,7 @@ void fragment() {
     {
         if (_avatar == null) return;
 
-        UpdateBodyYaw(dt, speed);
+        if (_occupying == null) UpdateBodyYaw(dt, speed);
         var bodyFwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
 
         // **The avatar stands on the BODY, not under the headset.**
@@ -1836,12 +1837,12 @@ void fragment() {
         _avatarMount.GlobalBasis = Basis.LookingAt(bodyFwd, Vector3.Up);
 
         // Procedural locomotion first, then IK overrides the head, spine, legs and arms on top.
-        _avatar.Animate(dt, speed, IsOnFloor(), crouching: _crouchFraction > 0.35f,
+        _avatar.Animate(dt, speed, _occupying != null || IsOnFloor(), crouching: _crouchFraction > 0.35f,
                         sprinting: speed > (WalkSpeed + SprintSpeed) * 0.5f);
 
         // An emote owns the whole body; letting the hand IK write over it afterwards would
         // reduce a wave or a dance to a twitch.
-        if (_avatar.CurrentEmote != AvatarInstance.Emote.None) return;
+        if (_occupying == null && _avatar.CurrentEmote != AvatarInstance.Emote.None) return;
 
         // Use predicted head transform for IK — the camera pose is one frame stale by the time
         // the avatar renders, so extrapolating the head position/rotation closes the gap.
@@ -1888,8 +1889,9 @@ void fragment() {
         // While a nod or shake is running the gesture owns the head bone; re-solving it from the
         // headset every frame would overwrite the gesture before anyone could see it.
         _ik?.Solve(headTransform, leftTarget, rightTarget, dt,
-                   hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
-                   playerArmReach: PlayerArmReach, planarSpeed: speed, grounded: IsOnFloor());
+                   _occupying?.AnchorPosition ?? hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
+                   playerArmReach: PlayerArmReach, planarSpeed: speed, grounded: IsOnFloor(),
+                   seated: _occupying != null);
 
         // Fingers go on last, for the same reason `HeadAim` does: whatever writes a bone last
         // wins, and the arm IK above rewrites the hand bone these hang off.
@@ -2299,12 +2301,15 @@ void fragment() {
     public Transform3D PoseTransform()
     {
         var fwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
-        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), _avatarMount.GlobalPosition);
+        var origin = _occupying == null ? _avatarMount.GlobalPosition
+            : SeatPose.NetworkOrigin(_avatar, _avatarMount.GlobalPosition);
+        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), origin);
     }
 
     /// Zero all momentum — used by respawn, matching `LocalPlayer.ResetMotion`.
     public void ResetMotion()
     {
+        ReleaseSeat(returnToApproach: false);
         Velocity = Vector3.Zero;
         for (int i = 0; i < 2; i++)
         {

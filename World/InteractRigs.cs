@@ -27,7 +27,7 @@ public interface IInteractRig
     /// thing, whereas a 2 m eye-range is what makes desktop interaction feel responsive.
     float RangeScale { get; }
 
-    /// Non-null while seated/lying. Only the desktop rig can currently occupy anything.
+    /// Non-null while seated/lying; both hands share the VR rig's chair occupancy.
     IOccupiable Occupying { get; }
     void StandUp();
 
@@ -113,8 +113,8 @@ public sealed class VrHandInteractRig : IInteractRig
     /// length that would let you sit on a chair across the room by waving at it.
     public float RangeScale => 0.5f;
 
-    public IOccupiable Occupying => null;
-    public void StandUp() { }
+    public IOccupiable Occupying => _player.Occupying;
+    public void StandUp() => _player.StandUp();
     public bool Valid => GodotObject.IsInstanceValid(_player) && GodotObject.IsInstanceValid(_hand);
     public InteractSource Source => _source;
 

@@ -113,6 +113,8 @@ public static class WorldLoader
         Vector3? manifestSpawn = null;
         string modelFile = "world.glb";
         string lighting = "outdoor";
+        string collision = "geometry";
+        string shading = "default";
         if (zip.FileExists("manifest.json"))
         {
             try
@@ -124,6 +126,10 @@ public static class WorldLoader
                     modelFile = mf.GetString() ?? "world.glb";
                 if (rootEl.TryGetProperty("lighting", out var lt) && lt.ValueKind == JsonValueKind.String)
                     lighting = lt.GetString() ?? "outdoor";
+                if (rootEl.TryGetProperty("collision", out var co) && co.ValueKind == JsonValueKind.String)
+                    collision = co.GetString() ?? "geometry";
+                if (rootEl.TryGetProperty("shading", out var sh) && sh.ValueKind == JsonValueKind.String)
+                    shading = sh.GetString() ?? "default";
                 if (rootEl.TryGetProperty("spawn", out var sp) && sp.ValueKind == JsonValueKind.Array && sp.GetArrayLength() >= 3)
                     manifestSpawn = new Vector3((float)sp[0].GetDouble(), (float)sp[1].GetDouble(), (float)sp[2].GetDouble());
             }
@@ -144,7 +150,7 @@ public static class WorldLoader
         zip.Close();
 
         var node = LoadGltfFromBuffer(glb, Path.GetDirectoryName(path) ?? "");
-        return Attach(node, worldId, root, manifestSpawn, lighting);
+        return Attach(node, worldId, root, manifestSpawn, lighting, collision, shading);
     }
 
     private static Node3D LoadGltfFromFile(string path)
@@ -172,7 +178,8 @@ public static class WorldLoader
     }
 
     /// Parent the instantiated world under root, generate collision, and resolve the spawn.
-    private static Vector3? Attach(Node instance, string worldId, Node3D root, Vector3? manifestSpawn, string lighting = "outdoor")
+    private static Vector3? Attach(Node instance, string worldId, Node3D root, Vector3? manifestSpawn, string lighting = "outdoor",
+                                   string collision = "geometry", string shading = "default")
     {
         if (instance == null)
         {
@@ -183,24 +190,36 @@ public static class WorldLoader
         instance.Name = $"World[{worldId}]";
         root.AddChild(instance);
 
-        // GLB/GLTF worlds ship no collision — generate concave collision from every mesh so
-        // the player walks on the geometry instead of falling through. Runs BEFORE marker
-        // resolution so runtime components (which manage their own collision) are untouched.
-        GenerateCollision(instance);
+        // Existing worlds generate collision from their visual geometry. Authored worlds
+        // opt in to simple COL_* proxies so leaves, water, tiles and joints cannot snag the
+        // player. Run before marker resolution; live components own their own collision.
+        if (collision == "authored")
+        {
+            if (GenerateAuthoredCollision(instance) == 0)
+            {
+                GD.PrintErr($"WorldLoader: {worldId} requests authored collision but has no COL_* mesh proxies");
+                root.RemoveChild(instance);
+                instance.QueueFree();
+                return null;
+            }
+        }
+        else
+            GenerateCollision(instance);
 
         // glTF-imported lights arrive at ~54× the authored wattage (candela/lux conversion),
         // giving energies in the thousands that blow enclosed rooms to solid white. Rescale
         // the set to a sane range, preserving the author's relative intensities.
         NormalizeWorldLights(instance);
 
-        // Cel-shade the world's imported PBR materials so a downloaded GLB world matches the
-        // stylised look of the avatars and the procedural worlds. Before marker resolution, so it
-        // only touches the authored geometry and not the runtime mirror/video/seat nodes that
-        // ResolveMarkers spawns (those manage their own materials). No outline on worlds.
-        SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
+        // An explicit PBR world preserves its exported material response even if the global
+        // world-toon toggle is enabled. Other worlds retain the current client policy. Run
+        // before markers so live mirrors, video screens and seats keep their own materials.
+        if (shading != "pbr")
+            SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
 
         // Swap authoring markers for the live nodes they stand for (mirrors, seats, video).
         var spawnMarker = ResolveMarkers(instance, out int videoScreens);
+        StartAmbientAnimations(instance);
 
         // A theatre with a screen in it gets house lights: the room drops when a clip starts and
         // the picture becomes the only thing lighting it. Gated on the `dark` mode, so a video
@@ -464,6 +483,7 @@ public static class WorldLoader
     private const string MarkerSeat   = "SERIKA_SEAT";
     private const string MarkerVideo  = "SERIKA_VIDEO";
     private const string MarkerProp   = "SERIKA_PROP";
+    private const string MarkerPortal = "SERIKA_PORTAL_";
 
     /// First network id handed to a marker-spawned prop.
     ///
@@ -480,7 +500,7 @@ public static class WorldLoader
     private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens)
     {
         Vector3? spawn = null;
-        int mirrors = 0, seats = 0, videos = 0, props = 0;
+        int mirrors = 0, seats = 0, videos = 0, props = 0, portals = 0;
 
         // Snapshot first: we mutate the tree while walking it.
         var markers = new System.Collections.Generic.List<Node3D>();
@@ -495,7 +515,26 @@ public static class WorldLoader
             var scale = xform.Basis.Scale;
             var parent = m.GetParent();
 
-            if (name.StartsWith(MarkerMirror, StringComparison.Ordinal))
+            if (name.StartsWith(MarkerPortal, StringComparison.Ordinal))
+            {
+                if (!TryParsePortalMarker(name, out var targetId, out var label))
+                {
+                    GD.PrintErr($"WorldLoader: ignored invalid portal marker '{name}'");
+                    continue;
+                }
+                // Unlike the legacy mirror marker, portal dimensions use Godot X/Y/Z (width,
+                // height, depth). Blender empties therefore use scale (width, depth, height).
+                // Bake ancestor scale into dimensions once; physics never inherits a scaled body.
+                var portal = Portal.Create(label, new Color(.23f, .48f, .52f), Vector3.Zero, 0,
+                    PortalMode.DirectWorld, targetId, width: xform.Basis.X.Length(),
+                    height: xform.Basis.Y.Length(), depth: xform.Basis.Z.Length());
+                portal.TopLevel = true;
+                parent.AddChild(portal);
+                portal.GlobalPosition = pos;
+                portal.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
+                portals++;
+            }
+            else if (name.StartsWith(MarkerMirror, StringComparison.Ordinal))
             {
                 float w = Mathf.Max(0.2f, scale.X);
                 float h = Mathf.Max(0.2f, scale.Z);
@@ -577,9 +616,9 @@ public static class WorldLoader
             m.QueueFree();
         }
 
-        if (mirrors + seats + videos + props > 0)
+        if (mirrors + seats + videos + props + portals > 0)
             GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), " +
-                     $"{videos} video screen(s), {props} prop(s)");
+                     $"{videos} video screen(s), {props} prop(s), {portals} portal(s)");
 
         videoScreens = videos;
         return spawn;
@@ -590,12 +629,50 @@ public static class WorldLoader
         if (node is Node3D n3d)
         {
             string name = node.Name.ToString();
-            if (name.StartsWith("SERIKA_", StringComparison.Ordinal) ||
+            if (name.StartsWith(MarkerMirror, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerSeat, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerVideo, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerProp, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerPortal, StringComparison.Ordinal) ||
                 name.Equals("SPAWN", StringComparison.OrdinalIgnoreCase))
                 into.Add(n3d);
         }
         foreach (Node child in node.GetChildren())
             Collect(child, into);
+    }
+
+    /// Portal targets are data, never URLs or executable script. A UUID in the node name
+    /// survives both Blender and Godot GLB import without depending on optional extras support.
+    internal static bool TryParsePortalMarker(string name, out string worldId, out string label)
+    {
+        worldId = label = "";
+        if (!name.StartsWith(MarkerPortal, StringComparison.Ordinal)) return false;
+        var fields = name.Substring(MarkerPortal.Length).Split(new[] { "__" }, 2, StringSplitOptions.None);
+        if (!Guid.TryParseExact(fields[0], "D", out var id) || id == Guid.Empty) return false;
+        worldId = id.ToString("D");
+        label = fields.Length > 1 ? fields[1].Replace('_', ' ').Trim() : "Enter world";
+        if (label.Length == 0) label = "Enter world";
+        if (label.Length > 64) label = label.Substring(0, 64);
+        return true;
+    }
+
+    /// The aquarium's shared Blender NLA track is an explicit ambient-animation opt-in.
+    /// Leave RESET and unrelated authored clips stopped; animated scenery stays script-free.
+    private static void StartAmbientAnimations(Node node)
+    {
+        if (node is AnimationPlayer player)
+            foreach (var name in player.GetAnimationList())
+                if (name.Equals("AquariumSwim", StringComparison.OrdinalIgnoreCase) ||
+                    name.EndsWith("/AquariumSwim", StringComparison.OrdinalIgnoreCase))
+                {
+                    var clip = player.GetAnimation(name);
+                    clip.LoopMode = Animation.LoopModeEnum.Linear;
+                    player.Play(name);
+                    player.Advance(0);
+                    GD.Print($"WorldLoader: looping ambient animation '{name}' ({clip.Length:0.00}s)");
+                    break;
+                }
+        foreach (Node child in node.GetChildren()) StartAmbientAnimations(child);
     }
 
     /// Recursively add trimesh (concave) static collision to every MeshInstance3D.
@@ -606,6 +683,47 @@ public static class WorldLoader
 
         foreach (Node child in node.GetChildren())
             GenerateCollision(child);
+    }
+
+    /// Build collision only from COL_* meshes in a manifest-opted-in static world.
+    /// Bake full world transforms into the faces: concave physics shapes cannot reliably
+    /// inherit negative or nonuniform scale. TopLevel keeps the generated body's transform
+    /// at identity even when the imported GLB has transformed ancestors. A reflected basis
+    /// also reverses winding, so swap each triangle back to retain its outward collision face.
+    private static int GenerateAuthoredCollision(Node instance)
+    {
+        var proxies = new System.Collections.Generic.List<MeshInstance3D>();
+        CollectCollisionProxies(instance, proxies);
+        int generated = 0;
+        foreach (var proxy in proxies)
+        {
+            var faces = proxy.Mesh.GetFaces();
+            if (faces.Length == 0) continue;
+            var transform = proxy.GlobalTransform;
+            for (int i = 0; i < faces.Length; i++) faces[i] = transform * faces[i];
+            if (transform.Basis.Determinant() < 0)
+                for (int i = 0; i + 2 < faces.Length; i += 3)
+                    (faces[i + 1], faces[i + 2]) = (faces[i + 2], faces[i + 1]);
+
+            var shape = new ConcavePolygonShape3D();
+            shape.SetFaces(faces);
+            var body = new StaticBody3D { Name = $"AuthoredCollision_{generated}", TopLevel = true };
+            instance.AddChild(body);
+            body.GlobalTransform = Transform3D.Identity;
+            body.AddChild(new CollisionShape3D { Shape = shape });
+            proxy.Visible = false;
+            generated++;
+        }
+        GD.Print($"WorldLoader: authored collision — {generated} hidden proxy mesh(es)");
+        return generated;
+    }
+
+    private static void CollectCollisionProxies(Node node, System.Collections.Generic.List<MeshInstance3D> into)
+    {
+        if (node is MeshInstance3D mi && mi.Mesh != null &&
+            mi.Name.ToString().StartsWith("COL_", StringComparison.Ordinal))
+            into.Add(mi);
+        foreach (Node child in node.GetChildren()) CollectCollisionProxies(child, into);
     }
 
     /// Configure the world environment for a lighting mode. GLB worlds ship no
@@ -685,6 +803,12 @@ public static class WorldLoader
                 skyHorizon = new Color(0.12f, 0.10f, 0.12f);
                 ambient = new Color(0.42f, 0.38f, 0.40f);
                 ambientEnergy = 0.5f;
+                break;
+            case "daylit": // Neutral daylight for atria and skylit natural interiors.
+                skyTop = new Color(.20f, .36f, .52f);
+                skyHorizon = new Color(.65f, .72f, .77f);
+                ambient = new Color(.75f, .82f, .90f);
+                ambientEnergy = .45f;
                 break;
             case "studio": // Bright, even, low-contrast.
                 skyTop = new Color(0.18f, 0.16f, 0.22f);

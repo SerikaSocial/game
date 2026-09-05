@@ -17,10 +17,8 @@ public enum InteractSource
 /// Everything an `IInteractable` is told about the act of interacting with it.
 ///
 /// `Interact` used to take a `LocalPlayer` outright, which is why VR could never drive the
-/// interaction pipeline: `VrPlayer` is a different type, and the desktop rig's `Occupy`/`StandUp`/
-/// `EyePosition` members do not exist on it. Widening `IPlayer` instead would have forced `VrPlayer`
-/// to grow seating semantics before anyone decided what sitting means in room-scale VR, so the
-/// player stays weakly typed here and callers that genuinely need the desktop rig ask for it.
+/// interaction pipeline: `VrPlayer` is a different type. SeatNode now dispatches chair occupancy
+/// to either rig; the optional Desktop reference remains for desktop-specific interactions.
 public readonly struct InteractionContext
 {
     public readonly InteractSource Source;
@@ -28,7 +26,7 @@ public readonly struct InteractionContext
     /// Always set. Enough for anything that just needs to know *who*.
     public readonly IPlayer Player;
 
-    /// The desktop rig, or null in VR. Only seating currently needs this.
+    /// The desktop rig, or null when a tracked VR hand is interacting.
     public readonly LocalPlayer Desktop;
 
     /// Where the interaction came from — the eye on desktop/touch, the hand in VR.

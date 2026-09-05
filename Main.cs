@@ -659,6 +659,7 @@ public partial class Main : Node3D
         _worldRoot = new Node3D { Name = "WorldRoot" };
         AddChild(_worldRoot);
         build(_worldRoot);
+        Portal.BindWorld(_worldRoot, OnPortalEntered);
         // A freshly built world's lights and environment come up at full quality no matter what
         // tier the device is on, so the profile has to be re-stamped onto every new world root.
         UI.DeviceProfile.ApplyToScene(_worldRoot);
@@ -720,11 +721,10 @@ public partial class Main : Node3D
         _videoQueuePanel?.Bind(_videoManager);
     }
 
-    /// Build the cosy Home and wire its portal to open the world browser.
+    /// Build the selected published Home, or the offline house when it is unavailable.
     private void BuildHomeWorld()
     {
-        SwapWorld(root => _homeInfo = Worlds.BuildHome(root));
-        _homeInfo.CommonsPortal.Entered += OnPortalEntered;
+        SwapWorld(root => _homeInfo = BuildSelectedHome(root));
     }
 
     private void OnPortalEntered(Portal portal)
@@ -734,7 +734,7 @@ public partial class Main : Node3D
         {
             case PortalMode.DirectWorld:
                 if (!string.IsNullOrEmpty(portal.TargetWorldId))
-                    _ = ShowWorldDetailFor(portal.TargetWorldId);
+                    _ = JoinWorldById(portal.TargetWorldId);
                 break;
             case PortalMode.CuratedList:
                 OpenWorldList(portal.AllowedWorldIds);
@@ -1719,9 +1719,8 @@ public partial class Main : Node3D
         }
     }
 
-    /// The personal Home: a single-player space with no relay connection. Instant, always
-    /// available, and where the player lands after login.
-    private void EnterHome()
+    /// Enter the prepared personal Home, a single-player space with no relay connection.
+    private void EnterPreparedHome()
     {
         // The whole body is guarded because this runs from a `CallDeferred`, which has no caller
         // to catch anything: an exception here escaped into Godot's message loop and skipped
@@ -1766,15 +1765,15 @@ public partial class Main : Node3D
             }
         }
 
-        _worldName = "Home";
+        _worldName = _homeName;
         HideLoading();
 
         // Home is a fully playable single-player space — no forced modal. Walk around freely;
         // step into the portal (or open the pause menu → Worlds) to travel.
         _hud?.HideAll();
-        _inWorldHud?.SetWorld("Home");
+        _inWorldHud?.SetWorld(_homeName);
         _inWorldHud?.SetPlayerCount(1);
-        RpcPresence.UpdateState("Home", 1);
+        RpcPresence.UpdateState(_homeName, 1);
         UI.InputMode.ReleaseAll();
         UI.InputMode.SetPlayable(true);
         _inWorldHud?.Toast("Welcome home · walk into the portal to travel · T to chat · Esc for menu", 6);

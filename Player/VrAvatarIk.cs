@@ -333,7 +333,8 @@ public sealed class VrAvatarIk
         bool solveHead = true,
         float playerArmReach = 0f,
         float planarSpeed = 0f,
-        bool grounded = true
+        bool grounded = true,
+        bool seated = false
     )
     {
         if (!_valid) return;
@@ -345,18 +346,18 @@ public sealed class VrAvatarIk
         var rightHandLocal = toSkel * rightHandWorld;
 
         // ── 1-3. Torso: hips, spine, head ────────────────────────────────────────────
-        bool solvedBody = SolveTorso(headLocal, hipWorld, toSkel, solveHead);
+        bool solvedBody = SolveTorso(headLocal, hipWorld, toSkel, solveHead, pinHips: seated);
 
         // ── 4. Legs ──────────────────────────────────────────────────────────────────
         // Explicit foot trackers win outright. Otherwise the feet are planted in the world and
         // stepped, which is the only way an avatar can stand still while its owner leans, or
         // crouch without its shins telescoping through the floor.
-        if (leftFootWorld.HasValue && _leftLeg.Ok)
+        if (!seated && leftFootWorld.HasValue && _leftLeg.Ok)
             SolveLeg(_leftLeg, toSkel * leftFootWorld.Value, null);
-        if (rightFootWorld.HasValue && _rightLeg.Ok)
+        if (!seated && rightFootWorld.HasValue && _rightLeg.Ok)
             SolveLeg(_rightLeg, toSkel * rightFootWorld.Value, null);
 
-        if (solvedBody && HasLegs && !leftFootWorld.HasValue && !rightFootWorld.HasValue
+        if (!seated && solvedBody && HasLegs && !leftFootWorld.HasValue && !rightFootWorld.HasValue
             && UI.DeviceProfile.Settings.VrFootIk)
             SolvePlantedFeet(dt, planarSpeed, grounded, toSkel);
 
@@ -376,7 +377,7 @@ public sealed class VrAvatarIk
     /// relative to where it would be if the player were standing up straight. Drop the head 40 cm
     /// and the only human interpretation is a crouch, so the hips drop with it and the knees
     /// absorb it. Lean the head forward and the hips trail, because that is what a spine does.
-    private bool SolveTorso(Transform3D headSkel, Vector3? hipWorld, Transform3D toSkel, bool solveHead)
+    private bool SolveTorso(Transform3D headSkel, Vector3? hipWorld, Transform3D toSkel, bool solveHead, bool pinHips = false)
     {
         if (_hips < 0 || _head < 0) return false;
 
@@ -437,7 +438,10 @@ public sealed class VrAvatarIk
 
         foreach (var (bone, rest, share) in _spineChain)
         {
-            var partialBend = Quaternion.Identity.Slerp(bend, share);
+            // These are GLOBAL rotations. A pinned pelvis cannot absorb the residual
+            // left by partial global bends, so seated vertebrae align to the whole torso
+            // lean. Bone lengths stay fixed and the neck does not stretch to reach the HMD.
+            var partialBend = pinHips ? bend : Quaternion.Identity.Slerp(bend, share);
             var partialTwist = new Quaternion(spineDir, twist * share);
             SetGlobalRotation(bone, partialTwist * partialBend * rest);
         }
@@ -447,7 +451,7 @@ public sealed class VrAvatarIk
         // to the hips closes it exactly, in one pass, with no iteration.
         var landed = _skel.GetBoneGlobalPose(_head).Origin;
         var residual = headTarget - landed;
-        if (residual.LengthSquared() > 1e-8f)
+        if (!pinHips && residual.LengthSquared() > 1e-8f)
         {
             // Only ever a correction, never a teleport: an avatar whose legs cannot reach should
             // stretch its spine a little, not detach its pelvis and float away.

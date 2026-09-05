@@ -71,6 +71,17 @@ public sealed class ApiClient
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
 
+    /// Public Home registry. A short lookup timeout keeps an API outage from delaying startup;
+    /// HTTP failures are distinct from an explicit empty selection for the cached fallback.
+    public async Task<JsonElement> GetDefaultHomeAsync()
+    {
+        using var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var response = await _http.GetAsync($"{_baseUrl}/v1/worlds/default-home", timeout.Token);
+        response.EnsureSuccessStatusCode();
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+        return json.RootElement.Clone();
+    }
+
     /// Fetch full world detail including instances and review stats.
     public async Task<JsonElement> GetWorldDetailAsync(string worldId) =>
         await GetAsync($"/v1/worlds/{worldId}");

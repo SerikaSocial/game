@@ -371,7 +371,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     /// still bound to it left the anchor pinning us straight back into it every frame.
     public void ResetMotion()
     {
-        StandUp();
+        ReleaseSeat(returnToApproach: false);
         Velocity = Vector3.Zero;
         PlayEmote(AvatarInstance.Emote.None);
         // Secondary physics runs in world space, so a respawn across the map reads to the solver
@@ -382,6 +382,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     // ── Sitting / lying ──────────────────────────────────────────────────────────────
 
     private World.IOccupiable _occupying;
+    private Vector3 _seatApproachPosition;
 
     /// The seat or bed we're currently bound to, or null when standing.
     public World.IOccupiable Occupying => _occupying;
@@ -397,6 +398,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         if (spot == null) return;
         if (_occupying != null && !ReferenceEquals(_occupying, spot)) StandUp();
 
+        if (_occupying == null) _seatApproachPosition = GlobalPosition;
         _occupying = spot;
         Velocity = Vector3.Zero;
 
@@ -425,22 +427,21 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     }
 
     /// Release the current seat/bed. Safe to call when already standing.
-    public void StandUp()
+    public void StandUp() => ReleaseSeat(returnToApproach: true);
+
+    private void ReleaseSeat(bool returnToApproach)
     {
         if (_occupying == null) return;
         var spot = _occupying;
         _occupying = null;
-        spot.Vacate();
+        if (spot is not GodotObject obj || GodotObject.IsInstanceValid(obj)) spot.Vacate();
         _avatar?.PlayEmote(AvatarInstance.Emote.None);
 
         _currentCameraY = _standEyeY;
 
-        // Step clear of the anchor, otherwise we're still inside the seat's trigger volume and
-        // the prompt immediately offers to sit back down. The anchor is at hip height, so
-        // subtract the avatar's hip height to land the feet on the ground.
-        var forward = new Vector3(Mathf.Sin(spot.AnchorYaw), 0, Mathf.Cos(spot.AnchorYaw));
-        float hipH = (_avatar?.HipHeight ?? 0.9f) * 0.5f;
-        GlobalPosition = spot.AnchorPosition + forward * 0.7f - new Vector3(0, hipH, 0);
+        // Return to the reachable point from which the seat was used. An arbitrary step
+        // behind its anchor can land inside a sofa back, wall or the neighbouring seat.
+        if (returnToApproach) GlobalPosition = _seatApproachPosition;
         Velocity = Vector3.Zero;
     }
 
@@ -527,6 +528,9 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         }
         _pendingLook = Vector2.Zero;
 
+        if (_occupying is Node seat && (!GodotObject.IsInstanceValid(seat) || seat.IsQueuedForDeletion()))
+            ReleaseSeat(returnToApproach: false);
+
         // Seated/lying: the anchor owns our position, so movement, gravity and locomotion all
         // stop. Look is still live — you can glance around from a chair. The pose is held by
         // the emote the seat asked for. Pressing WASD, Space/Jump or moving steps out of the seat.
@@ -550,6 +554,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
                 GlobalPosition = _occupying.AnchorPosition;
                 UpdateLookAim();
                 _avatar?.Animate(delta, 0f, true, false, false);
+                GlobalPosition += SeatPose.PinHips(_avatar, _occupying.AnchorPosition);
                 SolveCamera(delta);
                 UpdateFirstPersonCamera();
                 UpdateCameraOffset(delta, moving: false, sprinting: false);
@@ -698,7 +703,8 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public Transform3D PoseTransform()
     {
         var basis = new Basis(_yaw.Basis.GetRotationQuaternion());
-        return new Transform3D(basis, GlobalPosition);
+        var origin = _occupying == null ? GlobalPosition : SeatPose.NetworkOrigin(_avatar, GlobalPosition);
+        return new Transform3D(basis, origin);
     }
 
     private const float MaxStepHeight = 0.55f;
