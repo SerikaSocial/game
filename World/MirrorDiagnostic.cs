@@ -15,8 +15,8 @@ namespace SerikaSocial.World;
 /// zoom/scale, or near-plane leaks; missing means the reflection isn't rendered at all.
 ///
 /// Alongside the pixel checks it probes the live internals numerically each pose: the
-/// reflection camera must sit at the exact mirrored eye point, and the SubViewport aspect must
-/// track the main aspect (the SCREEN_UV mapping depends on both).
+/// reflection camera must sit at the exact mirrored eye point, map the physical glass corners
+/// to its texture corners, and exclude backing geometry across the whole glass.
 ///
 ///   Godot --path game -- --serika-mirrortest [--ska path.ska] [--out /tmp/mirror]
 ///
@@ -76,6 +76,32 @@ public static partial class MirrorDiagnostic
         // defect tallies over the whole sweep
         public readonly Dictionary<string, (int good, int bad)> PerMarker = new();
         public readonly List<string> Defects = new();
+    }
+
+    // Independent geometric contract: project the actual glass corners through the live
+    // camera, and probe both sides of its clipping plane. This does not assume a particular
+    // FOV or frustum-offset formula, so it detects both mapping errors and backing-wall leaks.
+    internal static IEnumerable<string> WindowDefects(Mirror mirror, Camera3D camera, SubViewport viewport)
+    {
+        var surface = Grab<MeshInstance3D>(mirror, "_surface");
+        var size = ((QuadMesh)surface.Mesh).Size;
+        var normal = surface.GlobalBasis.Z.Normalized();
+        if ((-camera.GlobalBasis.Z).Dot(normal) < .9999f)
+            yield return "reflection near plane is not parallel to the glass";
+        for (int i = 0; i < 5; i++)
+        {
+            float x = i == 4 ? 0 : (i & 1) == 0 ? -.5f : .5f;
+            float y = i == 4 ? 0 : (i & 2) == 0 ? -.5f : .5f;
+            Vector3 point = surface.GlobalTransform * new Vector3(size.X * x, size.Y * y, 0);
+            Vector2 uv = camera.UnprojectPosition(point) / (Vector2)viewport.Size;
+            if (uv.DistanceTo(new Vector2(.5f - x, .5f - y)) > .002f)
+                yield return $"glass sample {i}: reflected UV {uv} does not match its corner";
+            var interior = surface.GlobalPosition.Lerp(point, .8f);
+            if (camera.IsPositionInFrustum(interior - normal * .05f))
+                yield return $"glass sample {i}: backing wall leaks through near plane";
+            if (!camera.IsPositionInFrustum(interior + normal * .03f))
+                yield return $"glass sample {i}: valid room geometry clipped away";
+        }
     }
 
     public static void Run(Node host, string skaPath, string outPrefix)
@@ -469,7 +495,8 @@ public static partial class MirrorDiagnostic
             // Hold a natural idle. Left un-animated the rigs sit in their bind T-pose, which is
             // both an unrealistic thing to photograph a mirror with and nearly two metres wide —
             // arms spread across the reflection and ate the marker checks behind them.
-            foreach (var av in _st.Avatars) av.Animate(delta, 0f, true);
+            // Screenshot encoding stalls must not feed multi-second deltas into avatar IK.
+            foreach (var av in _st.Avatars) av.Animate(1.0 / 60.0, 0f, true);
             if (_st.Frames < WarmupFrames) return;
 
             if (_st.PoseIndex >= _st.Poses.Count)
@@ -568,10 +595,7 @@ public static partial class MirrorDiagnostic
                 if (eyeErr > 0.002f)
                     problems.Add($"{pl.Label}: reflection-cam off mirrored-eye by {eyeErr * 1000:0.0} mm");
 
-                float wantAspect = vpRect.X / vpRect.Y;
-                float gotAspect = vp.Size.X / (float)Math.Max(1, vp.Size.Y);
-                if (MathF.Abs(gotAspect - wantAspect) / wantAspect > 0.02f)
-                    problems.Add($"{pl.Label}: subviewport aspect {gotAspect:0.000} vs main {wantAspect:0.000}");
+                problems.AddRange(WindowDefects(pl.Node, mirCam, vp));
             }
 
             // ── Optical probes: does the glass show the physically correct image? ─────
@@ -585,7 +609,7 @@ public static partial class MirrorDiagnostic
                 // host wall blocks are legitimately absent from the glass.
                 var nrm = pl.Normal;
                 var ePrime = Reflect(eye, pl);
-                var gaze = ReflectDir(-_st.Cam.GlobalBasis.Z.Normalized(), pl); // mirrored forward
+                var gaze = nrm; // the clipping plane is parallel to the physical glass
                 float nearPlane = Mathf.Abs(nrm.Dot(pl.PointOnPlane - ePrime)) + 0.01f;
 
                 // Projected screen polygon of the quad (conservative bounding box).

@@ -2,48 +2,13 @@ using Godot;
 
 namespace SerikaSocial.World;
 
-/// A planar-reflection mirror using the frustum-camera technique from Mirror3D
-/// (https://github.com/Joy-less/Mirror3D, MIT). A SubViewport renders the shared world
-/// from a camera that is the reflection of the active camera across the mirror plane.
-///
-/// The optical contract, derived end-to-end (see World/MirrorDiagnostic.cs which verifies it
-/// with rendered probes): the reflection camera must be the reflected VIEWER EYE with the
-/// viewer's local X negated (which converts the improper reflection transform into a proper
-/// camera whose image is exactly the true reflection mirrored horizontally), and its
-/// projection must equal the viewer's projection — same FOV, same aspect, ZERO offset. The
-/// shader's `1 - SCREEN_UV.x` sample un-mirrors the image at display time. Sampling that
-/// ties texture pixels to screen pixels only holds under that exact combination: adding an
-/// asymmetric "frustum offset" toward the quad centre tilts the reflection axis and breaks
-/// every viewpoint that isn't dead-centre, which was the long-standing wrong-image bug.
-///
-/// This produces a true mirror reflection — you see yourself and the room behind you,
-/// with correct perspective that shifts as you move.
-///
-/// ── Stereo (VR) ──────────────────────────────────────────────────────────────────────
-/// In XR the main viewport is rendered TWICE per frame, once per eye, with two different
-/// projections — and HMD optics make those projections ASYMMETRIC (nonzero frustum offset is
-/// the norm, not an error). `GetViewport().GetCamera3D()` hands back the single `XRCamera3D`,
-/// which sits at the midpoint between the eyes, so one reflection rendered from "the camera"
-/// with a symmetric frustum is wrong for *both* eyes: stereo fusion breaks and the reflection
-/// swims. Screen-space sampling is not the problem — the single view is.
-///
-/// So a mirror renders one reflection PER VIEW: two SubViewports, two reflection cameras, each
-/// one the reflection of that eye's own pose carrying that eye's own projection, and the shader
-/// picks between the two textures on `VIEW_INDEX`. Mono is just the one-view case of the same
-/// code (`VIEW_INDEX` is 0 outside multiview, so desktop samples the same texture it always did).
-///
-/// Reproducing an eye's projection needs two things the mono case never exercised:
-///
-///  * **Frustum offset.** `Camera3D.SetFrustum(height, offset, near, far)` builds the rect
-///    `[-w/2+off.x, +w/2+off.x] × [-h/2+off.y, +h/2+off.y]` at the near plane, with
-///    `w = height × the SubViewport's aspect`. The eye's rect is recovered from its projection
-///    matrix (`DecodeFrustum` below) and the SubViewport is then SIZED to that rect's aspect, so
-///    the one axis `SetFrustum` will not let us state independently is stated by pixel count.
-///  * **The offset's X must be NEGATED.** The reflection camera is the reflected eye with local
-///    X flipped, and the shader un-flips with `1 - SCREEN_UV.x`. Writing the display coordinate
-///    of a scene point through both flips and asking it to equal the true reflection's gives
-///    `[l', r'] = [-r, -l]` — same width, mirrored centre. For a symmetric rect the centre is 0
-///    and the negation is invisible, which is exactly why mono never noticed.
+/// Planar reflection using an off-axis window through the physical glass. Each reflected eye
+/// looks through that same window with its own asymmetric frustum. The camera's near plane is
+/// parallel to and just past the glass, so a backing wall cannot intrude at oblique viewpoints.
+/// The quad samples local UVs (horizontally reversed), preserving the eye → glass → scene light
+/// path independently of viewer orientation, FOV, roll or asymmetric headset projection.
+/// Stereo uses two eye positions and two textures selected by VIEW_INDEX; the existing range
+/// and per-device scene-render budget apply to both eyes.
 [GlobalClass]
 public partial class Mirror : Node3D
 {
@@ -90,12 +55,9 @@ public partial class Mirror : Node3D
         // Offscreen render target — renders the SAME world (OwnWorld3D=false) so the mirror
         // camera sees the real scene: the player, the room, everything.
         //
-        // Its SIZE tracks the main viewport's pixels, not the mirror's physical metres. The
-        // shader samples this texture by SCREEN_UV, which makes it a screen-space image: one
-        // texel must land on one screen pixel or the reflection is a blur. Sizing from metres
-        // (the old `_size.Y * 300`) rendered a 2.2 m mirror at 660 px and upscaled it ~1.6× on a
-        // 1080p display — visibly softer than everything around it, and it got *worse* the
-        // smaller the mirror.
+        // Keep the existing device-scaled pixel budget. RenderView fits a target with the
+        // physical glass's aspect inside it, so smaller/narrower mirrors do not allocate an
+        // entire screen-shaped image that will mostly be discarded.
         (_viewport, _mirrorCam) = BuildView("L");
 
         // The glass quad, textured with the viewport via the mirror shader.
@@ -306,10 +268,7 @@ public partial class Mirror : Node3D
 
         if (xr == null)
         {
-            // Mono. The viewer's own projection matrix IS the contract — decoding it recovers
-            // exactly the symmetric rect the old `2·near·tan(fov/2)` formula produced, and the
-            // main viewport's aspect, and a zero offset.
-            RenderView(_viewport, _mirrorCam, viewer.GlobalTransform, viewer.GetCameraProjection(),
+            RenderView(_viewport, _mirrorCam, viewer.GlobalTransform,
                        viewer.Far, mirrorNormal, planePos, WantedSize());
             // The right eye's target must not keep ticking after a headset is taken off.
             if (_viewportR != null) _viewportR.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
@@ -317,7 +276,7 @@ public partial class Mirror : Node3D
         }
 
         // Stereo. Build the right-eye pair on first use, then render one reflection per view
-        // from that eye's OWN pose and OWN (asymmetric) projection.
+        // from that eye's own position and off-axis window projection.
         if (_viewportR == null)
         {
             (_viewportR, _mirrorCamR) = BuildView("R");
@@ -353,8 +312,7 @@ public partial class Mirror : Node3D
     }
 
     /// Per-eye render target size: the headset's own per-view render target, scaled by the tier.
-    /// This is the stereo equivalent of `WantedSize` — in XR the "screen" the shader's SCREEN_UV
-    /// runs across is the eye's render target, not the desktop window.
+    /// The headset target determines the pixel budget; the desktop window is irrelevant in XR.
     private static Vector2I XrViewSize(XRInterface xr)
     {
         var rt = xr.GetRenderTargetSize();
@@ -368,56 +326,41 @@ public partial class Mirror : Node3D
                            Transform3D originXf, float far, Vector3 mirrorNormal, Vector3 planePos,
                            Vector2I baseSize)
     {
-        // `GetProjectionForView`'s aspect argument is ignored by OpenXR — the rect comes from the
-        // runtime's own FOV tangents — and the matrix's shape coefficients are independent of the
-        // near plane anyway, so any near/far here yields the same decoded rect ratio and offsets.
+        // Per-eye position determines the off-axis view through the same physical glass.
+        // Head orientation and lens projection are applied when the headset draws that quad.
         RenderView(vp, cam, xr.GetTransformForView(view, originXf),
-                   xr.GetProjectionForView(view, 1.0, 0.05, far), far, mirrorNormal, planePos, baseSize);
+                   far, mirrorNormal, planePos, baseSize);
     }
 
-    /// Point one reflection view at one viewer eye.
-    ///
-    /// `baseSize` only sets the pixel BUDGET: the render target is re-proportioned to the eye's
-    /// own frustum aspect, because `SetFrustum` takes a height and derives the width from the
-    /// viewport's aspect — pixel count is the only place the horizontal extent can be stated.
-    private void RenderView(SubViewport vp, Camera3D cam, Transform3D eye, Projection proj,
+    /// Frame the physical glass from one reflected eye with a parallel clipping plane.
+    private void RenderView(SubViewport vp, Camera3D cam, Transform3D eye,
                             float far, Vector3 mirrorNormal, Vector3 planePos, Vector2I baseSize)
     {
-        // Reflection camera = reflection matrix applied to the viewer eye…
-        cam.GlobalTransform = GetMirrorTransform(mirrorNormal, planePos) * eye;
+        // Treat the glass as a window seen from the reflected eye. Keeping the camera axes
+        // parallel to that window makes the ENTIRE host wall fall behind the near plane.
+        // A viewer-oriented camera with a scalar near distance cannot clip an oblique wall:
+        // half the backing survives, while increasing near also erases valid room geometry.
+        var surfaceBasis = _surface.GlobalBasis;
+        Vector3 right = surfaceBasis.X.Normalized();
+        Vector3 up = surfaceBasis.Y.Normalized();
+        var basis = new Basis(-right, up, -mirrorNormal);
+        Vector3 reflectedEye = eye.Origin - 2f * mirrorNormal.Dot(eye.Origin - planePos) * mirrorNormal;
+        cam.GlobalTransform = new Transform3D(basis, reflectedEye);
+        Vector3 window = basis.Inverse() * (planePos - reflectedEye);
+        float distance = Mathf.Max(.001f, -window.Z);
+        float near = distance + .01f;
+        float scale = near / distance;
+        float width = _size.X * surfaceBasis.X.Length();
+        float height = _size.Y * surfaceBasis.Y.Length();
+        float ratio = width / height;
 
-        // …which is improper (left-handed), so negate the local X axis to restore a proper
-        // right-handed camera. The resulting image is the true reflection mirrored once
-        // horizontally; the shader's `1 - SCREEN_UV.x` un-mirrors it at display time.
-        var b = cam.GlobalBasis;
-        b.X = -b.X;
-        cam.GlobalBasis = b;
-
-        // Near clip just BEYOND the mirror plane (a centimetre past it). The wall a mirror
-        // hangs on is usually coplanar with the glass; clipping at-or-short-of the plane lets
-        // that wall's face render into the reflection as a striped smear. A centimetre of
-        // clip depth past the glass is invisible and kills the wall dead.
-        float distToPlane = mirrorNormal.Dot(planePos - cam.GlobalPosition);
-        float near = Mathf.Max(0.01f, distToPlane + 0.01f);
-
-        // The projection must EQUAL the viewer's for the SCREEN_UV mapping to be pixel-correct —
-        // see the class doc. Moving the near plane along an unchanged frustum preserves the rays,
-        // so the image still matches the viewer's while the deep near plane clips the wall.
-        DecodeFrustum(proj, near, out float height, out Vector2 centre, out float ratio);
-
-        // Size the target to the eye's frustum aspect, spending `baseSize`'s vertical pixels.
-        int h = Mathf.Max(64, baseSize.Y);
+        // Spend at most the existing per-view pixel budget. The target's aspect follows the
+        // glass; UV sampling maps its four corners back to the four physical glass corners.
+        int h = Mathf.Max(64, Mathf.RoundToInt(Mathf.Min(baseSize.Y, baseSize.X / ratio)));
         var want = new Vector2I(Mathf.Max(64, Mathf.RoundToInt(h * ratio)), h);
-        // Mono keeps the exact main-viewport size it always had: the decoded ratio is the main
-        // aspect to within rounding, and re-deriving it would churn the target on odd sizes.
-        if (Mathf.Abs(want.X - baseSize.X) <= 1) want.X = baseSize.X;
         if (vp.Size != want) vp.Size = want;
-
-        // X of the offset is NEGATED because this camera renders X-flipped and the shader
-        // un-flips it: matching the display coordinate to the true reflection's forces the
-        // horizontal rect to [-r, -l]. Zero for any symmetric (desktop) projection.
-        cam.SetFrustum(height, new Vector2(-centre.X, centre.Y), near, far);
-
+        cam.SetFrustum(height * scale, new Vector2(window.X, window.Y) * scale,
+            near, Mathf.Max(far, near + .1f));
         vp.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
     }
 
@@ -442,15 +385,4 @@ public partial class Mirror : Node3D
         ratio = height > 1e-6f ? width / height : 1f;
     }
 
-    /// Calculates the transformation that mirrors through the plane with the given normal
-    /// and offset. This is a reflection matrix — it flips one axis across the plane.
-    private static Transform3D GetMirrorTransform(Vector3 normal, Vector3 offset)
-    {
-        float nx = normal.X, ny = normal.Y, nz = normal.Z;
-        var basisX = new Vector3(1, 0, 0) - 2f * new Vector3(nx * nx, nx * ny, nx * nz);
-        var basisY = new Vector3(0, 1, 0) - 2f * new Vector3(ny * nx, ny * ny, ny * nz);
-        var basisZ = new Vector3(0, 0, 1) - 2f * new Vector3(nz * nx, nz * ny, nz * nz);
-        Vector3 origin = 2f * normal.Dot(offset) * normal;
-        return new Transform3D(basisX, basisY, basisZ, origin);
-    }
 }

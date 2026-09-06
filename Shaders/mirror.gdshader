@@ -1,11 +1,5 @@
-// Mirror3D shader (MIT, adapted from Joy-less/Mirror3D)
-// Renders the SubViewport texture aligned to screen space for planar reflection.
-//
-// The `1.0 - SCREEN_UV.x` flip un-mirrors the reflection camera's image: that camera is the
-// reflected viewer with its local X negated (see World/Mirror.cs), which renders the true
-// reflection mirrored once horizontally. Sampling by SCREEN_UV ties one texel to one screen
-// pixel, which is only correct while the render target matches the main viewport's size and
-// the reflection camera's projection equals the viewer's — both of which Mirror.cs maintains.
+// Each eye renders an off-axis view through the physical mirror rectangle. Local quad UVs
+// map that view back onto the glass, with X reversed for the reflected camera's handedness.
 shader_type spatial;
 // Opaque: glass is not a window. ALPHA is deliberately never written — writing it at all puts
 // the quad in the TRANSPARENT queue, where it sorts against the very room it is reflecting, and
@@ -22,10 +16,10 @@ uniform sampler2D mirror_texture : source_color, filter_linear_mipmap;
 uniform sampler2D mirror_texture_r : source_color, filter_linear_mipmap;
 
 void fragment() {
-	vec2 uv = vec2(1.0 - SCREEN_UV.x, SCREEN_UV.y);
+	vec2 uv = vec2(1.0 - UV.x, UV.y);
 	// In XR the scene is rendered once per eye with two DIFFERENT, asymmetric projections, so
 	// one reflection cannot serve both: Mirror.cs renders one per view and this picks between
-	// them. VIEW_INDEX is 0 for mono, so the desktop path is byte-for-byte what it always was.
+	// them. VIEW_INDEX is 0 for mono, so desktop samples the first texture.
 	// The cast is load-bearing, and neither `VIEW_INDEX == 0` nor `VIEW_INDEX == 0u` works.
 	//
 	// Godot's shading language types `VIEW_INDEX` as a signed int, so `== 0u` fails its own parser

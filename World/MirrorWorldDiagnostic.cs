@@ -173,7 +173,7 @@ public static partial class MirrorWorldDiagnostic
         public override void _Process(double delta)
         {
             _frames++;
-            _avatar.Animate(delta, 0f, true);
+            _avatar.Animate(1.0 / 60.0, 0f, true);
             if (_frames < WarmupFrames) return;
 
             if (_shotIndex >= _shots.Length) { Finish(); return; }
