@@ -14,7 +14,10 @@ public partial class VrUiPointer : Node3D
     private const string ActTrigger = "trigger";
     private const float LaserLength = 2.0f;
 
-    private readonly XRController3D _hand;
+    private XRController3D _hand;
+    public XRController3D AlternateHand { get; set; }
+    private readonly VrPointerPress _press = new();
+    private bool _hovering;
 
     /// The panel this ray drives. Settable rather than constructor-only: the surface and the boot
     /// rig are built in the same frame, and a null captured here is silent — the laser still
@@ -87,63 +90,52 @@ public partial class VrUiPointer : Node3D
         // rig taking over, and a laser hanging in an empty room during that gap looks broken.
         // Without tracking the controller pose is stale, so the ray would point somewhere
         // arbitrary; hide the laser rather than fire blind clicks at the panel.
+        if (!_hand.GetHasTrackingData() && AlternateHand?.GetHasTrackingData() == true)
+        {
+            if (_down) Release();
+            _press.Step(false, false, 0);
+            var previous = _hand;
+            _hand = AlternateHand;
+            AlternateHand = previous;
+            _laser.Reparent(_hand, false);
+        }
         bool tracked = _hand.GetHasTrackingData() && surface.HasInteractiveUi;
         _laser.Visible = tracked;
-        if (!tracked)
-        {
-            if (_dot != null) _dot.Visible = false;
-            if (_down) Release();
-            return;
-        }
-
         var origin = _hand.GlobalPosition;
         var aim = -_hand.GlobalTransform.Basis.Z;
-
         Vector2 screen = Vector2.Zero;
-        bool hitPanel = surface.RayHit(origin, aim, out var hit) && surface.WorldToViewport(hit, out screen);
-
+        Vector3 hit = default;
+        bool hitPanel = tracked && surface.RayHit(origin, aim, out hit) && surface.WorldToViewport(hit, out screen);
+        _dot.Visible = hitPanel;
         if (hitPanel)
         {
-            if (_dot != null)
+            _dot.GlobalPosition = hit;
+            SetLaserLength(Mathf.Clamp(origin.DistanceTo(hit), .05f, LaserLength));
+            var relative = screen - _pointerPos;
+            _pointerPos = screen;
+            surface.Viewport.PushInput(new InputEventMouseMotion
             {
-                _dot.Visible = true;
-                _dot.GlobalPosition = hit;
-            }
-
-            // Stop the beam at the panel instead of spearing through it.
-            float reach = Mathf.Clamp(origin.DistanceTo(hit), 0.05f, LaserLength);
-            SetLaserLength(reach);
-
-            if (screen != _pointerPos)
-            {
-                _pointerPos = screen;
-                surface.Viewport.PushInput(
-                    new InputEventMouseMotion { Position = screen, GlobalPosition = screen }, true);
-            }
+                Position = screen, GlobalPosition = screen, Relative = relative,
+                ButtonMask = _down ? MouseButtonMask.Left : 0,
+            }, true);
         }
         else
         {
-            if (_dot != null) _dot.Visible = false;
             SetLaserLength(LaserLength);
+            if (_hovering) surface.Viewport.PushInput(new InputEventMouseMotion
+                { Position = new Vector2(-100, -100), GlobalPosition = new Vector2(-100, -100) }, true);
         }
-
-        // Schmitt trigger: a single threshold makes an analogue trigger held near 0.6 chatter
-        // press/release for several frames, which reads as a dead or double-firing button.
-        bool pressed = _down ? _hand.GetFloat(ActTrigger) > 0.4f : _hand.GetFloat(ActTrigger) > 0.7f;
-        // A press only counts on the panel; a release always fires, so dragging off the panel
-        // can never latch the button down forever.
-        if (pressed != _down && (hitPanel || !pressed))
+        _hovering = hitPanel;
+        var change = _press.Step(tracked, hitPanel, _hand.GetFloat(ActTrigger));
+        if (change == VrPointerPress.Change.None) return;
+        bool pressed = change == VrPointerPress.Change.Press;
+        var at = change == VrPointerPress.Change.Cancel ? new Vector2(-100, -100) : screen;
+        _down = pressed;
+        surface.Viewport.PushInput(new InputEventMouseButton
         {
-            _down = pressed;
-            surface.Viewport.PushInput(new InputEventMouseButton
-            {
-                Position = hitPanel ? screen : _pointerPos,
-                GlobalPosition = hitPanel ? screen : _pointerPos,
-                ButtonIndex = MouseButton.Left,
-                ButtonMask = pressed ? MouseButtonMask.Left : 0,
-                Pressed = pressed,
-            }, true);
-        }
+            Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left,
+            ButtonMask = pressed ? MouseButtonMask.Left : 0, Pressed = pressed,
+        }, true);
     }
 
     /// Rescale the beam so it ends at `length` metres in front of the controller. The BoxMesh is
@@ -161,8 +153,8 @@ public partial class VrUiPointer : Node3D
         if (_dot != null) _dot.Visible = false;
         Surface?.Viewport.PushInput(new InputEventMouseButton
         {
-            Position = _pointerPos,
-            GlobalPosition = _pointerPos,
+            Position = new Vector2(-100, -100),
+            GlobalPosition = new Vector2(-100, -100),
             ButtonIndex = MouseButton.Left,
             Pressed = false,
         }, true);

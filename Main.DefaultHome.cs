@@ -10,30 +10,33 @@ public partial class Main
 {
     private DefaultHomeResolver.Resolved _defaultHome;
     private Task _enterHomeTask;
+    private int _preparedHomeVersion;
     private string _homeName = "Home";
 
     // Both startup and the Home menu use the same registry. Re-entering refreshes an admin
     // selection; concurrent Home clicks share the request and cannot build duplicate worlds.
     private void EnterHome()
     {
-        if (_enterHomeTask == null || _enterHomeTask.IsCompleted)
-            _enterHomeTask = ResolveAndEnterHomeAsync();
+        if (_travel.TryBegin(WorldTravelOperation.Destination.Home, out int version))
+            _enterHomeTask = ResolveAndEnterHomeAsync(version);
     }
 
-    private async Task ResolveAndEnterHomeAsync()
+    private async Task ResolveAndEnterHomeAsync(int version)
     {
         ShowLoading("Loading Home…");
         try
         {
             _defaultHome = _api == null ? null : await DefaultHomeResolver.ResolveAsync(
                 _api.BaseUrl, ProjectSettings.GlobalizePath("user://worlds"),
-                _api.GetDefaultHomeAsync, world => _api.DownloadWorldAsync(world.DownloadUrl, world.Id));
+                FetchPersonalHomeSelection, world => _api.DownloadWorldAsync(world.DownloadUrl, world.Id), _localUserId);
         }
         catch (Exception e)
         {
             GD.PrintErr($"Home registry unavailable: {e.Message}");
             _defaultHome = null;
         }
+        if (!_travel.IsCurrent(version, WorldTravelOperation.Destination.Home)) return;
+        _preparedHomeVersion = version;
         CallDeferred(nameof(EnterPreparedHome));
     }
 

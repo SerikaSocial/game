@@ -14,9 +14,9 @@ public static class DefaultHomeResolver
     private sealed record Cached(string ApiBaseUrl, World World);
 
     public static async Task<Resolved> ResolveAsync(string apiBaseUrl, string cacheDirectory,
-        Func<Task<JsonElement>> fetch, Func<World, Task<string>> download)
+        Func<Task<JsonElement>> fetch, Func<World, Task<string>> download, string accountId = null)
     {
-        string registryPath = System.IO.Path.Combine(cacheDirectory, "default-home.json");
+        string registryPath = RegistryPath(cacheDirectory, accountId);
         Resolved cached = ReadCache(registryPath, apiBaseUrl, cacheDirectory);
         try
         {
@@ -49,6 +49,16 @@ public static class DefaultHomeResolver
             // Re-check files: an unsuccessful replacement may have removed an old bundle.
             return ReadCache(registryPath, apiBaseUrl, cacheDirectory);
         }
+    }
+
+    // Never share a saved personal selection between two accounts on the same computer.
+    private static string RegistryPath(string directory, string accountId) => System.IO.Path.Combine(directory,
+        string.IsNullOrEmpty(accountId) ? "default-home.json" : "home-" +
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(accountId))).ToLowerInvariant() + ".json");
+
+    public static void ForgetSelection(string directory, string accountId)
+    {
+        try { File.Delete(RegistryPath(directory, accountId)); } catch { }
     }
 
     private static World ParseWorld(JsonElement json)

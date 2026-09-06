@@ -1,23 +1,18 @@
 using System;
 using System.Collections.Generic;
 using Godot;
-
 using SerikaSocial.UI;
 
 namespace SerikaSocial;
 
-/// The pause hub — what Esc opens. One clean card: who you are, who else is in the instance,
-/// and a grid of the things you actually do (worlds, avatars, camera, video, settings, invite),
-/// plus quick pills (home, respawn, emotes, quit).
-///
-/// This replaced a crowded mock-up: a non-functional banner carousel, a fake trust-token
-/// badge, and a 2×3 grid where four of six tiles ("Live Now", "Worlds", "Social", "Groups") all
-/// routed to the same world list — visual noise pretending to be features. The redundant, never-
-/// opened `PauseMenu` was deleted at the same time; this is now the only pause surface.
+/// In-world controls, current location and the actual instance roster.
 public partial class QuickMenu : CanvasLayer
 {
     public event Action Closed;
     public event Action HomePressed;
+    public event Action SetHomePressed;
+    public event Action ResetHomePressed;
+    public event Action NewPrivateInstancePressed;
     public event Action RespawnPressed;
     public event Action QuitPressed;
     public event Action OpenMainMenuWorlds;
@@ -30,360 +25,314 @@ public partial class QuickMenu : CanvasLayer
     public event Action MicTogglePressed;
     public event Action OpenSocial;
     public event Action ReportWorldPressed;
-    /// A remote roster row was tapped — carries the account id + display name.
     public event Action<string, string> PlayerSelected;
-    // Emotes are reached through the radial menu (the "Emotes" pill → OpenRadialMenu), so the
-    // hub no longer carries its own emote shortcuts.
 
-    private ColorRect _scrim;
     private PanelContainer _card;
-    private Label _clockLabel;
-    private Label _usernameLabel;
-    private Label _trustChip;
-    private Label _playerCountLabel;
-    private Label _locationLabel;
+    private Label _clockLabel, _usernameLabel, _trustChip, _playerCountLabel;
+    private Label _locationLabel, _privacyLabel, _worldStatus;
     private VBoxContainer _playerList;
-    private Button _micBtn;
-    private Button _inviteCard;
-    private Button _reportWorldBtn;
-    private Button _socialPill;
+    private GridContainer _actions;
+    private Button _micBtn, _inviteCard, _reportWorldBtn, _socialPill, _resumeBtn;
+    private Button _setHomeBtn, _resetHomeBtn, _privateBtn;
+    private GridContainer _worldActions;
     private int _notificationCount;
-
+    private bool _homeResetAvailable, _worldBusy;
     private double _clockTimer;
 
     public override void _Ready()
     {
         Layer = 105;
         Visible = false;
-
-        _scrim = Brand.Scrim(0.72f);
-        AddChild(_scrim);
-
+        AddChild(Brand.Scrim(0.64f));
         var center = new CenterContainer();
         center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(center);
-
-        _card = new PanelContainer { CustomMinimumSize = Brand.Card(560, 600) };
-        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1.5f, Brand.Border));
+        _card = new PanelContainer { Name = "QuickMenuCard", Theme = Brand.Theme };
+        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1, Brand.Border));
         center.AddChild(_card);
-
-        var margin = new MarginContainer();
-        foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
-            margin.AddThemeConstantOverride(s, 18);
+        var margin = new MarginContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        foreach (var side in new[] { "left", "right", "top", "bottom" })
+            margin.AddThemeConstantOverride("margin_" + side, 20);
         _card.AddChild(margin);
+        var column = new VBoxContainer();
+        column.AddThemeConstantOverride("separation", 10);
+        margin.AddChild(column);
 
-        var vbox = new VBoxContainer();
-        vbox.AddThemeConstantOverride("separation", 12);
-        margin.AddChild(vbox);
-
-        // ── Header: identity · location · clock ─────────────────────────────────────────
-        var header = new HBoxContainer();
-        header.AddThemeConstantOverride("separation", 8);
-        vbox.AddChild(header);
-
-        var dot = new ColorRect { CustomMinimumSize = new Vector2(9, 9), Color = Brand.Success, SizeFlagsVertical = Control.SizeFlags.ShrinkCenter };
-        header.AddChild(dot);
-        _usernameLabel = new Label { Text = "Serika User" };
-        _usernameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
-        _usernameLabel.AddThemeColorOverride("font_color", Brand.TextHi);
-        header.AddChild(_usernameLabel);
-
-        // Trust chip — the player's standing, which gates publishing worlds/avatars.
-        var chipWrap = new PanelContainer { SizeFlagsVertical = Control.SizeFlags.ShrinkCenter };
-        chipWrap.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg2, 8, 1, Brand.BorderSoft));
-        _trustChip = new Label { Text = "Visitor" };
-        _trustChip.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
-        _trustChip.AddThemeColorOverride("font_color", Brand.AccentSoft);
-        chipWrap.AddChild(_trustChip);
-        header.AddChild(chipWrap);
-
-        header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
-
-        _clockLabel = new Label { Text = DateTime.Now.ToString("HH:mm") };
-        _clockLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
-        _clockLabel.AddThemeColorOverride("font_color", Brand.Accent);
+        var header = Row();
+        column.AddChild(header);
+        var identity = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        identity.AddThemeConstantOverride("separation", 2);
+        identity.AddChild(Label("QUICK MENU", 11, Brand.Accent));
+        _usernameLabel = Label("Serika User", 19, Brand.TextHi);
+        _usernameLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        identity.AddChild(_usernameLabel);
+        header.AddChild(identity);
+        _trustChip = Label("Visitor", 12, Brand.TextDim);
+        header.AddChild(_trustChip);
+        _clockLabel = Label(DateTime.Now.ToString("HH:mm"), 15, Brand.TextMid);
         header.AddChild(_clockLabel);
 
-        // Location + player count row.
-        var subHeader = new HBoxContainer();
-        subHeader.AddThemeConstantOverride("separation", 8);
-        vbox.AddChild(subHeader);
-        _locationLabel = new Label { Text = "Home", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        _locationLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-        _locationLabel.AddThemeColorOverride("font_color", Brand.TextMid);
-        subHeader.AddChild(_locationLabel);
-        subHeader.AddChild(new TextureRect
+        // Keep identity and Resume visible while long rosters or a small window scroll.
+        var scroll = new ScrollContainer
         {
-            Texture = Icons.Get(Icons.Kind.Users, 14, Brand.TextDim),
-            StretchMode = TextureRect.StretchModeEnum.KeepCentered,
-        });
-        _playerCountLabel = new Label { Text = "1" };
-        _playerCountLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-        _playerCountLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        subHeader.AddChild(_playerCountLabel);
-
-        // Report the current world — the one moderation action that belongs on the hub
-        // itself. Disabled in Home (no world to report).
-        _reportWorldBtn = Brand.Ghost_(new Button
-        {
-            CustomMinimumSize = new Vector2(30, 26),
-            TooltipText = "Report this world",
-            Icon = Icons.Get(Icons.Kind.Flag, 14, Brand.TextDim),
-        });
-        _reportWorldBtn.Pressed += () => ReportWorldPressed?.Invoke();
-        subHeader.AddChild(_reportWorldBtn);
-
-        vbox.AddChild(new HSeparator());
-
-        // ── Live player list ("more things" — who is actually in this instance) ──────────
-        var listLbl = new Label { Text = "In this instance" };
-        listLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
-        listLbl.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(listLbl);
-
-        var listScroll = new ScrollContainer
-        {
-            CustomMinimumSize = new Vector2(0, 120),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            FollowFocus = true,
         };
-        listScroll.AddThemeStyleboxOverride("panel", new StyleBoxEmpty());
-        vbox.AddChild(listScroll);
+        column.AddChild(scroll);
+        var body = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        body.AddThemeConstantOverride("separation", 10);
+        scroll.AddChild(body);
+
+        var location = new PanelContainer();
+        var locationStyle = Brand.Panel(Brand.Bg0, 12, 1, Brand.BorderSoft);
+        locationStyle.ShadowSize = 0;
+        locationStyle.ContentMarginLeft = locationStyle.ContentMarginRight = 14;
+        locationStyle.ContentMarginTop = locationStyle.ContentMarginBottom = 12;
+        location.AddThemeStyleboxOverride("panel", locationStyle);
+        body.AddChild(location);
+        var locationColumn = new VBoxContainer();
+        locationColumn.AddThemeConstantOverride("separation", 8);
+        location.AddChild(locationColumn);
+        var locationRow = Row();
+        locationColumn.AddChild(locationRow);
+        var place = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _locationLabel = Label("Home", 18, Brand.TextHi);
+        _locationLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        place.AddChild(_locationLabel);
+        _privacyLabel = Label("Personal Home · only you", 12, Brand.TextDim);
+        place.AddChild(_privacyLabel);
+        locationRow.AddChild(place);
+        _reportWorldBtn = Button(Icons.Kind.Flag, "", ReportWorldPressedNow, 44);
+        _reportWorldBtn.TooltipText = "Report this world";
+        _reportWorldBtn.SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd;
+        locationRow.AddChild(_reportWorldBtn);
+        _worldActions = new GridContainer { Columns = 2 };
+        _worldActions.AddThemeConstantOverride("h_separation", 8);
+        _worldActions.AddThemeConstantOverride("v_separation", 8);
+        locationColumn.AddChild(_worldActions);
+        _setHomeBtn = Button(Icons.Kind.Home, "Set as Home", () => SetHomePressed?.Invoke());
+        _setHomeBtn.TooltipText = "Use this world as your personal arrival Home";
+        _worldActions.AddChild(_setHomeBtn);
+        _privateBtn = Button(Icons.Kind.Users, "New private instance", () => NewPrivateInstancePressed?.Invoke());
+        _privateBtn.TooltipText = "Create an invite-only instance; only you can invite people";
+        _worldActions.AddChild(_privateBtn);
+        _resetHomeBtn = Button(Icons.Kind.Refresh, "Use default Home", () => ResetHomePressed?.Invoke());
+        _resetHomeBtn.TooltipText = "Restore the community's default arrival Home";
+        locationColumn.AddChild(_resetHomeBtn);
+        _worldStatus = Label("", 12, Brand.TextMid);
+        _worldStatus.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        _worldStatus.Visible = false;
+        locationColumn.AddChild(_worldStatus);
+
+        _actions = new GridContainer { Columns = 3, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _actions.AddThemeConstantOverride("h_separation", 8);
+        _actions.AddThemeConstantOverride("v_separation", 8);
+        body.AddChild(_actions);
+        _actions.AddChild(Tile(Icons.Kind.Globe, "Worlds", "Find your next place", () => LeaveTo(OpenMainMenuWorlds)));
+        _actions.AddChild(Tile(Icons.Kind.Shirt, "Avatars", "Change your look", () => LeaveTo(OpenMainMenuAvatars)));
+        _socialPill = Tile(Icons.Kind.Users, "Social", "Friends & notifications", () => LeaveTo(OpenSocial));
+        _actions.AddChild(_socialPill);
+        _actions.AddChild(Tile(Icons.Kind.Camera, "Camera", "Take a photo", () => LeaveTo(OpenCameraMenu)));
+        _actions.AddChild(Tile(Icons.Kind.Screen, "Video", "Watch together", () => LeaveTo(OpenVideoQueue)));
+        _actions.AddChild(Tile(Icons.Kind.Gear, "Settings", "Comfort & controls", () => LeaveTo(OpenSettings)));
+        _actions.AddChild(Tile(Icons.Kind.Home, "Go Home", "Return to your space", () => LeaveTo(HomePressed)));
+        _actions.AddChild(Tile(Icons.Kind.Refresh, "Respawn", "Back to the entrance", () => LeaveTo(RespawnPressed)));
+        _actions.AddChild(Tile(Icons.Kind.Smile, "Actions", "Emotes & gestures", () => LeaveTo(OpenRadialMenu)));
+        ApplyNotificationCount();
+
+        var peopleHeader = Row();
+        body.AddChild(peopleHeader);
+        peopleHeader.AddChild(Label("HERE WITH YOU", 11, Brand.TextDim));
+        _playerCountLabel = Label("1 person", 12, Brand.TextMid);
+        _playerCountLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        peopleHeader.AddChild(_playerCountLabel);
+        _inviteCard = Button(Icons.Kind.Link, "Copy invite", () => CopyInvitePressed?.Invoke());
+        _inviteCard.SizeFlagsHorizontal = Control.SizeFlags.ShrinkEnd;
+        _inviteCard.CustomMinimumSize = new Vector2(150, 44);
+        peopleHeader.AddChild(_inviteCard);
+        var peopleScroll = new ScrollContainer
+        {
+            CustomMinimumSize = new Vector2(0, 68),
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            FollowFocus = true,
+        };
+        body.AddChild(peopleScroll);
         _playerList = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         _playerList.AddThemeConstantOverride("separation", 4);
-        listScroll.AddChild(_playerList);
-
-        vbox.AddChild(new HSeparator());
-
-        // ── Action grid — every tile does something distinct ────────────────────────────
-        var grid = new GridContainer { Columns = 3, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        grid.AddThemeConstantOverride("h_separation", 10);
-        grid.AddThemeConstantOverride("v_separation", 10);
-        vbox.AddChild(grid);
-
-        grid.AddChild(GridCard(Icons.Kind.Globe, "Worlds", "Browse & travel", () => { Hide(); OpenMainMenuWorlds?.Invoke(); }));
-        grid.AddChild(GridCard(Icons.Kind.Shirt, "Avatars", "Change your look", () => { Hide(); OpenMainMenuAvatars?.Invoke(); }));
-        grid.AddChild(GridCard(Icons.Kind.Camera, "Camera", "Photo viewfinder", () => { Hide(); OpenCameraMenu?.Invoke(); }));
-        grid.AddChild(GridCard(Icons.Kind.Screen, "Video", "Queue & watch", () => { Hide(); OpenVideoQueue?.Invoke(); }));
-        grid.AddChild(GridCard(Icons.Kind.Gear, "Settings", "Graphics & controls", () => { Hide(); OpenSettings?.Invoke(); }));
-        _inviteCard = GridCard(Icons.Kind.Link, "Invite", "Copy world link", () => CopyInvitePressed?.Invoke());
-        grid.AddChild(_inviteCard);
-
-        // ── Quick pills ─────────────────────────────────────────────────────────────────
-        var pillRow = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        pillRow.AddThemeConstantOverride("separation", 8);
-        vbox.AddChild(pillRow);
-        pillRow.AddChild(ActionPill(Icons.Kind.Home, "Home", () => { Hide(); HomePressed?.Invoke(); }));
-        pillRow.AddChild(ActionPill(Icons.Kind.Refresh, "Respawn", () => { Hide(); RespawnPressed?.Invoke(); }));
-        pillRow.AddChild(ActionPill(Icons.Kind.Smile, "Emotes", () => { Hide(); OpenRadialMenu?.Invoke(); }));
-        _socialPill = ActionPill(Icons.Kind.Users, "Social", () => { Hide(); OpenSocial?.Invoke(); });
-        pillRow.AddChild(_socialPill);
-        ApplyNotificationCount();
-
-        vbox.AddChild(new HSeparator());
-
-        // ── Bottom bar: mic · quit · close ──────────────────────────────────────────────
-        var bottom = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        bottom.AddThemeConstantOverride("separation", 8);
-        vbox.AddChild(bottom);
-
-        _micBtn = Brand.Ghost_(new Button
-        {
-            Text = "Mic: off",
-            CustomMinimumSize = new Vector2(140, 40),
-            Icon = Icons.Get(Icons.Kind.Mic, 18, Brand.TextDim),
-        });
-        _micBtn.AddThemeConstantOverride("h_separation", 8);
-        _micBtn.Pressed += () => MicTogglePressed?.Invoke();
+        peopleScroll.AddChild(_playerList);
+        column.AddChild(new HSeparator());
+        var bottom = Row();
+        column.AddChild(bottom);
+        _micBtn = Button(Icons.Kind.Mic, "Mic muted", () => MicTogglePressed?.Invoke());
         bottom.AddChild(_micBtn);
+        var quit = Button(Icons.Kind.Power, "Quit", () => QuitPressed?.Invoke());
+        quit.AddThemeColorOverride("font_color", Brand.Danger);
+        bottom.AddChild(quit);
+        _resumeBtn = Brand.Primary_(new Button { Text = "Resume", CustomMinimumSize = new Vector2(120, 46), SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+        _resumeBtn.TooltipText = VrUiSurface.Active ? "Close the menu and return to the world" : "Return to the world · Esc";
+        _resumeBtn.Pressed += Hide;
+        bottom.AddChild(_resumeBtn);
+        GetViewport().SizeChanged += Fit;
+        Fit();
+        SetWorldActions(false, false, false, "Personal Home · only you");
+    }
 
-        bottom.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+    public override void _ExitTree() => GetViewport().SizeChanged -= Fit;
 
-        var quitBtn = Brand.Ghost_(new Button
+    private void Fit()
+    {
+        _card.CustomMinimumSize = Brand.FitCard(GetViewport(), 700, 690);
+        _actions.Columns = _card.CustomMinimumSize.X < 600 ? 2 : 3;
+        _worldActions.Columns = _card.CustomMinimumSize.X < 580 ? 1 : 2;
+    }
+
+    private static HBoxContainer Row()
+    {
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 10);
+        return row;
+    }
+
+    private static Label Label(string text, int size, Color color)
+    {
+        var label = new Label { Text = text };
+        label.AddThemeFontSizeOverride("font_size", Brand.Fs(size));
+        label.AddThemeColorOverride("font_color", color);
+        return label;
+    }
+
+    private static Button Button(Icons.Kind icon, string title, Action action, int width = 0)
+    {
+        var button = Brand.Ghost_(new Button
         {
-            Text = "Quit",
-            CustomMinimumSize = new Vector2(90, 40),
-            Icon = Icons.Get(Icons.Kind.Power, 18, Brand.Danger),
+            Text = title, CustomMinimumSize = new Vector2(width, 44),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            Icon = Icons.Get(icon, 18, Brand.Accent), ClipText = true,
         });
-        quitBtn.AddThemeConstantOverride("h_separation", 8);
-        quitBtn.AddThemeColorOverride("font_color", Brand.Danger);
-        quitBtn.Pressed += () => QuitPressed?.Invoke();
-        bottom.AddChild(quitBtn);
-
-        var resumeBtn = Brand.Primary_(new Button { Text = "Resume (Esc)", CustomMinimumSize = new Vector2(140, 40) });
-        resumeBtn.Pressed += Hide;
-        bottom.AddChild(resumeBtn);
+        button.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
+        button.AddThemeConstantOverride("h_separation", 8);
+        button.Pressed += action;
+        return button;
     }
 
-    private static Button GridCard(Icons.Kind icon, string title, string subtitle, Action onClick)
+    private static Button Tile(Icons.Kind icon, string title, string subtitle, Action action)
     {
-        var btn = new Button
-        {
-            Text = $"{title}\n{subtitle}",
-            CustomMinimumSize = new Vector2(165, 66),
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            Icon = Icons.Get(icon, 22, Brand.Accent),
-        };
-        Brand.Ghost_(btn);
-        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
-        btn.AddThemeConstantOverride("h_separation", 10);
-        btn.Pressed += onClick;
-        return btn;
+        var button = Button(icon, title, action);
+        button.CustomMinimumSize = new Vector2(150, 56);
+        button.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
+        button.TooltipText = subtitle;
+        return button;
     }
 
-    private static Button ActionPill(Icons.Kind icon, string label, Action onClick)
-    {
-        var btn = new Button
-        {
-            Text = label,
-            CustomMinimumSize = new Vector2(120, 38),
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-            Icon = Icons.Get(icon, 18, Brand.Accent),
-        };
-        Brand.Ghost_(btn);
-        btn.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-        btn.AddThemeConstantOverride("h_separation", 8);
-        btn.Pressed += onClick;
-        return btn;
-    }
+    private void LeaveTo(Action action) { Hide(); action?.Invoke(); }
+    private void ReportWorldPressedNow() => ReportWorldPressed?.Invoke();
 
-    // ── Data fed from Main ──────────────────────────────────────────────────────────────
-
-    /// Unread notification count shown on the Social pill.
-    ///
-    /// The count lives on the pill rather than in a corner badge because the pause menu is the
-    /// only surface that reliably gets looked at — an indicator the player has to go find is an
-    /// indicator that does not work.
-    public void SetNotificationCount(int unread)
-    {
-        _notificationCount = Math.Max(0, unread);
-        ApplyNotificationCount();
-    }
-
+    public void SetNotificationCount(int unread) { _notificationCount = Math.Max(0, unread); ApplyNotificationCount(); }
     private void ApplyNotificationCount()
     {
         if (_socialPill == null) return;
         _socialPill.Text = _notificationCount > 0 ? $"Social ({_notificationCount})" : "Social";
-        // Tint the whole pill when something is waiting; the label alone is easy to skim past.
-        _socialPill.AddThemeColorOverride("font_color",
-            _notificationCount > 0 ? Brand.Accent : Brand.TextMid);
+        _socialPill.AddThemeColorOverride("font_color", _notificationCount > 0 ? Brand.AccentSoft : Brand.TextMid);
     }
 
-    /// Set the world name + whether we're in a joinable world (controls the Invite and
-    /// Report-world controls).
     public void SetLocation(string worldName, bool invitable)
     {
         _locationLabel.Text = string.IsNullOrEmpty(worldName) ? "Home" : worldName;
-        if (_inviteCard != null) _inviteCard.Disabled = !invitable;
-        if (_reportWorldBtn != null) _reportWorldBtn.Disabled = !invitable;
+        _locationLabel.TooltipText = _locationLabel.Text;
+        _inviteCard.Disabled = !invitable;
+        _reportWorldBtn.Disabled = !invitable;
     }
 
-    /// Repopulate the instance roster. `you` is highlighted; remote rows are buttons that
-    /// fire `PlayerSelected` — a remote with no account id (relay edge case) renders as a
-    /// plain, non-clickable row rather than a dead button.
+    /// Privacy comes from the server's instance state, never inferred from its player count.
+    public void SetWorldActions(bool canSetHome, bool isHome, bool canCreatePrivate,
+        string privacyLabel = "Public instance", bool busy = false)
+    {
+        if (_setHomeBtn == null) return;
+        _setHomeBtn.Text = isHome ? "Your Home" : "Set as Home";
+        _setHomeBtn.Disabled = busy || !canSetHome || isHome;
+        _worldBusy = busy;
+        _resetHomeBtn.Disabled = busy || !_homeResetAvailable;
+        _resetHomeBtn.Visible = _homeResetAvailable;
+        _privateBtn.Disabled = busy || !canCreatePrivate;
+        _privacyLabel.Text = privacyLabel;
+        _inviteCard.Text = privacyLabel.StartsWith("Private", StringComparison.OrdinalIgnoreCase) ? "Invite friends" : "Copy invite";
+    }
+
+    public void SetHomeResetAvailable(bool available)
+    {
+        _homeResetAvailable = available;
+        if (_resetHomeBtn == null) return;
+        _resetHomeBtn.Visible = available;
+        _resetHomeBtn.Disabled = !available || _worldBusy;
+    }
+
+    public void SetWorldActionStatus(string message, bool error = false)
+    {
+        if (_worldStatus == null) return;
+        _worldStatus.Text = message ?? "";
+        _worldStatus.Visible = !string.IsNullOrEmpty(message);
+        _worldStatus.AddThemeColorOverride("font_color", error ? Brand.Danger : Brand.Success);
+    }
+
     public void SetPlayers(string you, IReadOnlyList<(string userId, string name)> others)
     {
-        if (_playerList == null) return;
-        foreach (var c in _playerList.GetChildren()) c.QueueFree();
-
+        foreach (var child in _playerList.GetChildren()) { _playerList.RemoveChild(child); child.QueueFree(); }
         int total = 1 + (others?.Count ?? 0);
-        _playerCountLabel.Text = $"{total}";
-
-        _playerList.AddChild(SelfRow(string.IsNullOrEmpty(you) ? "You" : $"{you}  (you)"));
+        _playerCountLabel.Text = total == 1 ? "1 person" : $"{total} people";
+        var self = Label(string.IsNullOrEmpty(you) ? "You" : $"{you}  ·  you", 13, Brand.TextHi);
+        self.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        _playerList.AddChild(self);
         if (others == null) return;
         foreach (var (userId, name) in others)
         {
-            if (string.IsNullOrEmpty(userId))
-            {
-                _playerList.AddChild(SelfRow(name));
-                continue;
-            }
-            var btn = Brand.Ghost_(new Button
-            {
-                Text = $"  {name}",
-                Alignment = HorizontalAlignment.Left,
-                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-                CustomMinimumSize = new Vector2(0, 34),
-                TooltipText = "Friend, block or report",
-                Icon = Icons.Get(Icons.Kind.Person, 14, Brand.Success),
-            });
-            btn.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-            btn.AddThemeColorOverride("font_color", Brand.TextMid);
-            string id = userId, n = name;
-            btn.Pressed += () => PlayerSelected?.Invoke(id, n);
-            _playerList.AddChild(btn);
+            if (string.IsNullOrEmpty(userId)) { _playerList.AddChild(Label(name, 13, Brand.TextMid)); continue; }
+            string id = userId, displayName = name;
+            var button = Button(Icons.Kind.Person, name, () => PlayerSelected?.Invoke(id, displayName));
+            button.Alignment = HorizontalAlignment.Left;
+            button.TooltipText = $"View {name} · friend, block or report";
+            _playerList.AddChild(button);
         }
     }
 
-    private static HBoxContainer SelfRow(string name)
-    {
-        var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 8);
-        var dot = new ColorRect
-        {
-            CustomMinimumSize = new Vector2(8, 8),
-            Color = Brand.Accent,
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
-        };
-        row.AddChild(dot);
-        var lbl = new Label { Text = name };
-        lbl.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-        lbl.AddThemeColorOverride("font_color", Brand.TextHi);
-        row.AddChild(lbl);
-        return row;
-    }
-
-    /// Show the player's trust standing (e.g. "Trusted"). Gates publishing server-side.
-    public void SetTrust(string label)
-    {
-        if (_trustChip != null) _trustChip.Text = string.IsNullOrEmpty(label) ? "Visitor" : label;
-    }
-
-    /// Reflect the real mic state (owned by Main), so the button never lies about it.
+    public void SetTrust(string label) { if (_trustChip != null) _trustChip.Text = string.IsNullOrEmpty(label) ? "Visitor" : label; }
     public void SetMic(bool active)
     {
         if (_micBtn == null) return;
-        // Live mic is signalled by tinting the icon, not by swapping in a red dot emoji —
-        // the tint carries at a glance and stays on-brand.
-        _micBtn.Text = active ? "Mic: on" : "Mic: off";
+        _micBtn.Text = active ? "Mic live" : "Mic muted";
         _micBtn.Icon = Icons.Get(Icons.Kind.Mic, 18, active ? Brand.Success : Brand.TextDim);
-        _micBtn.AddThemeColorOverride("font_color", active ? Brand.TextHi : Brand.TextMid);
+        _micBtn.AddThemeColorOverride("font_color", active ? Brand.Success : Brand.TextMid);
     }
 
     public void Open(string username)
     {
         if (!string.IsNullOrEmpty(username)) _usernameLabel.Text = username;
-        _scrim.Visible = true;
-        _card.Visible = true;
         Visible = true;
+        Fit();
+        _resumeBtn.CallDeferred(Control.MethodName.GrabFocus);
     }
 
     public new void Hide()
     {
-        _scrim.Visible = false;
-        _card.Visible = false;
+        if (!Visible) return;
+        var focus = GetViewport().GuiGetFocusOwner();
+        if (focus != null && IsAncestorOf(focus)) focus.ReleaseFocus();
         Visible = false;
         Closed?.Invoke();
     }
-
     public bool IsOpen => Visible;
-
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && IsOpen)
-        {
-            Hide();
-            GetViewport().SetInputAsHandled();
-        }
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.Escape } && IsOpen)
+        { Hide(); GetViewport().SetInputAsHandled(); }
     }
-
     public override void _Process(double delta)
     {
         if (!IsOpen) return;
         _clockTimer += delta;
-        if (_clockTimer >= 1.0)
-        {
-            _clockTimer = 0;
-            _clockLabel.Text = DateTime.Now.ToString("HH:mm");
-        }
+        if (_clockTimer < 1) return;
+        _clockTimer = 0;
+        _clockLabel.Text = DateTime.Now.ToString("HH:mm");
     }
 }

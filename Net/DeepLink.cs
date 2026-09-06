@@ -13,12 +13,13 @@ namespace SerikaSocial;
 ///
 /// Link grammar:
 ///   serikasocial://world/<worldId>     join a world (creates/joins an instance)
+///   serikasocial://instance/<uuid>      join an exact public/invited instance
 ///   serikasocial://home                go to the personal Home
 public static class DeepLink
 {
     public const string Scheme = "serikasocial";
 
-    public enum Kind { None, Home, World }
+    public enum Kind { None, Home, World, Instance }
 
     public readonly struct Intent
     {
@@ -47,6 +48,8 @@ public static class DeepLink
     {
         try
         {
+            if (string.IsNullOrEmpty(url) || !url.StartsWith(Scheme + "://", StringComparison.OrdinalIgnoreCase))
+                return Intent.None;
             var rest = url.Substring((Scheme + "://").Length).TrimEnd('/');
             if (rest.Length == 0) return Intent.None;
             var slash = rest.IndexOf('/');
@@ -54,8 +57,9 @@ public static class DeepLink
             string tail = slash < 0 ? "" : rest.Substring(slash + 1);
             return host.ToLowerInvariant() switch
             {
-                "home" => new Intent(Kind.Home, ""),
+                "home" => tail.Length == 0 ? new Intent(Kind.Home, "") : Intent.None,
                 "world" => IsUuidish(tail) ? new Intent(Kind.World, tail) : Intent.None,
+                "instance" => Guid.TryParseExact(tail, "D", out _) ? new Intent(Kind.Instance, tail) : Intent.None,
                 _ => Intent.None,
             };
         }

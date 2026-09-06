@@ -303,6 +303,7 @@ public partial class Main : Node3D
         Discord.DiscordRichPresence.Init();
 
         _hud = new Hud { Name = "Hud" };
+        _hud.ImageLoader = url => _api.GetImageBytesAsync(url);
         AddUi(_hud);
         _hud.LoginPressed += () => _ = LoginThenRoute();
         _hud.EmailLoginPressed += (email, pass) => _ = LoginWithEmailRoute(email, pass);
@@ -311,6 +312,12 @@ public partial class Main : Node3D
         _hud.JoinCommonsPressed += () => OpenWorldList();
         _hud.JoinWorldPressed += (worldId) => _ = ShowWorldDetailFor(worldId);
         _hud.JoinWorldFromDetailPressed += (worldId) => _ = JoinWorldById(worldId);
+        _hud.SetHomePressed += id => _ = SavePersonalHome(id);
+        _hud.ResetHomePressed += () => _ = SavePersonalHome(null);
+        _hud.NewPrivateInstancePressed += id => _ = JoinPrivateWorld(id);
+        _hud.JoinInstancePressed += (instanceId, worldId) => _ = JoinExactInstance(instanceId, worldId);
+        _hud.BrowseWorldsPressed += OpenWorldCatalogue;
+        _hud.RefreshWorldPressed += id => _ = ShowWorldDetailFor(id);
         _hud.WorldListClosed += CloseWorldList;
 
         // Loading screen must exist before TryRestoreSession so it can be shown
@@ -337,17 +344,20 @@ public partial class Main : Node3D
         _quickMenu = new QuickMenu { Name = "QuickMenu" };
         AddUi(_quickMenu);
         _quickMenu.HomePressed += EnterHome;
+        _quickMenu.SetHomePressed += () => { if (LocationWorldId != null) _ = SavePersonalHome(LocationWorldId); };
+        _quickMenu.ResetHomePressed += () => _ = SavePersonalHome(null);
+        _quickMenu.NewPrivateInstancePressed += () => { if (LocationWorldId != null) _ = JoinPrivateWorld(LocationWorldId); };
         _quickMenu.RespawnPressed += RespawnLocal;
         _quickMenu.QuitPressed += () => GetTree().Quit();
-        _quickMenu.OpenMainMenuWorlds += () => { _mainMenu?.Open(_username, 1); SyncMenuHold(); };
+        _quickMenu.OpenMainMenuWorlds += OpenWorldCatalogue;
         _quickMenu.OpenMainMenuAvatars += () => { OpenAvatarSelector(); SyncMenuHold(); };
         _quickMenu.OpenCameraMenu += OpenCameraMenu;
-        _quickMenu.OpenRadialMenu += () => { _actionMenu?.Open(); SyncMenuHold(); };
+        _quickMenu.OpenRadialMenu += ToggleActionMenu;
         _quickMenu.OpenVideoQueue += () => { if (_videoQueuePanel?.HasVideo ?? false) _videoQueuePanel.Open(); else _inWorldHud?.Toast("No video screen in this world", 2); };
-        _quickMenu.OpenSettings += () => { _settingsMenu?.Open(); SyncMenuHold(); };
+        _quickMenu.OpenSettings += () => { CloseAllMenus(); _settingsMenu?.Open(); SyncMenuHold(); };
         _quickMenu.CopyInvitePressed += CopyInviteLink;
         _quickMenu.MicTogglePressed += () => { ToggleMic(); _quickMenu.SetMic(_micActive); };
-        _quickMenu.OpenSocial += () => { _socialPanel?.Configure(_api); _socialPanel?.Open(); SyncMenuHold(); };
+        _quickMenu.OpenSocial += OpenSocialMenu;
         _quickMenu.ReportWorldPressed += OpenReportWorld;
         _quickMenu.PlayerSelected += OpenPlayerCard;
         _quickMenu.Closed += OnPauseClosed;
@@ -359,11 +369,12 @@ public partial class Main : Node3D
         _socialPanel.BlocksChanged += RefreshBlockVisibility;
         _socialPanel.Closed += OnPauseClosed;
         _socialPanel.InviteAccepted += n => _ = AcceptInviteAsync(n);
+        _socialPanel.InviteInstanceId = () => CanInviteHere ? _currentInstanceId : null;
         _socialPanel.UnreadChanged += UpdateNotificationBadge;
 
         _playerCard = new UI.PlayerCard { Name = "PlayerCard" };
         AddUi(_playerCard);
-        _playerCard.CurrentInstanceId = () => _currentInstanceId;
+        _playerCard.CurrentInstanceId = () => CanInviteHere ? _currentInstanceId : null;
         _playerCard.CurrentWorldName = () => _worldName;
         _playerCard.IsVoiceMuted = userId =>
         {
@@ -392,6 +403,7 @@ public partial class Main : Node3D
         _mainMenu = new MainMenu { Name = "MainMenu" };
         AddUi(_mainMenu);
         _mainMenu.JoinWorldPressed += (id) => _ = ShowWorldDetailFor(id);
+        _mainMenu.RefreshRequested += tab => { if (tab == 1) _ = PopulateWorldList(); else if (tab == 2) _ = PopulateMainMenuAvatars(); };
         _mainMenu.AvatarChosen += (id, url, name) => _ = EquipAvatar(id, url, name);
         _mainMenu.ImageLoader = url => _api.GetImageBytesAsync(url);
         _mainMenu.Closed += OnPauseClosed;
@@ -620,7 +632,7 @@ public partial class Main : Node3D
     /// straight away — same path as clicking a world in the browser.
     private void OnDiscordJoinRequested(string worldId)
     {
-        if (_api == null)
+        if (string.IsNullOrEmpty(_api?.SessionToken) || string.IsNullOrEmpty(_localUserId))
         {
             _pendingIntent = new DeepLink.Intent(DeepLink.Kind.World, worldId);
             _inWorldHud?.Toast("That world will open after you log in", 4);
@@ -908,7 +920,7 @@ public partial class Main : Node3D
         right.AddChild(BootHandMarker());
         _bootXrOrigin.AddChild(left);
         _bootXrOrigin.AddChild(right);
-        _bootXrOrigin.AddChild(new UI.VrUiPointer(right, _vrUi) { Name = "BootPointer" });
+        _bootXrOrigin.AddChild(new UI.VrUiPointer(right, _vrUi) { Name = "BootPointer", AlternateHand = left });
 
         AddChild(_bootXrOrigin);
         GD.Print("VR: boot XR rig active (pre-login)");
@@ -1072,25 +1084,12 @@ public partial class Main : Node3D
             // Reusing the button the player already presses beats teaching them a new gesture.
             vr.MenuPressed += () =>
             {
-                // Toggle. The headset has no Esc key, so if the menu button cannot also close the
-                // menu there is no reliable way out of one — the only exit was finding and
-                // clicking a Close button with the laser, and if the panel had drifted behind you
-                // that was not reachable either.
-                //
-                // Any open menu closes, not just the quick menu: the screens open each other, so
-                // "is something open" is the only question worth asking.
-                if (AnyMenuOpen)
-                {
-                    CloseAllMenus();
-                    SyncMenuHold();
-                    return;
-                }
-
+                if (CloseOpenMenu()) { SyncMenuHold(); return; }
                 RecentreVrPanel();
-                _quickMenu?.Open(_username);
-                SyncMenuHold();
+                OpenPauseMenu();
             };
-            vr.ActionMenuPressed += () => { RecentreVrPanel(); _actionMenu?.Open(); SyncMenuHold(); };
+            vr.ActionMenu = _actionMenu;
+            vr.ActionMenuPressed += ToggleActionMenu;
             // Mute is on X, matching VRChat. Deliberately does not open or touch any menu: the
             // point of a hardware mute is that it works in one motion without looking.
             vr.MutePressed += () => { ToggleMic(); _quickMenu?.SetMic(_micActive); };
@@ -1171,11 +1170,7 @@ public partial class Main : Node3D
         onMenuToggle: () => CallDeferred(nameof(OpenPauseMenu)),
         onChatToggle: () => CallDeferred(nameof(OpenChat)),
         onMicToggle: () => CallDeferred(nameof(ToggleMic)),
-        onActionToggle: () =>
-        {
-            if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
-            else { _actionMenu?.Open(); if (_localDesktop != null) _localDesktop.ControlsEnabled = false; if (_localVr != null) _localVr.ControlsEnabled = false; }
-        });
+        onActionToggle: ToggleActionMenu);
     }
 
     // ── Login → route (Home, or a world from a deep link) ────────────────────────────
@@ -1524,10 +1519,17 @@ public partial class Main : Node3D
         // at them — invites included — is dropped as "offline".
         CallDeferred(nameof(ConnectGateway));
 
-        if (_pendingIntent.Kind == DeepLink.Kind.World)
+        var intent = _pendingIntent;
+        _pendingIntent = DeepLink.Intent.None;
+        if (intent.Kind is DeepLink.Kind.World or DeepLink.Kind.Instance)
+            _ = RefreshPersonalHomeSelection();
+        if (intent.Kind == DeepLink.Kind.Instance)
         {
-            await JoinWorldById(_pendingIntent.Arg);
-            _pendingIntent = DeepLink.Intent.None;
+            await JoinExactInstance(intent.Arg);
+        }
+        else if (intent.Kind == DeepLink.Kind.World)
+        {
+            await JoinWorldById(intent.Arg);
         }
         else
         {
@@ -1609,35 +1611,11 @@ public partial class Main : Node3D
     private async Task AcceptInviteAsync(SerikaNotification n)
     {
         if (n == null || _api == null) return;
-        if (n.IsExpired)
-        {
-            _inWorldHud?.Toast("That invite has expired.", 4);
-            return;
-        }
-
-        if (!string.IsNullOrEmpty(n.InstanceId))
-        {
-            try
-            {
-                ShowLoading("Joining your friend…");
-                var joined = await _api.JoinInstanceByIdAsync(n.InstanceId);
-                _currentWorldId = n.WorldId;
-                _currentInstanceId = n.InstanceId;
-                string endpoint = joined.GetProperty("endpoint").GetString();
-                string ticket = joined.GetProperty("ticket").GetString();
-                string worldName = n.WorldName ?? "the world";
-                CallDeferred(nameof(OnJoinReady), endpoint, ticket, _username, worldName);
-                return;
-            }
-            catch (Exception e)
-            {
-                // The instance may have closed or filled since the invite was sent. Fall back to
-                // the world so the player still ends up somewhere sensible.
-                GD.PrintErr($"invite instance join failed, falling back to world: {e.Message}");
-            }
-        }
-
-        if (!string.IsNullOrEmpty(n.WorldId)) await JoinWorldById(n.WorldId);
+        if (n.IsExpired) { _inWorldHud?.Toast("That invite has expired.", 4); return; }
+        // An invitation is for a specific gathering. Never replace a denied/closed private
+        // invitation with an unrelated public instance of the same world.
+        if (!string.IsNullOrEmpty(n.InstanceId)) await JoinExactInstance(n.InstanceId, n.WorldId);
+        else if (!string.IsNullOrEmpty(n.WorldId)) await JoinWorldById(n.WorldId);
     }
 
     /// Create/join an instance of a specific world and connect to its relay.
@@ -1648,69 +1626,40 @@ public partial class Main : Node3D
     /// The instance we are actually in, needed to invite someone into it. Null in Home.
     private string _currentInstanceId;
 
-    private async Task JoinWorldById(string worldId)
+    private async Task JoinWorldById(string worldId, bool createPrivate = false)
     {
-        _currentWorldId = worldId;
+        if (_api == null || string.IsNullOrEmpty(worldId)
+            || !_travel.TryBegin(WorldTravelOperation.Destination.Instance, out int version)) return;
+        CloseAllMenus();
+        CloseWorldList();
         try
         {
-            // Resolve this world's downloadUrl and make sure the local copy matches it.
-            // The list is only populated once the world browser has been opened, so joining
-            // through a portal or a deep link used to skip the download entirely and leave
-            // WorldLoader to serve whatever stale bundle was already cached — which is how a
-            // republished world could stay invisible indefinitely. Fall back to the per-world
-            // endpoint so a join always knows the current version.
-            string downloadUrl = null;
-            if (_fetchedWorlds != null)
-                downloadUrl = _fetchedWorlds.Find(w => w.id == worldId).downloadUrl;
-
-            if (downloadUrl == null)
-            {
-                try
-                {
-                    var detail = await _api.GetWorldDetailAsync(worldId);
-                    if (detail.TryGetProperty("downloadUrl", out var du) &&
-                        du.ValueKind == JsonValueKind.String)
-                        downloadUrl = du.GetString();
-                }
-                catch (Exception e) { GD.PrintErr($"world detail lookup failed: {e.Message}"); }
-            }
-
-            if (downloadUrl != null)
-            {
-                ShowLoading("Downloading world…");
-                string localPath = await _api.DownloadWorldAsync(downloadUrl, worldId);
-                if (localPath != null)
-                    GD.Print($"world ready at {localPath}");
-            }
-
-            ShowLoading("Joining world…");
-            // Match into an existing open instance if one has room (so players actually meet),
-            // else this creates a fresh one.
-            var joined = await _api.JoinWorldInstanceAsync(worldId);
-            // Remember which instance we landed in — an invite has to name the instance, not just
-            // the world, or the invitee matches into a different copy of it and finds nobody.
-            _currentInstanceId = joined.TryGetProperty("instance", out var inst) &&
-                                 inst.TryGetProperty("id", out var iid) && iid.ValueKind == JsonValueKind.String
-                ? iid.GetString()
-                : null;
-            string endpoint = joined.GetProperty("endpoint").GetString();
-            string ticket = joined.GetProperty("ticket").GetString();
-            string worldName = joined.TryGetProperty("worldName", out var wn) ? wn.GetString() : "the world";
-            CallDeferred(nameof(OnJoinReady), endpoint, ticket, _username, worldName);
+            await PrepareWorldDownload(worldId);
+            ShowLoading(createPrivate ? "Creating your private instance…" : "Joining a public instance…");
+            var joined = createPrivate ? await _api.CreateInstanceAsync(worldId, 4) : await _api.JoinWorldInstanceAsync(worldId);
+            CompleteInstanceJoin(joined, worldId, version);
         }
         catch (Exception e)
         {
-            GD.PrintErr($"join failed: {e.Message}");
-            CallDeferred(nameof(OnJoinFailed), FriendlyError(e));
+            CallDeferred(nameof(OnJoinFailed), WorldActionError(e), version);
         }
     }
 
-    private void OnJoinFailed(string message)
+    private void OnJoinFailed(string message, int version)
     {
+        if (!_travel.IsCurrent(version, WorldTravelOperation.Destination.Instance)) return;
+        _travel.Complete(version);
+        _preparedInstance = null;
         HideLoading();
         if (_inWorld || _inHome || _api?.SessionToken != null)
         {
-            EnterHome();
+            if (_inWorld || _inHome)
+            {
+                UI.InputMode.Release(UI.InputMode.Loading);
+                UI.InputMode.SetPlayable(true);
+                SyncMenuHold();
+            }
+            else EnterHome();
             _inWorldHud?.Toast($"Couldn't join: {message}", 5);
         }
         else
@@ -1722,6 +1671,7 @@ public partial class Main : Node3D
     /// Enter the prepared personal Home, a single-player space with no relay connection.
     private void EnterPreparedHome()
     {
+        if (!_travel.IsCurrent(_preparedHomeVersion, WorldTravelOperation.Destination.Home)) return;
         // The whole body is guarded because this runs from a `CallDeferred`, which has no caller
         // to catch anything: an exception here escaped into Godot's message loop and skipped
         // `HideLoading()`, stranding the player on "Loading your avatar…" with no error and no way
@@ -1736,6 +1686,8 @@ public partial class Main : Node3D
             _inWorld = false;
             _currentWorldId = null;
             _currentInstanceId = null; // Home is single-player: there is nothing to invite into
+            _currentInstanceAccess = 0;
+            _currentInstanceOwner = null;
             TeardownRemotes();
             _transport?.Disconnect();
             _transport = null;
@@ -1765,6 +1717,7 @@ public partial class Main : Node3D
             }
         }
 
+        _travel.Complete(_preparedHomeVersion);
         _worldName = _homeName;
         HideLoading();
 
@@ -1827,13 +1780,15 @@ public partial class Main : Node3D
     /// friend can paste it and their client (via the serikasocial:// handler) joins here.
     private void CopyInviteLink()
     {
-        if (string.IsNullOrEmpty(_currentWorldId))
+        if (!CanInviteHere) { _inWorldHud?.Toast("Only the instance owner can invite here.", 3); return; }
+        if (_currentInstanceAccess != 0)
         {
-            _inWorldHud?.Toast("No world to invite to", 2);
+            OpenSocialMenu();
+            _inWorldHud?.Toast("Choose a friend and press Invite. Private invitations are personal.", 5);
             return;
         }
-        DisplayServer.ClipboardSet($"serikasocial://world/{_currentWorldId}");
-        _inWorldHud?.Toast("Invite link copied to clipboard", 3);
+        DisplayServer.ClipboardSet($"serikasocial://instance/{_currentInstanceId}");
+        _inWorldHud?.Toast("Instance link copied", 3);
     }
 
     // ── Avatar selector ───────────────────────────────────────────────────────────────
@@ -1845,6 +1800,8 @@ public partial class Main : Node3D
     private void OpenAvatarSelector()
     {
         if (_api == null || _avatarSelector == null) return;
+        CloseAllMenus();
+        CloseWorldList();
         _avatarSelector.Configure(_api, _currentAvatarId);
         _avatarSelector.Open();
         SyncMenuHold();
@@ -2088,13 +2045,16 @@ public partial class Main : Node3D
     }
 
     private List<(string id, string name, string description, int capacity, string author, string downloadUrl)> _fetchedWorlds;
+    private Dictionary<string, string> _worldThumbnails = new();
 
     private async Task PopulateWorldList(List<string> filterWorldIds = null)
     {
         if (_api == null) return;
+        _mainMenu?.SetLoading(1, true);
         try
         {
             var worlds = await _api.GetWorldsAsync();
+            var thumbnails = new Dictionary<string, string>();
             var list = new List<(string id, string name, string description, int capacity, string author, string downloadUrl)>();
             foreach (var w in worlds.EnumerateArray())
             {
@@ -2108,19 +2068,24 @@ public partial class Main : Node3D
                 string author = w.TryGetProperty("author", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null;
                 string dlUrl = w.TryGetProperty("downloadUrl", out var dl) && dl.ValueKind == JsonValueKind.String ? dl.GetString() : null;
                 list.Add((id, name, desc ?? "", cap, author, dlUrl));
+                if (w.TryGetProperty("thumbnailUrl", out var thumbnail) && thumbnail.ValueKind == JsonValueKind.String)
+                    thumbnails[id] = thumbnail.GetString();
             }
+            _worldThumbnails = thumbnails;
             _fetchedWorlds = list;
             CallDeferred(nameof(OnWorldsFetched));
         }
         catch (Exception e)
         {
             GD.PrintErr($"world list fetch failed: {e.Message}");
+            _mainMenu?.SetLoadError(1, "Couldn’t load worlds. Check your connection and retry.");
         }
     }
 
     private void OnWorldsFetched()
     {
         _hud?.SetWorlds(_fetchedWorlds);
+        _mainMenu?.SetWorldThumbnails(_worldThumbnails);
         _mainMenu?.SetWorlds(_fetchedWorlds);
         _ = PopulateMainMenuAvatars();
     }
@@ -2132,6 +2097,7 @@ public partial class Main : Node3D
     private async Task PopulateMainMenuAvatars()
     {
         if (_api == null || _mainMenu == null) return;
+        _mainMenu.SetLoading(2, true);
         try
         {
             var avatars = await _api.GetAvatarsAsync(false);
@@ -2151,6 +2117,7 @@ public partial class Main : Node3D
         catch (Exception e)
         {
             GD.PrintErr($"main-menu avatar fetch failed: {e.Message}");
+            _mainMenu?.SetLoadError(2, "Couldn’t load avatars. Check your connection and retry.");
         }
     }
 
@@ -2161,27 +2128,35 @@ public partial class Main : Node3D
 
     // ── World detail (in-game) ──────────────────────────────────────────────────────
     private JsonElement _pendingWorldDetail;
+    private int _worldDetailRequest;
 
     private async Task ShowWorldDetailFor(string worldId)
     {
-        if (_api == null) return;
+        if (_api == null || _travel.Active) return;
+        int request = ++_worldDetailRequest;
+        int travelVersion = _travel.Version;
         try
         {
             var detail = await _api.GetWorldDetailAsync(worldId);
+            if (_worldDetailRequest != request || _travel.Active || _travel.Version != travelVersion) return;
             _pendingWorldDetail = detail;
-            CallDeferred(nameof(OnWorldDetailFetched));
+            CallDeferred(nameof(OnWorldDetailFetched), request, travelVersion);
         }
         catch (Exception e)
         {
+            if (_worldDetailRequest != request || _travel.Active || _travel.Version != travelVersion) return;
             GD.PrintErr($"world detail fetch failed: {e.Message}");
-            // Fall back to direct join if detail fetch fails
-            _ = JoinWorldById(worldId);
+            OpenWorldCatalogue();
+            _mainMenu?.SetLoadError(1, "Couldn't open that world. Please retry.");
         }
     }
 
-    private void OnWorldDetailFetched()
+    private void OnWorldDetailFetched(int request, int travelVersion)
     {
+        if (_worldDetailRequest != request || _travel.Active || _travel.Version != travelVersion) return;
+        CloseAllMenus();
         _hud?.ShowWorldDetail(_pendingWorldDetail);
+        UpdateWorldActions();
         // DirectWorld portals and the MainMenu Worlds tab both land here without going through
         // OpenWorldList, so nothing else has taken a hold. Without one, VR locomotion stays live
         // under the panel. Idempotent when the Home world-list hold is already outstanding.
@@ -2249,32 +2224,50 @@ public partial class Main : Node3D
         }
     }
 
-    private void OnJoinReady(string endpoint, string ticket, string username, string worldName)
+    private void OnJoinReady(int version)
     {
-        GD.Print($"OnJoinReady worldId={_currentWorldId} name={worldName}");
-        _inHome = false;
-        _worldName = worldName;
-        ShowLoading($"Connecting to {worldName}…");
-        SwapWorld(root => _worldSpawn = Worlds.BuildWorldForId(_currentWorldId, root));
-        SpawnLocalPlayer();
-        MoveLocalTo(_worldSpawn);
-        SpawnMarkerPens();
-        ConnectTo(endpoint, ticket);
+        if (!_travel.IsCurrent(version, WorldTravelOperation.Destination.Instance)
+            || _preparedInstance?.Version != version) return;
+        var ready = _preparedInstance;
+        _preparedInstance = null;
+        try
+        {
+            _transport?.Disconnect();
+            _transport = null;
+            TeardownRemotes();
+            _inHome = false;
+            _inWorld = false;
+            _currentWorldId = ready.WorldId;
+            _currentInstanceId = ready.InstanceId;
+            _currentInstanceAccess = ready.Access;
+            _currentInstanceOwner = ready.Owner;
+            _worldName = ready.Name;
+            ShowLoading($"Connecting to {ready.Name}…");
+            SwapWorld(root => _worldSpawn = Worlds.BuildWorldForId(ready.WorldId, root));
+            SpawnLocalPlayer();
+            MoveLocalTo(_worldSpawn);
+            SpawnMarkerPens();
+            ConnectTo(ready.Endpoint, ready.Ticket);
+        }
+        catch (Exception error) { OnJoinFailed(WorldActionError(error), version); }
     }
 
     private void ConnectTo(string endpoint, string ticket)
     {
         var udp = new UdpTransport();
-        udp.Connected += OnConnected;
-        udp.PeerJoined += OnPeerJoined;
-        udp.PeerLeft += OnPeerLeft;
-        udp.PoseReceived += OnPoseReceived;
-        udp.ChatReceived += OnChatReceived;
-        udp.VoiceReceived += OnVoiceReceived;
-        udp.ObjectSyncReceived += OnObjectSyncReceived;
-        udp.PhysGrabReceived += OnPhysGrabReceived;
-        udp.Rejected += OnTransportRejected;
+        udp.Connected += (id, peers) => { if (_transport == udp) OnConnected(id, peers); };
+        udp.PeerJoined += peer => { if (_transport == udp) OnPeerJoined(peer); };
+        udp.PeerLeft += id => { if (_transport == udp) OnPeerLeft(id); };
+        udp.PoseReceived += (id, pose) => { if (_transport == udp) OnPoseReceived(id, pose); };
+        udp.ChatReceived += (id, text) => { if (_transport == udp) OnChatReceived(id, text); };
+        udp.VoiceReceived += (id, frame) => { if (_transport == udp) OnVoiceReceived(id, frame); };
+        udp.ObjectSyncReceived += (id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz) =>
+            { if (_transport == udp) OnObjectSyncReceived(id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz); };
+        udp.PhysGrabReceived += (id, type, bone, x, y, z) =>
+            { if (_transport == udp) OnPhysGrabReceived(id, type, bone, x, y, z); };
+        udp.Rejected += reason => { if (_transport == udp) OnTransportRejected(reason); };
         _transport = udp;
+        _transportTravelVersion = _joiningInstance ? _travel.Version : 0;
         udp.Connect(endpoint, ticket);
 
         // Wire the static bridge so PhysicsProp can send sync updates
@@ -2292,12 +2285,16 @@ public partial class Main : Node3D
     private void OnTransportRejected(string reason)
     {
         GD.PrintErr($"transport rejected/lost: {reason}");
+        bool rejectedCurrentJoin = _travel.IsCurrent(_transportTravelVersion, WorldTravelOperation.Destination.Instance);
         _inWorld = false;
         TeardownRemotes();
         _transport?.Disconnect();
         _transport = null;
 
-        EnterHome();
+        if (rejectedCurrentJoin) _travel.Complete(_transportTravelVersion);
+        // An old session can time out while the next world downloads. Its failure must not
+        // start a competing Home build or release the new trip's input hold.
+        if (!_travel.Active) EnterHome();
         _inWorldHud?.Toast($"Disconnected: {reason}", 5);
     }
 
@@ -2306,6 +2303,8 @@ public partial class Main : Node3D
     private void OnConnected(uint selfId, PeerInfo[] peers)
     {
         GD.Print($"SMOKE connected self={selfId} peers={peers.Length}");
+        if (_travel.IsCurrent(_transportTravelVersion, WorldTravelOperation.Destination.Instance))
+            _travel.Complete(_transportTravelVersion);
         _peerNames.Clear();
         _peerUserIds.Clear();
         foreach (var p in peers)
@@ -2323,7 +2322,7 @@ public partial class Main : Node3D
         UI.InputMode.SetPlayable(true);
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
-        RpcPresence.UpdateState(_worldName, 1 + others, 16, _currentWorldId);
+        UpdatePrivatePresence(1 + others);
         _chat.AddSystem($"Welcome to {_worldName}.");
         _videoManager?.RequestSync();
     }
@@ -2335,7 +2334,7 @@ public partial class Main : Node3D
         if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
         _peerNames[p.PeerId] = p.Name;
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
-        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count, 16, _currentWorldId);
+        UpdatePrivatePresence(1 + _remotes.Count);
         _chat.AddSystem($"{p.Name} joined the world");
     }
 
@@ -2354,7 +2353,7 @@ public partial class Main : Node3D
         string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
         _peerNames.Remove(peerId);
         _inWorldHud.SetPlayerCount(1 + _remotes.Count);
-        RpcPresence.UpdateState(_worldName, 1 + _remotes.Count, 16, _currentWorldId);
+        UpdatePrivatePresence(1 + _remotes.Count);
         _chat.AddSystem($"{name} left the world");
     }
 
@@ -2531,11 +2530,14 @@ public partial class Main : Node3D
     private void OpenPauseMenu()
     {
         if (_quickMenu == null) return;
+        CloseAllMenus();
+        CloseWorldList();
         // Feed the hub live state: the instance roster, where we are, and the real mic status.
         var others = new List<(string userId, string name)>();
         foreach (var kv in _peerNames)
             others.Add((_peerUserIds.GetValueOrDefault(kv.Key, ""), kv.Value));
-        _quickMenu.SetLocation(_inHome ? "Home" : _worldName, invitable: _inWorld && !string.IsNullOrEmpty(_currentWorldId));
+        _quickMenu.SetLocation(_worldName, invitable: CanInviteHere);
+        UpdateWorldActions();
         _quickMenu.SetTrust(TrustLabel(_localTrust));
         _quickMenu.SetPlayers(_username, others);
         _quickMenu.SetMic(_micActive);
@@ -2599,6 +2601,8 @@ public partial class Main : Node3D
     /// frame shows what they were already looking at.
     private void OpenCameraMenu()
     {
+        CloseAllMenus();
+        CloseWorldList();
         _cameraMenu?.Open(_local?.PoseTransform());
         SyncMenuHold();
     }
@@ -2646,6 +2650,7 @@ public partial class Main : Node3D
     /// Close every overlay screen. The VR menu button uses this as its "back out" action.
     private void CloseAllMenus()
     {
+        _worldDetailRequest++;
         if (_quickMenu?.IsOpen ?? false) _quickMenu.Hide();
         if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide();
         if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide();
@@ -2656,6 +2661,7 @@ public partial class Main : Node3D
         if (_socialPanel?.IsOpen ?? false) _socialPanel.Hide();
         if (_playerCard?.IsOpen ?? false) _playerCard.Hide();
         if (_reportDialog?.IsOpen ?? false) _reportDialog.Hide();
+        if (UI.InputMode.HasHold(UI.InputMode.WorldList)) CloseWorldList();
     }
 
     /// Push a live setting change onto whatever it affects.
@@ -2698,6 +2704,7 @@ public partial class Main : Node3D
     /// Close whichever overlay menu is currently open (top-most wins). Returns true if one closed.
     private bool CloseOpenMenu()
     {
+        _worldDetailRequest++;
         // The radial menu steps back out of a submenu before closing entirely.
         if (_actionMenu?.IsOpen ?? false)
         {
@@ -2714,6 +2721,7 @@ public partial class Main : Node3D
         if (_avatarSelector?.IsOpen ?? false) { _avatarSelector.Hide(); return true; }
         if (_videoQueuePanel?.IsOpen ?? false) { _videoQueuePanel.Hide(); return true; }
         if (_socialPanel?.IsOpen ?? false) { _socialPanel.Hide(); return true; }
+        if (UI.InputMode.HasHold(UI.InputMode.WorldList)) { CloseWorldList(); return true; }
         return false;
     }
 
@@ -2737,6 +2745,8 @@ public partial class Main : Node3D
             GetViewport().SetInputAsHandled();
             return;
         }
+        var focused = (_vrUi?.Viewport ?? GetViewport()).GuiGetFocusOwner();
+        if (focused is LineEdit or TextEdit) return;
         // Only the three menu keys stay live while a menu is up — everything else would act on a
         // world the player is not currently looking at.
         if (AnyMenuOpen && !(UI.KeyBindings.Matches("main_menu", k.Keycode)
@@ -2747,15 +2757,14 @@ public partial class Main : Node3D
         var kc = k.Keycode;
         if (UI.KeyBindings.Matches("main_menu", kc))
         {
-            if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide(); else _mainMenu?.Open(_username, 1);
+            if (_mainMenu?.IsOpen ?? false) _mainMenu.Hide(); else OpenWorldCatalogue();
             SyncMenuHold();
             GetViewport().SetInputAsHandled();
             return;
         }
         if (UI.KeyBindings.Matches("action_menu", kc))
         {
-            if (_actionMenu?.IsOpen ?? false) _actionMenu.Hide(); else _actionMenu?.Open();
-            SyncMenuHold();
+            ToggleActionMenu();
             GetViewport().SetInputAsHandled();
             return;
         }

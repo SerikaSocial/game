@@ -1,36 +1,37 @@
 using System;
 using System.Collections.Generic;
-using System.Text.Json;
+using System.Linq;
 using Godot;
-
 using SerikaSocial.UI;
 
 namespace SerikaSocial;
 
-/// VRChat Main Menu (Big Menu) — exact match of VRChat's Main Menu design (input_file_1.png).
-/// Fullscreen wide layout (1100x700) with top header bar, left category sidebar, 3x4 main content grid
-/// for Worlds & Avatars, and persistent bottom tab navigation bar (Live Now, Worlds, Avatars, Social, Groups, Shop).
+/// Searchable catalogue. Cards open real world details or equip a real avatar.
 public partial class MainMenu : CanvasLayer
 {
     public event Action Closed;
     public event Action<string> JoinWorldPressed;
     public event Action<string, string, string> AvatarChosen;
-
-    private ColorRect _scrim;
-    private PanelContainer _card;
-    private Label _clockLabel;
-    private Label _usernameLabel;
-    private GridContainer _contentGrid;
-    private Label _categoryTitle;
-    private Label _statusLabel;
-
-    private int _activeBottomTab = 1; // 0=Live, 1=Worlds, 2=Avatars, 3=Social, 4=Groups, 5=Shop
-    private double _clockTimer;
-
-    // Set by Main so avatar/world cards can fetch their thumbnail bytes.
+    public event Action<int> RefreshRequested;
     public Func<string, System.Threading.Tasks.Task<byte[]>> ImageLoader;
 
-    private readonly List<Button> _tabButtons = new();
+    private PanelContainer _card;
+    private Label _usernameLabel, _categoryTitle, _statusLabel, _emptyTitle, _emptyBody, _brandLabel, _footer;
+    private MarginContainer _margin;
+    private VBoxContainer _column;
+    private bool _compact;
+    private GridContainer _contentGrid;
+    private VBoxContainer _emptyState;
+    private ScrollContainer _scroll;
+    private LineEdit _search;
+    private Button _worldTab, _avatarTab, _refreshBtn, _clearBtn;
+    private int _activeBottomTab = 1;
+    private readonly bool[] _loading = new bool[3];
+    private readonly bool[] _loaded = new bool[3];
+    private readonly string[] _errors = new string[3];
+    private readonly Dictionary<string, string> _worldThumbnails = new();
+    private readonly Dictionary<string, Texture2D> _thumbnails = new();
+    private readonly Dictionary<string, System.Threading.Tasks.Task<Texture2D>> _thumbnailLoads = new();
     private readonly List<(string id, string name, string desc, int cap, string author, string dlUrl)> _worldsCache = new();
     private readonly List<(string id, string name, string author, string thumbUrl, string dlUrl)> _avatarsCache = new();
 
@@ -38,465 +39,375 @@ public partial class MainMenu : CanvasLayer
     {
         Layer = 106;
         Visible = false;
-
-        _scrim = Brand.Scrim(0.85f);
-        AddChild(_scrim);
-
+        AddChild(Brand.Scrim(0.72f));
         var center = new CenterContainer();
         center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
         AddChild(center);
-
-        _card = new PanelContainer
-        {
-            CustomMinimumSize = Brand.Card(1100, 700),
-        };
-        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 16, 1.5f, Brand.Border));
+        _card = new PanelContainer { Name = "CatalogueCard", Theme = Brand.Theme };
+        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18, 1, Brand.Border));
         center.AddChild(_card);
-
-        var margin = new MarginContainer();
-        foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
-            margin.AddThemeConstantOverride(s, 16);
+        var margin = _margin = new MarginContainer();
+        foreach (var side in new[] { "left", "right", "top", "bottom" })
+            margin.AddThemeConstantOverride("margin_" + side, 24);
         _card.AddChild(margin);
+        var column = _column = new VBoxContainer();
+        column.AddThemeConstantOverride("separation", 14);
+        margin.AddChild(column);
 
-        var mainVBox = new VBoxContainer();
-        mainVBox.AddThemeConstantOverride("separation", 10);
-        margin.AddChild(mainVBox);
-
-        // ── TOP HEADER BAR ─────────────────────────────────────────────────────────────
-        var header = new HBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        header.AddThemeConstantOverride("separation", 10);
-        mainVBox.AddChild(header);
-
-        var userBadge = new HBoxContainer();
-        userBadge.AddThemeConstantOverride("separation", 6);
-        var dot = new ColorRect
+        var header = new HBoxContainer();
+        header.AddThemeConstantOverride("separation", 12);
+        column.AddChild(header);
+        var title = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        title.AddThemeConstantOverride("separation", 3);
+        _brandLabel = Label("SERIKA SOCIAL", 11, Brand.Accent);
+        title.AddChild(_brandLabel);
+        _categoryTitle = Label("Find your next place", 26, Brand.TextHi);
+        _categoryTitle.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        title.AddChild(_categoryTitle);
+        header.AddChild(title);
+        _usernameLabel = Label("", 13, Brand.TextMid);
+        _usernameLabel.CustomMinimumSize = new Vector2(130, 0);
+        _usernameLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        header.AddChild(_usernameLabel);
+        var close = Brand.Ghost_(new Button
         {
-            CustomMinimumSize = new Vector2(8, 8),
-            Color = Brand.Success,
-            SizeFlagsVertical = Control.SizeFlags.ShrinkCenter,
-        };
-        userBadge.AddChild(dot);
-        _usernameLabel = new Label { Text = "VRChat User" };
-        _usernameLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
-        _usernameLabel.AddThemeColorOverride("font_color", Brand.TextHi);
-        userBadge.AddChild(_usernameLabel);
-        header.AddChild(userBadge);
-
-        header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
-
-        _clockLabel = new Label { Text = DateTime.Now.ToString("HH:mm") };
-        _clockLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(18));
-        _clockLabel.AddThemeColorOverride("font_color", Brand.Accent);
-        header.AddChild(_clockLabel);
-
-        header.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
-
-        // Header Icons
-        header.AddChild(HeaderIcon(Icons.Kind.Search));
-        header.AddChild(HeaderIcon(Icons.Kind.Bell));
-        header.AddChild(HeaderIcon(Icons.Kind.Calendar));
-        header.AddChild(HeaderIcon(Icons.Kind.Box));
-        header.AddChild(HeaderIcon(Icons.Kind.Gear));
-
-        var closeBtn = Brand.Ghost_(new Button
-        {
-            CustomMinimumSize = new Vector2(36, 36),
-            Icon = Icons.Get(Icons.Kind.Close, 16, Brand.TextMid),
+            Icon = Icons.Get(Icons.Kind.Close, 18, Brand.TextMid),
+            CustomMinimumSize = new Vector2(46, 46), TooltipText = "Close catalogue",
         });
-        closeBtn.Pressed += Hide;
-        header.AddChild(closeBtn);
+        close.Pressed += Hide;
+        header.AddChild(close);
 
-        mainVBox.AddChild(new HSeparator());
+        var navigation = new HBoxContainer();
+        navigation.AddThemeConstantOverride("separation", 8);
+        column.AddChild(navigation);
+        _worldTab = Tab("Worlds", Icons.Kind.Globe, 1);
+        _avatarTab = Tab("Avatars", Icons.Kind.Shirt, 2);
+        navigation.AddChild(_worldTab);
+        navigation.AddChild(_avatarTab);
+        navigation.AddChild(new Control { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill });
+        _refreshBtn = Brand.Ghost_(new Button
+        {
+            Text = "Refresh", Icon = Icons.Get(Icons.Kind.Refresh, 16, Brand.TextMid),
+            CustomMinimumSize = new Vector2(110, 46), TooltipText = "Fetch the latest catalogue",
+        });
+        _refreshBtn.Pressed += () => RefreshRequested?.Invoke(_activeBottomTab);
+        navigation.AddChild(_refreshBtn);
 
-        // ── MIDDLE BODY (Left Sidebar + Main Grid) ─────────────────────────────────────
-        var bodyRow = new HBoxContainer { SizeFlagsVertical = Control.SizeFlags.ExpandFill };
-        bodyRow.AddThemeConstantOverride("separation", 12);
-        mainVBox.AddChild(bodyRow);
+        _search = new LineEdit
+        {
+            PlaceholderText = "Search worlds, descriptions or creators…",
+            CustomMinimumSize = new Vector2(0, 48), ClearButtonEnabled = true,
+            RightIcon = Icons.Get(Icons.Kind.Search, 18, Brand.TextDim),
+        };
+        _search.TextChanged += _ => PopulateGrid();
+        column.AddChild(_search);
+        _statusLabel = Label("Loading worlds…", 13, Brand.TextDim);
+        _statusLabel.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        column.AddChild(_statusLabel);
 
-        // LEFT SIDEBAR (Category links)
-        var sidebar = new VBoxContainer { CustomMinimumSize = new Vector2(200, 0) };
-        sidebar.AddThemeConstantOverride("separation", 6);
-        bodyRow.AddChild(sidebar);
-
-        var sideTitle = new Label { Text = "CATEGORIES" };
-        sideTitle.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
-        sideTitle.AddThemeColorOverride("font_color", Brand.TextDim);
-        sidebar.AddChild(sideTitle);
-
-        sidebar.AddChild(SideCategory(Icons.Kind.Pin, "Current World"));
-        sidebar.AddChild(SideCategory(Icons.Kind.Flame, "Popular Worlds"));
-        sidebar.AddChild(SideCategory(Icons.Kind.Star, "New & Noteworthy"));
-        sidebar.AddChild(SideCategory(Icons.Kind.Shirt, "Avatar Worlds"));
-        sidebar.AddChild(SideCategory(Icons.Kind.Gamepad, "Mini Games"));
-        sidebar.AddChild(SideCategory(Icons.Kind.Flask, "Community Labs"));
-
-        bodyRow.AddChild(new VSeparator());
-
-        // MAIN CONTENT AREA (Grid)
-        var contentVBox = new VBoxContainer { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
-        contentVBox.AddThemeConstantOverride("separation", 8);
-        bodyRow.AddChild(contentVBox);
-
-        _categoryTitle = new Label { Text = "WORLDS" };
-        _categoryTitle.AddThemeFontSizeOverride("font_size", Brand.Fs(20));
-        _categoryTitle.AddThemeColorOverride("font_color", Brand.TextHi);
-        contentVBox.AddChild(_categoryTitle);
-
-        _statusLabel = new Label { Text = "" };
-        _statusLabel.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
-        _statusLabel.AddThemeColorOverride("font_color", Brand.TextDim);
-        contentVBox.AddChild(_statusLabel);
-
-        var scroll = new ScrollContainer
+        _scroll = new ScrollContainer
         {
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             SizeFlagsVertical = Control.SizeFlags.ExpandFill,
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            FollowFocus = true,
         };
-        scroll.AddThemeStyleboxOverride("panel", new StyleBoxEmpty());
-        contentVBox.AddChild(scroll);
+        column.AddChild(_scroll);
+        _contentGrid = new GridContainer { Columns = 3, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        _contentGrid.AddThemeConstantOverride("h_separation", 12);
+        _contentGrid.AddThemeConstantOverride("v_separation", 12);
+        _scroll.AddChild(_contentGrid);
 
-        // Three columns on the VR panel, four on a monitor.
-        //
-        // This is what actually decides the big menu's width, not the `CustomMinimumSize` on the
-        // card: a `GridContainer`'s minimum width is the sum of its columns' minimums, cards here
-        // are 195 px wide, and 4 of them plus the 200 px sidebar and the chrome comes to ~1060 px
-        // — more than the panel's whole 1000 px logical width. `Brand.Card` clamped the card's
-        // *minimum* to 952, but a minimum cannot shrink content, so the card grew past the panel
-        // anyway and the SubViewport cut its left border, its right column and its close button
-        // clean off. Dropping one column is what makes the clamp reachable.
-        _contentGrid = new GridContainer
+        _emptyState = new VBoxContainer
         {
-            Columns = VrUiSurface.Active ? 3 : 4,
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            SizeFlagsVertical = Control.SizeFlags.ExpandFill,
+            Alignment = BoxContainer.AlignmentMode.Center,
         };
-        _contentGrid.AddThemeConstantOverride("h_separation", 10);
-        _contentGrid.AddThemeConstantOverride("v_separation", 10);
-        scroll.AddChild(_contentGrid);
-
-        mainVBox.AddChild(new HSeparator());
-
-        // ── BOTTOM TAB NAVIGATION BAR (Live Now | Worlds | Avatars | Social | Groups | Shop) ──
-        var bottomTabs = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.Center };
-        bottomTabs.AddThemeConstantOverride("separation", 10);
-        mainVBox.AddChild(bottomTabs);
-
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Bolt, "Live Now", 0));
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Globe, "Worlds", 1));
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Shirt, "Avatars", 2));
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Users, "Social", 3));
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Group, "Groups", 4));
-        bottomTabs.AddChild(BottomTabButton(Icons.Kind.Cart, "Shop", 5));
+        _emptyState.AddThemeConstantOverride("separation", 12);
+        column.AddChild(_emptyState);
+        _emptyTitle = Label("Loading worlds…", 21, Brand.TextHi);
+        _emptyTitle.HorizontalAlignment = HorizontalAlignment.Center;
+        _emptyState.AddChild(_emptyTitle);
+        _emptyBody = Label("Finding places to spend time together.", 14, Brand.TextDim);
+        _emptyBody.HorizontalAlignment = HorizontalAlignment.Center;
+        _emptyBody.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        _emptyState.AddChild(_emptyBody);
+        _clearBtn = Brand.Ghost_(new Button
+        {
+            Text = "Clear search", CustomMinimumSize = new Vector2(150, 46),
+            SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter,
+        });
+        _clearBtn.Pressed += () => { _search.Text = ""; PopulateGrid(); _search.GrabFocus(); };
+        _emptyState.AddChild(_clearBtn);
+        column.AddChild(new HSeparator());
+        var footer = _footer = Label("Choose a world to view details, find an instance or make it your Home.", 12, Brand.TextDim);
+        footer.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        footer.Name = "CatalogueFooter";
+        column.AddChild(footer);
+        GetViewport().SizeChanged += Fit;
+        _scroll.Resized += FitColumns;
+        Fit();
+        SwitchBottomTab(1);
     }
 
-    private Button HeaderIcon(Icons.Kind icon)
+    public override void _ExitTree() => GetViewport().SizeChanged -= Fit;
+    private void Fit()
     {
-        var b = new Button
-        {
-            CustomMinimumSize = new Vector2(36, 36),
-            Icon = Icons.Get(icon, 17, Brand.TextMid),
-        };
-        Brand.Ghost_(b);
-        return b;
+        _card.CustomMinimumSize = Brand.FitCard(GetViewport(), 1080, 700);
+        _usernameLabel.Visible = _card.CustomMinimumSize.X >= 700;
+        bool compact = _card.CustomMinimumSize.Y < 540;
+        bool changed = compact != _compact;
+        _compact = compact;
+        _column.AddThemeConstantOverride("separation", compact ? 8 : 14);
+        foreach (var side in new[] { "left", "right", "top", "bottom" })
+            _margin.AddThemeConstantOverride("margin_" + side, compact ? 16 : 24);
+        _brandLabel.Visible = !compact;
+        _footer.Visible = !compact;
+        _categoryTitle.AddThemeFontSizeOverride("font_size", Brand.Fs(compact ? 22 : 26));
+        if (changed && _contentGrid != null) PopulateGrid();
+        FitColumns();
     }
-
-    private Button SideCategory(Icons.Kind icon, string text)
+    private void FitColumns()
     {
-        var b = new Button
-        {
-            Text = text,
-            CustomMinimumSize = new Vector2(0, 36),
-            Icon = Icons.Get(icon, 16, Brand.Accent),
-        };
-        Brand.Ghost_(b);
-        b.AddThemeFontSizeOverride("font_size", Brand.Fs(13));
-        b.AddThemeConstantOverride("h_separation", 9);
-        return b;
+        float width = _scroll.Size.X > 0 ? _scroll.Size.X : _card.CustomMinimumSize.X - 48;
+        _contentGrid.Columns = Mathf.Clamp((int)((width + 12) / 222), 1, 4);
     }
-
-    private Button BottomTabButton(Icons.Kind icon, string label, int index)
+    private static Label Label(string text, int size, Color color)
     {
-        var btn = new Button
-        {
-            Text = label,
-            CustomMinimumSize = new Vector2(130, 42),
-            Icon = Icons.Get(icon, 17, Brand.TextMid),
-        };
-        btn.AddThemeConstantOverride("h_separation", 8);
-        btn.Pressed += () => SwitchBottomTab(index);
-        _tabButtons.Add(btn);
-        return btn;
+        var label = new Label { Text = text, MouseFilter = Control.MouseFilterEnum.Ignore };
+        label.AddThemeFontSizeOverride("font_size", Brand.Fs(size));
+        label.AddThemeColorOverride("font_color", color);
+        return label;
     }
-
+    private Button Tab(string text, Icons.Kind icon, int index)
+    {
+        var button = new Button
+        {
+            Text = text, CustomMinimumSize = new Vector2(136, 46),
+            Icon = Icons.Get(icon, 18, Brand.AccentSoft),
+        };
+        button.AddThemeConstantOverride("h_separation", 8);
+        button.Pressed += () => SwitchBottomTab(index);
+        return button;
+    }
     private void SwitchBottomTab(int index)
     {
-        _activeBottomTab = index;
-        // Restyle every tab button so the active one is highlighted and the rest are ghosts —
-        // without this the tab styled at build time (Worlds) stayed highlighted forever.
-        for (int i = 0; i < _tabButtons.Count; i++)
-        {
-            if (i == index) Brand.Primary_(_tabButtons[i]);
-            else Brand.Ghost_(_tabButtons[i]);
-        }
-        _categoryTitle.Text = index switch
-        {
-            0 => "LIVE NOW",
-            1 => "WORLDS",
-            2 => "AVATARS",
-            3 => "SOCIAL & FRIENDS",
-            4 => "COMMUNITY GROUPS",
-            _ => "SHOP",
-        };
+        _activeBottomTab = index == 2 ? 2 : 1;
+        if (_activeBottomTab == 1) { Brand.Primary_(_worldTab); Brand.Ghost_(_avatarTab); }
+        else { Brand.Ghost_(_worldTab); Brand.Primary_(_avatarTab); }
+        _categoryTitle.Text = _activeBottomTab == 1 ? "Find your next place" : "Make yourself at home";
+        _search.PlaceholderText = _activeBottomTab == 1 ? "Search worlds, descriptions or creators…" : "Search avatars or creators…";
+        _search.Text = "";
+        _card.FindChild("CatalogueFooter", true, false).Set("text", _activeBottomTab == 1
+            ? "Choose a world to view details, find an instance or make it your Home."
+            : "Choose an avatar to wear it. Your selection is saved to your account.");
         PopulateGrid();
+        _scroll.ScrollVertical = 0;
     }
 
     public void SetWorlds(List<(string id, string name, string desc, int cap, string author, string dlUrl)> worlds)
     {
         _worldsCache.Clear();
-        _worldsCache.AddRange(worlds);
-        if (_activeBottomTab is 0 or 1) PopulateGrid();
+        if (worlds != null) _worldsCache.AddRange(worlds);
+        _loaded[1] = true; _loading[1] = false; _errors[1] = null;
+        if (_activeBottomTab == 1 && _contentGrid != null) PopulateGrid();
+    }
+    /// Optional artwork keyed by world ID, separate from the existing catalogue data contract.
+    public void SetWorldThumbnails(Dictionary<string, string> thumbnails)
+    {
+        _worldThumbnails.Clear();
+        if (thumbnails != null)
+            foreach (var (id, url) in thumbnails)
+                if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(url)) _worldThumbnails[id] = url;
+        if (_activeBottomTab == 1 && _contentGrid != null && IsOpen) PopulateGrid();
     }
 
     public void SetAvatars(List<(string id, string name, string author, string thumbUrl, string dlUrl)> avatars)
     {
         _avatarsCache.Clear();
-        _avatarsCache.AddRange(avatars);
-        if (_activeBottomTab == 2) PopulateGrid();
+        if (avatars != null) _avatarsCache.AddRange(avatars);
+        _loaded[2] = true; _loading[2] = false; _errors[2] = null;
+        if (_activeBottomTab == 2 && _contentGrid != null) PopulateGrid();
+    }
+    public void SetLoading(int tab, bool loading)
+    {
+        tab = tab == 2 ? 2 : 1;
+        _loading[tab] = loading;
+        if (loading) _errors[tab] = null;
+        if (_contentGrid != null && _activeBottomTab == tab) PopulateGrid();
+    }
+    public void SetLoadError(int tab, string message)
+    {
+        tab = tab == 2 ? 2 : 1;
+        _loading[tab] = false;
+        _errors[tab] = string.IsNullOrEmpty(message) ? "Please try again." : message;
+        if (_contentGrid != null && _activeBottomTab == tab) PopulateGrid();
     }
 
+    private bool Matches(params string[] values)
+    {
+        string query = _search.Text.Trim();
+        return query.Length == 0 || values.Any(value => value?.Contains(query, StringComparison.OrdinalIgnoreCase) == true);
+    }
     private void PopulateGrid()
     {
-        foreach (var child in _contentGrid.GetChildren()) child.QueueFree();
-
-        switch (_activeBottomTab)
+        foreach (var child in _contentGrid.GetChildren()) { _contentGrid.RemoveChild(child); child.QueueFree(); }
+        int tab = _activeBottomTab;
+        bool avatars = tab == 2;
+        string noun = avatars ? "avatars" : "worlds";
+        int count = 0;
+        if (avatars)
         {
-            case 2: // Avatars
-                if (_avatarsCache.Count == 0) { _statusLabel.Text = "No avatars available."; return; }
-                _statusLabel.Text = $"{_avatarsCache.Count} avatar(s) available";
-                foreach (var a in _avatarsCache)
-                {
-                    var card = MakeCard(a.name, string.IsNullOrEmpty(a.author) ? "Avatar" : $"by {a.author}", -1, a.thumbUrl, a.name);
-                    card.Pressed += () => { Hide(); AvatarChosen?.Invoke(a.id, a.dlUrl, a.name); };
-                    _contentGrid.AddChild(card);
-                }
-                return;
-
-            case 0: // Live Now — active servers / popular worlds
-                if (_worldsCache.Count == 0) { _statusLabel.Text = "No live servers right now."; return; }
-                _statusLabel.Text = $"{_worldsCache.Count} live server(s)";
-                foreach (var w in _worldsCache)
-                {
-                    var card = MakeCard($"{w.name}", $"{w.cap} slots · popular server", w.cap, null, w.name);
-                    card.Pressed += () => { Hide(); JoinWorldPressed?.Invoke(w.id); };
-                    _contentGrid.AddChild(card);
-                }
-                return;
-
-            case 1: // Worlds
-                if (_worldsCache.Count == 0) { _statusLabel.Text = "No worlds available."; return; }
-                _statusLabel.Text = $"{_worldsCache.Count} world(s) available";
-                foreach (var w in _worldsCache)
-                {
-                    var card = MakeCard(w.name, string.IsNullOrEmpty(w.desc) ? "Serika Social World" : w.desc, w.cap, null, w.name);
-                    card.Pressed += () => { Hide(); JoinWorldPressed?.Invoke(w.id); };
-                    _contentGrid.AddChild(card);
-                }
-                return;
-
-            case 3: // Social — friends & online players + your groups
-                _statusLabel.Text = "Friends, online players and your groups.";
-                _contentGrid.AddChild(InfoCard("Online Players", "See who's in your current world. Full friends list is coming soon."));
-                _contentGrid.AddChild(InfoCard("Create a Group", "Groups you make and join will appear here. Coming soon."));
-                return;
-
-            case 4: // Groups — user-created groups
-                _statusLabel.Text = "Community groups you can create and join.";
-                _contentGrid.AddChild(InfoCard("Your Groups", "Groups you belong to appear here."));
-                _contentGrid.AddChild(InfoCard("New Group", "Create a user group anyone can join. Coming soon."));
-                return;
-
-            default: // 5: Shop
-                _statusLabel.Text = "";
-                _contentGrid.AddChild(InfoCard("Shop", "Coming soon."));
-                return;
-        }
-    }
-
-    // Simple non-interactive info tile used by the Social / Groups / Shop tabs.
-    private Control InfoCard(string title, string body)
-    {
-        var panel = new PanelContainer { CustomMinimumSize = new Vector2(195, 140) };
-        panel.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg2, 10, 1, Brand.BorderSoft));
-        var pad = new MarginContainer();
-        foreach (var s in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
-            pad.AddThemeConstantOverride(s, 12);
-        panel.AddChild(pad);
-        var vb = new VBoxContainer();
-        vb.AddThemeConstantOverride("separation", 6);
-        pad.AddChild(vb);
-        var t = new Label { Text = title };
-        t.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
-        t.AddThemeColorOverride("font_color", Brand.TextHi);
-        vb.AddChild(t);
-        var b = new Label { Text = body, AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        b.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
-        b.AddThemeColorOverride("font_color", Brand.TextDim);
-        vb.AddChild(b);
-        return panel;
-    }
-
-    // Generic content card. Caller wires the Pressed handler. capacity < 0 hides the footer count.
-    // A thumbnail is loaded from thumbUrl when available; otherwise a deterministic gradient
-    // banner (seeded from gradientSeed) stands in so cards are never blank.
-    private Button MakeCard(string name, string desc, int capacity, string thumbUrl = null, string gradientSeed = null)
-    {
-        var btn = new Button
-        {
-            // Tall enough for everything the card actually contains: 10 px padding, a 64 px
-            // banner, title, a 36 px two-line description, the footer, and the separations
-            // between them. At the previous 150 px the content overflowed by ~16 px and the
-            // capacity badge rendered *outside* the card's bottom edge — a VBoxContainer
-            // anchored to a too-short parent overflows rather than clipping or shrinking.
-            CustomMinimumSize = new Vector2(195, 178),
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-        };
-
-        var normal = Brand.Panel(Brand.Bg2, 10, 1, Brand.BorderSoft);
-        var hover = Brand.Panel(Brand.Bg3, 10, 1.5f, Brand.Accent);
-        btn.AddThemeStyleboxOverride("normal", normal);
-        btn.AddThemeStyleboxOverride("hover", hover);
-        btn.AddThemeStyleboxOverride("pressed", normal);
-
-        var vbox = new VBoxContainer();
-        vbox.AddThemeConstantOverride("separation", 4);
-        vbox.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        vbox.OffsetLeft = 10; vbox.OffsetTop = 10;
-        vbox.OffsetRight = -10; vbox.OffsetBottom = -10;
-        btn.AddChild(vbox);
-
-        // Image / gradient banner.
-        var banner = new PanelContainer { CustomMinimumSize = new Vector2(0, 64) };
-        banner.MouseFilter = Control.MouseFilterEnum.Ignore;
-        banner.AddThemeStyleboxOverride("panel", GradientBanner(gradientSeed ?? name));
-        vbox.AddChild(banner);
-        if (!string.IsNullOrEmpty(thumbUrl) && ImageLoader != null)
-            _ = LoadThumb(banner, thumbUrl);
-
-        var titleLbl = new Label { Text = name, TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis };
-        titleLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
-        titleLbl.AddThemeColorOverride("font_color", Brand.TextHi);
-        vbox.AddChild(titleLbl);
-
-        var descLbl = new Label
-        {
-            Text = string.IsNullOrEmpty(desc) ? "Serika Social World" : desc,
-            AutowrapMode = TextServer.AutowrapMode.WordSmart,
-            CustomMinimumSize = new Vector2(0, 36),
-        };
-        descLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
-        descLbl.AddThemeColorOverride("font_color", Brand.TextDim);
-        vbox.AddChild(descLbl);
-
-        vbox.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill });
-
-        if (capacity >= 0)
-        {
-            var footer = new HBoxContainer();
-            footer.AddThemeConstantOverride("separation", 5);
-            footer.AddChild(new TextureRect
+            foreach (var avatar in _avatarsCache.Where(a => Matches(a.name, a.author)).OrderBy(a => a.name, StringComparer.OrdinalIgnoreCase))
             {
-                Texture = Icons.Get(Icons.Kind.Users, 13, Brand.Accent),
-                StretchMode = TextureRect.StretchModeEnum.KeepCentered,
-            });
-            var capLbl = new Label { Text = $"{capacity}" };
-            capLbl.AddThemeFontSizeOverride("font_size", Brand.Fs(11));
-            capLbl.AddThemeColorOverride("font_color", Brand.Accent);
-            footer.AddChild(capLbl);
-            vbox.AddChild(footer);
+                var card = MakeCard(avatar.name, "by " + Creator(avatar.author), "Wear avatar", Icons.Kind.Shirt, avatar.thumbUrl);
+                card.Pressed += () => { Hide(); AvatarChosen?.Invoke(avatar.id, avatar.dlUrl, avatar.name); };
+                _contentGrid.AddChild(card); count++;
+            }
         }
-
-        btn.Text = "";
-        return btn;
-    }
-
-    // Deterministic purple-family gradient so each card banner has a stable, distinct look.
-    private static StyleBoxFlat GradientBanner(string seed)
-    {
-        int h = 0;
-        foreach (char c in seed ?? "") h = h * 31 + c;
-        float hue = 0.72f + (Math.Abs(h) % 60) / 600f; // narrow band around the brand purple
-        var box = new StyleBoxFlat
+        else
         {
-            BgColor = Color.FromHsv(hue, 0.55f, 0.55f),
-            CornerRadiusTopLeft = 8, CornerRadiusTopRight = 8,
-            CornerRadiusBottomLeft = 8, CornerRadiusBottomRight = 8,
-        };
-        return box;
+            foreach (var world in _worldsCache.Where(w => Matches(w.name, w.desc, w.author)).OrderBy(w => w.name, StringComparer.OrdinalIgnoreCase))
+            {
+                _worldThumbnails.TryGetValue(world.id ?? "", out var thumbnailUrl);
+                var card = MakeCard(world.name, string.IsNullOrWhiteSpace(world.desc) ? "A place to spend time together." : world.desc,
+                    $"by {Creator(world.author)} · up to {world.cap}", Icons.Kind.Globe, thumbnailUrl);
+                card.TooltipText = $"{world.name}\n{world.desc}\nView world details and available instances";
+                card.Pressed += () => { Hide(); JoinWorldPressed?.Invoke(world.id); };
+                _contentGrid.AddChild(card); count++;
+            }
+        }
+        _scroll.Visible = count > 0;
+        _emptyState.Visible = count == 0;
+        _refreshBtn.Disabled = _loading[tab];
+        _clearBtn.Visible = !string.IsNullOrWhiteSpace(_search.Text);
+        _statusLabel.AddThemeColorOverride("font_color", string.IsNullOrEmpty(_errors[tab]) ? Brand.TextDim : Brand.Warning);
+        if (_loading[tab] || (!_loaded[tab] && string.IsNullOrEmpty(_errors[tab])))
+        {
+            _statusLabel.Text = count > 0 ? $"Refreshing {noun}… · {count} available" : $"Loading {noun}…";
+            _emptyTitle.Text = $"Loading {noun}…";
+            _emptyBody.Text = "Your catalogue will appear here in a moment.";
+        }
+        else if (!string.IsNullOrEmpty(_errors[tab]))
+        {
+            _statusLabel.Text = count > 0 ? "Could not refresh. Showing the saved catalogue." : $"Could not load {noun}.";
+            _emptyTitle.Text = "Couldn’t reach the catalogue";
+            _emptyBody.Text = _errors[tab] + "\nUse Refresh to try again.";
+        }
+        else
+        {
+            _statusLabel.Text = count == 1 ? $"1 {(avatars ? "avatar" : "world")}" : $"{count} {noun}";
+            _emptyTitle.Text = _clearBtn.Visible ? "No matches yet" : $"No {noun} available";
+            _emptyBody.Text = _clearBtn.Visible ? "Try another name or creator, or clear your search." : "Refresh to check for newly published content.";
+        }
+        FitColumns();
     }
+    private static string Creator(string author) => string.IsNullOrWhiteSpace(author) ? "Community" : author;
 
+    private Button MakeCard(string name, string description, string footer, Icons.Kind icon, string thumbUrl = null)
+    {
+        var button = new Button
+        {
+            Name = "CatalogueItem", CustomMinimumSize = new Vector2(210, _compact ? 214 : 230),
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill, TooltipText = name,
+        };
+        var normal = Brand.Panel(Brand.Bg2, 12, 1, Brand.BorderSoft); normal.ShadowSize = 0;
+        var hover = Brand.Panel(Brand.Bg3, 12, 1, Brand.Accent); hover.ShadowSize = 0;
+        button.AddThemeStyleboxOverride("normal", normal);
+        button.AddThemeStyleboxOverride("hover", hover);
+        button.AddThemeStyleboxOverride("pressed", hover);
+        button.AddThemeStyleboxOverride("focus", Brand.FocusRing(12));
+        var column = new VBoxContainer { MouseFilter = Control.MouseFilterEnum.Ignore };
+        column.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        column.OffsetLeft = column.OffsetTop = 12;
+        column.OffsetRight = column.OffsetBottom = -12;
+        column.AddThemeConstantOverride("separation", 7);
+        button.AddChild(column);
+        var banner = new PanelContainer { CustomMinimumSize = new Vector2(0, _compact ? 64 : 80), MouseFilter = Control.MouseFilterEnum.Ignore, ClipContents = true };
+        uint hash = 2166136261;
+        foreach (char character in name ?? "") hash = unchecked((hash ^ character) * 16777619);
+        var tint = Brand.Bg3.Lerp(Brand.PrimaryLo, 0.10f + (hash % 5) * 0.055f);
+        var bannerStyle = Brand.Panel(tint, 8, 0); bannerStyle.ShadowSize = 0;
+        banner.AddThemeStyleboxOverride("panel", bannerStyle);
+        column.AddChild(banner);
+        var mark = new TextureRect
+        {
+            Texture = Icons.Get(icon, 32, Brand.AccentSoft),
+            StretchMode = TextureRect.StretchModeEnum.KeepCentered,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        banner.AddChild(mark);
+        if (!string.IsNullOrEmpty(thumbUrl) && ImageLoader != null) _ = LoadThumb(banner, thumbUrl);
+        var title = Label(name, 16, Brand.TextHi);
+        title.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        column.AddChild(title);
+        var detail = Label(description, 13, Brand.TextMid);
+        detail.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        detail.MaxLinesVisible = 2;
+        detail.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        detail.CustomMinimumSize = new Vector2(0, 40);
+        column.AddChild(detail);
+        column.AddChild(new Control { SizeFlagsVertical = Control.SizeFlags.ExpandFill, MouseFilter = Control.MouseFilterEnum.Ignore });
+        var foot = Label(footer, 12, Brand.AccentSoft);
+        foot.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+        column.AddChild(foot);
+        return button;
+    }
     private async System.Threading.Tasks.Task LoadThumb(PanelContainer banner, string url)
     {
         try
         {
-            byte[] bytes = await ImageLoader(url);
-            if (bytes == null || bytes.Length == 0 || !IsInstanceValid(banner)) return;
-            var img = new Image();
-            // Decide by content, not by extension: the thumbnail CDN serves WebP from a URL
-            // that ends in "&q=85", so extension sniffing picked the wrong decoder and every
-            // avatar card fell back to its placeholder gradient.
-            Error err = img.LoadWebpFromBuffer(bytes);
-            if (err != Error.Ok) err = img.LoadPngFromBuffer(bytes);
-            if (err != Error.Ok) err = img.LoadJpgFromBuffer(bytes);
-            if (err != Error.Ok) { GD.PrintErr($"main-menu thumb decode failed: {url}"); return; }
-            var tex = ImageTexture.CreateFromImage(img);
-            var rect = new TextureRect
+            if (!_thumbnails.TryGetValue(url, out var texture))
             {
-                Texture = tex,
-                ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
-                StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
-                MouseFilter = Control.MouseFilterEnum.Ignore,
-            };
-            banner.AddChild(rect);
+                if (!_thumbnailLoads.TryGetValue(url, out var pending))
+                {
+                    pending = FetchThumbnail(url);
+                    _thumbnailLoads[url] = pending;
+                }
+                texture = await pending;
+                _thumbnailLoads.Remove(url);
+                if (texture != null) _thumbnails[url] = texture;
+            }
+            if (texture == null || !IsInstanceValid(banner) || banner.IsQueuedForDeletion()) return;
+            banner.AddChild(new TextureRect
+            {
+                Texture = texture, ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+                StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered, MouseFilter = Control.MouseFilterEnum.Ignore,
+            });
         }
-        catch (Exception e) { GD.PrintErr($"main-menu thumb load failed: {e.Message}"); }
+        catch (Exception exception) { _thumbnailLoads.Remove(url); GD.PrintErr($"catalogue thumbnail: {exception.Message}"); }
     }
-
+    private async System.Threading.Tasks.Task<Texture2D> FetchThumbnail(string url)
+    {
+        byte[] bytes = await ImageLoader(url);
+        if (bytes == null || bytes.Length == 0) return null;
+        var image = new Image();
+        Error error = image.LoadWebpFromBuffer(bytes);
+        if (error != Error.Ok) error = image.LoadPngFromBuffer(bytes);
+        if (error != Error.Ok) error = image.LoadJpgFromBuffer(bytes);
+        return error == Error.Ok ? ImageTexture.CreateFromImage(image) : null;
+    }
     public void Open(string username, int tab = 1)
     {
-        if (!string.IsNullOrEmpty(username)) _usernameLabel.Text = username;
-        _scrim.Visible = true;
-        _card.Visible = true;
+        _usernameLabel.Text = username ?? "";
         Visible = true;
+        Fit();
         SwitchBottomTab(tab);
+        // Start on a button in VR, so opening the catalogue does not summon a keyboard.
+        (_activeBottomTab == 2 ? _avatarTab : _worldTab).CallDeferred(Control.MethodName.GrabFocus);
     }
-
     public new void Hide()
     {
-        _scrim.Visible = false;
-        _card.Visible = false;
+        if (!Visible) return;
+        var focus = GetViewport().GuiGetFocusOwner();
+        if (focus != null && IsAncestorOf(focus)) focus.ReleaseFocus();
         Visible = false;
         Closed?.Invoke();
     }
-
     public bool IsOpen => Visible;
-
     public override void _UnhandledInput(InputEvent @event)
     {
-        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape } && IsOpen)
-        {
-            Hide();
-            GetViewport().SetInputAsHandled();
-        }
-    }
-
-    public override void _Process(double delta)
-    {
-        if (!IsOpen) return;
-        _clockTimer += delta;
-        if (_clockTimer >= 1.0)
-        {
-            _clockTimer = 0;
-            _clockLabel.Text = DateTime.Now.ToString("HH:mm");
-        }
+        if (@event is InputEventKey { Pressed: true, Echo: false, Keycode: Key.Escape } && IsOpen)
+        { Hide(); GetViewport().SetInputAsHandled(); }
     }
 }

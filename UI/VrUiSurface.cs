@@ -236,6 +236,8 @@ public partial class VrUiSurface : Node3D
     /// `UpdateMode.Always` re-rendered a 1600×1000 target and composited a transparent quad every
     /// single frame for the whole session, menu open or not — a fixed tax on the exact device that
     /// can least afford it. The panel only has to be live while some layer is visible.
+    public void RefreshVisibility() => _visibilityPoll = 0;
+
     public override void _Process(double delta)
     {
         // Polled a few times a second rather than every frame: walking the child list allocates a
@@ -368,9 +370,8 @@ public partial class VrUiSurface : Node3D
     /// Returns false when the point misses the panel.
     ///
     /// For the curved panel the mapping is done by projecting the point into local space and
-    /// converting the local X into an arc-angle UV. The curvature is subtle enough (~14°) that
-    /// the error from treating the hit point as if it were on a flat plane is negligible for
-    /// pointer tracking — but we do the proper curved mapping anyway.
+    /// converting its position around the cylinder into an arc-angle UV. RayHit uses the same
+    /// cylinder, so drawing and clicking share one geometry even at oblique angles.
     public bool WorldToViewport(Vector3 worldPoint, out Vector2 viewportPos)
     {
         viewportPos = default;
@@ -387,7 +388,7 @@ public partial class VrUiSurface : Node3D
         // Local +Y is up, viewport +Y is down.
         float v = 0.5f - local.Y / panelHeight;
 
-        if (u < -0.05f || u > 1.05f || v < -0.05f || v > 1.05f) return false;
+        if (u < 0f || u > 1f || v < 0f || v > 1f) return false;
         u = Mathf.Clamp(u, 0f, 1f);
         v = Mathf.Clamp(v, 0f, 1f);
 
@@ -395,24 +396,37 @@ public partial class VrUiSurface : Node3D
         return true;
     }
 
-    /// Intersect a ray with the curved panel. Approximated as a flat plane perpendicular to
-    /// the panel's forward direction — the curvature is only ~14° so the error is sub-millimetre,
-    /// and the proper curved mapping in WorldToViewport handles the UV accurately.
+    /// Intersect the actual cylindrical surface, including its visible arc and height bounds.
+    /// A plane approximation shifts oblique controller hits near the panel edges.
     public bool RayHit(Vector3 origin, Vector3 direction, out Vector3 hit)
     {
         hit = default;
-        // An idle panel is not drawn, so it must not be clickable either — otherwise the ray
-        // still lands on an invisible slab and pushes events at hidden layers.
         if (Panel == null || !Panel.Visible) return false;
-        var xform = Panel.GlobalTransform;
-        var normal = xform.Basis.Z.Normalized();
-        float denom = normal.Dot(direction);
-        if (denom >= -0.0001f) return false;
-
-        float t = normal.Dot(xform.Origin - origin) / denom;
-        if (t < 0f) return false;
-
-        hit = origin + direction * t;
-        return true;
+        var inverse = Panel.GlobalTransform.AffineInverse();
+        var localOrigin = inverse * origin;
+        var localDirection = inverse.Basis * direction;
+        float halfAngle = Mathf.DegToRad(CurveAngleDeg) * .5f;
+        float radius = PanelWidth / (2 * Mathf.Sin(halfAngle));
+        var p = localOrigin - new Vector3(0, 0, radius);
+        float a = localDirection.X * localDirection.X + localDirection.Z * localDirection.Z;
+        if (a < .000001f) return false;
+        float b = 2 * (p.X * localDirection.X + p.Z * localDirection.Z);
+        float c = p.X * p.X + p.Z * p.Z - radius * radius;
+        float discriminant = b * b - 4 * a * c;
+        if (discriminant < 0) return false;
+        float root = Mathf.Sqrt(discriminant);
+        for (int i = 0; i < 2; i++)
+        {
+            float t = (-b + (i == 0 ? -root : root)) / (2 * a);
+            if (t < 0 || t > 8f) continue;
+            var localHit = localOrigin + localDirection * t;
+            var front = new Vector3(-localHit.X, 0, radius - localHit.Z).Normalized();
+            if (front.Dot(localDirection) >= -.0001f) continue;
+            var worldHit = Panel.GlobalTransform * localHit;
+            if (!WorldToViewport(worldHit, out _)) continue;
+            hit = worldHit;
+            return true;
+        }
+        return false;
     }
 }

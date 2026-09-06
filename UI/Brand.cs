@@ -11,10 +11,10 @@ namespace SerikaSocial;
 public static class Brand
 {
     // ── Palette ──────────────────────────────────────────────────────────────────────
-    public static readonly Color Bg0 = Hex(0x0E0A1A);       // deepest background
-    public static readonly Color Bg1 = Hex(0x171130);       // panel
-    public static readonly Color Bg2 = Hex(0x201743);       // elevated / row
-    public static readonly Color Bg3 = Hex(0x2B1F5C);       // hover row
+    public static readonly Color Bg0 = Hex(0x101019);       // deepest background
+    public static readonly Color Bg1 = Hex(0x191723);       // panel
+    public static readonly Color Bg2 = Hex(0x24212F);       // elevated / row
+    public static readonly Color Bg3 = Hex(0x302B40);       // hover row
     public static readonly Color Border = new(0.42f, 0.32f, 0.72f, 0.45f);
     public static readonly Color BorderSoft = new(0.42f, 0.32f, 0.72f, 0.22f);
 
@@ -25,8 +25,8 @@ public static class Brand
     public static readonly Color AccentSoft = Hex(0xC4B5FD);
 
     public static readonly Color TextHi = Hex(0xF5F3FF);
-    public static readonly Color TextMid = Hex(0xC7BCE6);
-    public static readonly Color TextDim = Hex(0x8A7FB0);
+    public static readonly Color TextMid = Hex(0xD0CADF);
+    public static readonly Color TextDim = Hex(0xAAA1BD);
 
     public static readonly Color Success = Hex(0x34D399);
     public static readonly Color Danger = Hex(0xF87171);
@@ -65,13 +65,31 @@ public static class Brand
         return s;
     }
 
+    /// Visible keyboard and controller focus, drawn over a control's normal appearance.
+    public static StyleBoxFlat FocusRing(float radius = 10)
+    {
+        var focus = Panel(Colors.Transparent, radius, 2, AccentSoft);
+        focus.DrawCenter = false;
+        focus.ShadowSize = 0;
+        return focus;
+    }
+
+    /// Give a new menu a card size that fits its actual viewport, including desktop windows.
+    public static Vector2 FitCard(Viewport viewport, float width, float height)
+    {
+        var available = viewport.GetVisibleRect().Size - new Vector2(40, 40);
+        var preferred = Card(width, height);
+        return new Vector2(Mathf.Min(preferred.X, Mathf.Max(280, available.X)),
+            Mathf.Min(preferred.Y, Mathf.Max(260, available.Y)));
+    }
+
     /// Turn a Button into the emphasised, filled violet primary action.
     public static Button Primary_(Button b)
     {
         b.AddThemeStyleboxOverride("normal", Btn(Primary, PrimaryHi));
         b.AddThemeStyleboxOverride("hover", Btn(PrimaryHi, Accent));
         b.AddThemeStyleboxOverride("pressed", Btn(PrimaryLo, PrimaryLo));
-        b.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
+        b.AddThemeStyleboxOverride("focus", FocusRing());
         b.AddThemeColorOverride("font_color", TextHi);
         b.AddThemeColorOverride("font_hover_color", Colors.White);
         b.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
@@ -84,7 +102,7 @@ public static class Brand
         b.AddThemeStyleboxOverride("normal", Btn(Bg2, BorderSoft));
         b.AddThemeStyleboxOverride("hover", Btn(Bg3, Border));
         b.AddThemeStyleboxOverride("pressed", Btn(Bg2, Border));
-        b.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
+        b.AddThemeStyleboxOverride("focus", FocusRing());
         b.AddThemeColorOverride("font_color", TextMid);
         b.AddThemeColorOverride("font_hover_color", TextHi);
         b.AddThemeFontSizeOverride("font_size", Brand.Fs(15));
@@ -101,12 +119,16 @@ public static class Brand
 
         // Label
         t.SetColor("font_color", "Label", TextMid);
+        t.SetColor("font_color", "RichTextLabel", TextMid);
+        var separator = new StyleBoxLine { Color = BorderSoft, Thickness = 1 };
+        t.SetStylebox("separator", "HSeparator", separator);
+        t.SetConstant("separation", "HSeparator", 10);
 
         // Button (base = ghost look; call Brand.Primary_ for the filled action)
         t.SetStylebox("normal", "Button", Btn(Bg2, BorderSoft));
         t.SetStylebox("hover", "Button", Btn(Bg3, Border));
         t.SetStylebox("pressed", "Button", Btn(Bg2, Border));
-        t.SetStylebox("focus", "Button", new StyleBoxEmpty());
+        t.SetStylebox("focus", "Button", FocusRing());
         t.SetStylebox("disabled", "Button", Btn(Bg1, BorderSoft));
         t.SetColor("font_color", "Button", TextMid);
         t.SetColor("font_hover_color", "Button", TextHi);
@@ -135,11 +157,21 @@ public static class Brand
 
         // ScrollContainer / scrollbars
         t.SetStylebox("panel", "ScrollContainer", new StyleBoxEmpty());
-        t.SetStylebox("grabber", "VScrollBar", Panel(Border, 4, 0));
-        t.SetStylebox("grabber_highlight", "VScrollBar", Panel(Accent, 4, 0));
-        t.SetStylebox("scroll", "VScrollBar", Panel(Bg0, 4, 0));
+        t.SetStylebox("grabber", "VScrollBar", ScrollBarStyle(Border));
+        t.SetStylebox("grabber_highlight", "VScrollBar", ScrollBarStyle(Accent));
+        t.SetStylebox("grabber_pressed", "VScrollBar", ScrollBarStyle(AccentSoft));
+        t.SetStylebox("scroll", "VScrollBar", ScrollBarStyle(Bg0));
 
         return t;
+    }
+
+    private static StyleBoxFlat ScrollBarStyle(Color color)
+    {
+        var style = Panel(color, 4, 0);
+        style.ShadowSize = 0;
+        style.ContentMarginLeft = style.ContentMarginRight = 6;
+        style.ContentMarginTop = style.ContentMarginBottom = 8;
+        return style;
     }
 
     /// The dimming layer behind a modal screen, anchored to fill its parent.
