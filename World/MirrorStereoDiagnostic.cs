@@ -568,10 +568,16 @@ public static partial class MirrorStereoDiagnostic
             {
                 _sim = new Player.VrSimDevice();
                 _sim.Install();
-                // Stand the play space so the head lands 2.4 m in front of the glass, facing it.
+                // Stand close enough that the glass fills each eye. This exercises the per-eye
+                // source-window crop rather than merely proving the normal full-glass path.
                 _origin = new XROrigin3D { Name = "SimOrigin" };
                 _st.Root.AddChild(_origin);
-                _origin.GlobalPosition = new Vector3(0, 0, MirrorZ - 2.4f);
+                _origin.GlobalPosition = new Vector3(0, 0, MirrorZ - .30f);
+                // Godot cameras look along local -Z. The glass faces this test position from
+                // +Z, so turn the simulated head toward it just as the mono probe does. Leaving
+                // the origin at identity made its corner rays point away from the glass and
+                // correctly disabled close-window cropping as an unsafe edge case.
+                _origin.GlobalRotation = new Vector3(0, Mathf.Pi, 0);
                 _xrCam = new XRCamera3D { Name = "SimXrCam", Near = 0.05f, Far = 400f, Current = true };
                 _origin.AddChild(_xrCam);
 
@@ -627,8 +633,17 @@ public static partial class MirrorStereoDiagnostic
 
                 foreach (var defect in MirrorDiagnostic.WindowDefects(_st.Glass, cam, vp))
                     _cNotes.Add($"view {view}: {defect}");
+                Vector4 crop = _st.Glass.TextureWindowForDiagnostic(cam);
+                Vector2 cropSpan = new(crop.Z - crop.X, crop.W - crop.Y);
+                if (cropSpan.X >= .75f || cropSpan.Y >= .5f)
+                    _cNotes.Add($"view {view}: close reflection did not crop its source window ({cropSpan})");
+                float targetPixels = vp.Size.X * vp.Size.Y;
+                float budgetPixels = _xr.GetRenderTargetSize().X * _xr.GetRenderTargetSize().Y *
+                                     UI.DeviceProfile.MirrorResolutionScale * UI.DeviceProfile.MirrorResolutionScale;
+                if (targetPixels > budgetPixels * 1.05f)
+                    _cNotes.Add($"view {view}: close target uses {targetPixels:0} px over its {budgetPixels:0} px budget");
                 GD.Print($"MIRRORSTEREO view{view} eye={eye.Origin} camera={cam.GlobalPosition} " +
-                    $"posErr={posErr * 1000:0.00}mm near={cam.Near:0.000} vp={vp.Size}");
+                    $"posErr={posErr * 1000:0.00}mm near={cam.Near:0.000} vp={vp.Size} crop={cropSpan}");
             }
 
             // The two eyes must not collapse onto one camera — that is precisely the old bug.

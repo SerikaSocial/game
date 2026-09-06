@@ -40,10 +40,9 @@ public static class DeviceProfile
 
     /// A mirror's reflection resolution, as a fraction of the main viewport's pixel size.
     ///
-    /// The mirror shader samples its texture by SCREEN_UV, so the reflection is a screen-space
-    /// image: it is sharp only when the render target matches the screen's pixel dimensions.
-    /// Sizing it from the mirror's physical metres instead — which is what it used to do — left
-    /// a 2.2 m mirror rendering 660 px tall and then upscaled ~1.6× on a 1080p display.
+    /// The mirror camera spends this budget on the whole glass unless the glass fills the view.
+    /// In that close-up case it crops to the visible physical patch and remaps local UVs, so the
+    /// same target reaches screen density without allocating a giant full-glass render texture.
     public static float MirrorResolutionScale => Current switch
     {
         Tier.Low => 0.6f,

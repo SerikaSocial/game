@@ -88,18 +88,28 @@ public static partial class MirrorDiagnostic
         var normal = surface.GlobalBasis.Z.Normalized();
         if ((-camera.GlobalBasis.Z).Dot(normal) < .9999f)
             yield return "reflection near plane is not parallel to the glass";
+        Vector4 rect = mirror.TextureWindowForDiagnostic(camera);
+        Vector2 rectMin = new(rect.X, rect.Y);
+        Vector2 rectSize = new(rect.Z - rect.X, rect.W - rect.Y);
+        // With a close-up texture window the physical glass corners deliberately sit outside
+        // the reflection frustum. Probe the cropped rectangle's interior corners and centre:
+        // those are the texels the player can actually see, and they retain enough inset that
+        // the lateral frustum boundary cannot be mistaken for near-plane clipping.
         for (int i = 0; i < 5; i++)
         {
-            float x = i == 4 ? 0 : (i & 1) == 0 ? -.5f : .5f;
-            float y = i == 4 ? 0 : (i & 2) == 0 ? -.5f : .5f;
+            float tx = i == 4 ? .5f : (i & 1) == 0 ? .15f : .85f;
+            float ty = i == 4 ? .5f : (i & 2) == 0 ? .15f : .85f;
+            Vector2 expectedUv = new(tx, ty);
+            Vector2 fullUv = rectMin + rectSize * expectedUv;
+            float x = .5f - fullUv.X;
+            float y = .5f - fullUv.Y;
             Vector3 point = surface.GlobalTransform * new Vector3(size.X * x, size.Y * y, 0);
             Vector2 uv = camera.UnprojectPosition(point) / (Vector2)viewport.Size;
-            if (uv.DistanceTo(new Vector2(.5f - x, .5f - y)) > .002f)
+            if (uv.DistanceTo(expectedUv) > .002f)
                 yield return $"glass sample {i}: reflected UV {uv} does not match its corner";
-            var interior = surface.GlobalPosition.Lerp(point, .8f);
-            if (camera.IsPositionInFrustum(interior - normal * .05f))
+            if (camera.IsPositionInFrustum(point - normal * .05f))
                 yield return $"glass sample {i}: backing wall leaks through near plane";
-            if (!camera.IsPositionInFrustum(interior + normal * .03f))
+            if (!camera.IsPositionInFrustum(point + normal * .03f))
                 yield return $"glass sample {i}: valid room geometry clipped away";
         }
     }
@@ -177,6 +187,10 @@ public static partial class MirrorDiagnostic
         st.Poses.Add((0, 5.2, 1.6));
         st.Poses.Add((24, 4.6, 1.0));
         st.Poses.Add((-24, 4.6, 1.0));
+        // A mirror fills the camera here. It used to stretch a 15%-wide centre patch of the
+        // full-glass texture across the display, so the usual 1.3 m closest pose could not
+        // expose the resolution regression reported from the hub.
+        st.Poses.Add((0, .30, 1.1));
 
         st.Cam = new Camera3D
         {
@@ -596,6 +610,21 @@ public static partial class MirrorDiagnostic
                     problems.Add($"{pl.Label}: reflection-cam off mirrored-eye by {eyeErr * 1000:0.0} mm");
 
                 problems.AddRange(WindowDefects(pl.Node, mirCam, vp));
+
+                if (r <= .55 && ReferenceEquals(pl, _st.Planes[0]))
+                {
+                    Vector4 window = pl.Node.TextureWindowForDiagnostic(mirCam);
+                    Vector2 span = new(window.Z - window.X, window.W - window.Y);
+                    Vector2 mainSize = _st.Root.GetViewport().GetVisibleRect().Size;
+                    float budgetPixels = mainSize.X * mainSize.Y *
+                                         UI.DeviceProfile.MirrorResolutionScale * UI.DeviceProfile.MirrorResolutionScale;
+                    float targetPixels = vp.Size.X * vp.Size.Y;
+                    if (span.X >= .75f || span.Y >= .5f)
+                        problems.Add($"{pl.Label}: close full-screen view did not crop its source window ({span})");
+                    if (targetPixels > budgetPixels * 1.05f)
+                        problems.Add($"{pl.Label}: close target uses {targetPixels:0} px over its {budgetPixels:0} px budget");
+                    GD.Print($"MIRRORTEST close {pl.Label}: crop={span} target={vp.Size} budget={budgetPixels:0}");
+                }
             }
 
             // ── Optical probes: does the glass show the physically correct image? ─────

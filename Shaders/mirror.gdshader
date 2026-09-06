@@ -14,9 +14,14 @@ uniform sampler2D mirror_texture : source_color, filter_linear_mipmap;
 // View 1 — the RIGHT eye. Bound only once a mirror has run a stereo frame; on desktop it is
 // never sampled, because VIEW_INDEX is 0 outside multiview.
 uniform sampler2D mirror_texture_r : source_color, filter_linear_mipmap;
+// The reflected camera normally covers all of the glass. When the glass completely fills the
+// player's view, Mirror.cs crops it to only the visible patch so close-up pixels stay sharp.
+// xy = that patch's minimum coordinate in the normal full-glass reflection texture; zw = max.
+uniform vec4 mirror_uv_rect = vec4(0.0, 0.0, 1.0, 1.0);
+uniform vec4 mirror_uv_rect_r = vec4(0.0, 0.0, 1.0, 1.0);
 
 void fragment() {
-	vec2 uv = vec2(1.0 - UV.x, UV.y);
+	vec2 full_uv = vec2(1.0 - UV.x, UV.y);
 	// In XR the scene is rendered once per eye with two DIFFERENT, asymmetric projections, so
 	// one reflection cannot serve both: Mirror.cs renders one per view and this picks between
 	// them. VIEW_INDEX is 0 for mono, so desktop samples the first texture.
@@ -34,7 +39,13 @@ void fragment() {
 	// Desktop cannot catch it by default: the project runs Forward+/Vulkan while
 	// `renderer/rendering_method.mobile` is `gl_compatibility`. Run diagnostics with
 	// `--rendering-method gl_compatibility` to compile shaders the way the Quest will.
-	vec3 reflected = int(VIEW_INDEX) == 0
+	bool left_view = int(VIEW_INDEX) == 0;
+	vec4 crop = left_view ? mirror_uv_rect : mirror_uv_rect_r;
+	// The cropped render target spans [crop.xy, crop.zw] in the old full-glass texture
+	// coordinates. Rebase local surface UVs into that target rather than stretching the whole
+	// physical mirror across a close-up view.
+	vec2 uv = (full_uv - crop.xy) / max(crop.zw - crop.xy, vec2(0.0001));
+	vec3 reflected = left_view
 		? texture(mirror_texture, uv).rgb
 		: texture(mirror_texture_r, uv).rgb;
 	ALBEDO = reflected * color.rgb;

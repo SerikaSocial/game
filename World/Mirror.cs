@@ -28,6 +28,36 @@ public partial class Mirror : Node3D
     /// (a stereo mirror costs twice a mono one) and by the diagnostics.
     private bool _stereoActive;
 
+    // A reflection texture normally represents the complete physical sheet of glass. When the
+    // player is close enough that the glass fills their view, only a tiny centre patch of that
+    // texture reaches the display. This window lets the reflection camera render that visible
+    // patch directly, while the shader remaps local glass UVs into the cropped texture.
+    //
+    // Coordinates use the reflection texture's natural orientation: (0, 0) is the full glass's
+    // top-left in the off-axis camera, after its horizontal mirror flip.
+    private readonly struct TextureWindow
+    {
+        public static readonly TextureWindow Full = new(Vector2.Zero, Vector2.One);
+
+        public readonly Vector2 Min;
+        public readonly Vector2 Max;
+
+        public TextureWindow(Vector2 min, Vector2 max)
+        {
+            Min = min;
+            Max = max;
+        }
+
+        public Vector2 Size => Max - Min;
+        public Vector4 AsVector4 => new(Min.X, Min.Y, Max.X, Max.Y);
+
+        public bool IsApprox(TextureWindow other) =>
+            Min.DistanceSquaredTo(other.Min) < 1e-8f && Max.DistanceSquaredTo(other.Max) < 1e-8f;
+    }
+
+    private TextureWindow _textureWindowL = TextureWindow.Full;
+    private TextureWindow _textureWindowR = TextureWindow.Full;
+
     public Mirror(float width = 1.4f, float height = 2.2f, float activeRange = 12f)
     {
         _size = new Vector2(width, height);
@@ -80,6 +110,8 @@ public partial class Mirror : Node3D
             _liveMaterial = new ShaderMaterial { Shader = mirrorShader };
             _liveMaterial.SetShaderParameter("color", new Color(0.9f, 0.97f, 0.94f));
             _liveMaterial.SetShaderParameter("mirror_texture", _viewport.GetTexture());
+            _liveMaterial.SetShaderParameter("mirror_uv_rect", _textureWindowL.AsVector4);
+            _liveMaterial.SetShaderParameter("mirror_uv_rect_r", _textureWindowR.AsVector4);
             _surface.MaterialOverride = _liveMaterial;
             _showingLive = true;
         }
@@ -269,7 +301,8 @@ public partial class Mirror : Node3D
         if (xr == null)
         {
             RenderView(_viewport, _mirrorCam, viewer.GlobalTransform,
-                       viewer.Far, mirrorNormal, planePos, WantedSize());
+                       viewer.GetCameraProjection(), viewer.Far, mirrorNormal, planePos,
+                       WantedSize(), false);
             // The right eye's target must not keep ticking after a headset is taken off.
             if (_viewportR != null) _viewportR.RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled;
             return;
@@ -288,8 +321,10 @@ public partial class Mirror : Node3D
 
         Transform3D originXf = xrOrigin.GlobalTransform;
         Vector2I baseSize = XrViewSize(xr);
-        RenderEye(xr, 0, _viewport, _mirrorCam, originXf, viewer.Far, mirrorNormal, planePos, baseSize);
-        RenderEye(xr, 1, _viewportR, _mirrorCamR, originXf, viewer.Far, mirrorNormal, planePos, baseSize);
+        RenderEye(xr, 0, _viewport, _mirrorCam, originXf, viewer.Near, viewer.Far,
+                  mirrorNormal, planePos, baseSize);
+        RenderEye(xr, 1, _viewportR, _mirrorCamR, originXf, viewer.Near, viewer.Far,
+                  mirrorNormal, planePos, baseSize);
     }
 
     /// The stereo `XRInterface` driving the main viewport, or null when this frame is mono.
@@ -323,18 +358,21 @@ public partial class Mirror : Node3D
     }
 
     private void RenderEye(XRInterface xr, uint view, SubViewport vp, Camera3D cam,
-                           Transform3D originXf, float far, Vector3 mirrorNormal, Vector3 planePos,
-                           Vector2I baseSize)
+                           Transform3D originXf, float viewerNear, float far,
+                           Vector3 mirrorNormal, Vector3 planePos, Vector2I baseSize)
     {
         // Per-eye position determines the off-axis view through the same physical glass.
         // Head orientation and lens projection are applied when the headset draws that quad.
-        RenderView(vp, cam, xr.GetTransformForView(view, originXf),
-                   far, mirrorNormal, planePos, baseSize);
+        float aspect = baseSize.X / Mathf.Max(1f, baseSize.Y);
+        Transform3D eye = xr.GetTransformForView(view, originXf);
+        RenderView(vp, cam, eye, xr.GetProjectionForView(view, aspect, viewerNear, far),
+                   far, mirrorNormal, planePos, baseSize, view == 1);
     }
 
     /// Frame the physical glass from one reflected eye with a parallel clipping plane.
-    private void RenderView(SubViewport vp, Camera3D cam, Transform3D eye,
-                            float far, Vector3 mirrorNormal, Vector3 planePos, Vector2I baseSize)
+    private void RenderView(SubViewport vp, Camera3D cam, Transform3D eye, Projection viewerProjection,
+                            float far, Vector3 mirrorNormal, Vector3 planePos, Vector2I baseSize,
+                            bool rightEye)
     {
         // Treat the glass as a window seen from the reflected eye. Keeping the camera axes
         // parallel to that window makes the ENTIRE host wall fall behind the near plane.
@@ -346,23 +384,109 @@ public partial class Mirror : Node3D
         var basis = new Basis(-right, up, -mirrorNormal);
         Vector3 reflectedEye = eye.Origin - 2f * mirrorNormal.Dot(eye.Origin - planePos) * mirrorNormal;
         cam.GlobalTransform = new Transform3D(basis, reflectedEye);
-        Vector3 window = basis.Inverse() * (planePos - reflectedEye);
+        float fullWidth = _size.X * surfaceBasis.X.Length();
+        float fullHeight = _size.Y * surfaceBasis.Y.Length();
+        TextureWindow textureWindow = VisibleTextureWindow(eye, viewerProjection, planePos, mirrorNormal);
+        SetTextureWindow(rightEye, textureWindow);
+
+        // A full-screen close-up sees only this sub-rectangle. Frame it directly so the normal
+        // per-view pixel budget is spent on pixels that can actually reach the player, rather
+        // than on metres of glass outside their view.
+        Vector2 cropSize = textureWindow.Size;
+        float width = fullWidth * cropSize.X;
+        float height = fullHeight * cropSize.Y;
+        Vector2 cropMid = (textureWindow.Min + textureWindow.Max) * .5f;
+        Vector3 cropCentre = planePos + right * ((.5f - cropMid.X) * fullWidth) +
+                             up * ((.5f - cropMid.Y) * fullHeight);
+        Vector3 window = basis.Inverse() * (cropCentre - reflectedEye);
         float distance = Mathf.Max(.001f, -window.Z);
         float near = distance + .01f;
         float scale = near / distance;
-        float width = _size.X * surfaceBasis.X.Length();
-        float height = _size.Y * surfaceBasis.Y.Length();
         float ratio = width / height;
 
-        // Spend at most the existing per-view pixel budget. The target's aspect follows the
-        // glass; UV sampling maps its four corners back to the four physical glass corners.
-        int h = Mathf.Max(64, Mathf.RoundToInt(Mathf.Min(baseSize.Y, baseSize.X / ratio)));
+        // Spend at most the existing per-view pixel budget. Quantising the height avoids a
+        // render-target reallocation on every millimetre of head movement while preserving the
+        // crop's exact aspect ratio.
+        int rawHeight = Mathf.Max(64, Mathf.RoundToInt(Mathf.Min(baseSize.Y, baseSize.X / ratio)));
+        int h = rawHeight > 96 ? Mathf.Max(64, rawHeight / 16 * 16) : rawHeight;
         var want = new Vector2I(Mathf.Max(64, Mathf.RoundToInt(h * ratio)), h);
         if (vp.Size != want) vp.Size = want;
         cam.SetFrustum(height * scale, new Vector2(window.X, window.Y) * scale,
             near, Mathf.Max(far, near + .1f));
         vp.RenderTargetUpdateMode = SubViewport.UpdateMode.Always;
     }
+
+    /// Return the full-glass texture rectangle which covers the player's current view. It is
+    /// only safe to crop when every screen-corner ray lands inside this mirror; otherwise a
+    /// player can see the mirror's edge and needs the normal whole-glass texture. The padding
+    /// gives fast head motion a few pixels of safety at the view edge.
+    private TextureWindow VisibleTextureWindow(Transform3D eye, Projection viewerProjection,
+                                               Vector3 planePos, Vector3 mirrorNormal)
+    {
+        float projectionNear = Mathf.Max(.001f, viewerProjection.GetZNear());
+        DecodeFrustum(viewerProjection, projectionNear, out float viewHeight, out Vector2 viewCentre,
+                       out float viewRatio);
+        float viewWidth = viewHeight * viewRatio;
+        if (viewWidth <= 0f || viewHeight <= 0f) return TextureWindow.Full;
+
+        Vector2 min = new(float.PositiveInfinity, float.PositiveInfinity);
+        Vector2 max = new(float.NegativeInfinity, float.NegativeInfinity);
+        for (int yi = 0; yi < 2; yi++)
+        for (int xi = 0; xi < 2; xi++)
+        {
+            float x = viewCentre.X + (xi == 0 ? -.5f : .5f) * viewWidth;
+            float y = viewCentre.Y + (yi == 0 ? -.5f : .5f) * viewHeight;
+            Vector3 ray = (eye.Basis * new Vector3(x, y, -projectionNear)).Normalized();
+            float facing = mirrorNormal.Dot(ray);
+            if (facing >= -1e-5f) return TextureWindow.Full;
+            float travel = mirrorNormal.Dot(planePos - eye.Origin) / facing;
+            if (travel <= .001f) return TextureWindow.Full;
+
+            Vector3 local = _surface.ToLocal(eye.Origin + ray * travel);
+            // `fullUv` is the texture-coordinate counterpart to `vec2(1.0 - UV.x, UV.y)` in
+            // the shader. Its axes are therefore already in the reflected-camera orientation.
+            Vector2 fullUv = new(.5f - local.X / _size.X, .5f - local.Y / _size.Y);
+            if (fullUv.X <= 0f || fullUv.X >= 1f || fullUv.Y <= 0f || fullUv.Y >= 1f)
+                return TextureWindow.Full;
+            min = min.Min(fullUv);
+            max = max.Max(fullUv);
+        }
+
+        Vector2 span = max - min;
+        if (span.X >= .98f && span.Y >= .98f) return TextureWindow.Full;
+
+        // Overscan is proportional to the visible patch, with a small absolute floor. It keeps
+        // the shader from sampling right on a cropped texture border as a head turns.
+        Vector2 pad = new(Mathf.Max(.01f, span.X * .10f), Mathf.Max(.01f, span.Y * .10f));
+        min = (min - pad).Max(Vector2.Zero);
+        max = (max + pad).Min(Vector2.One);
+        if (max.X - min.X < .01f || max.Y - min.Y < .01f) return TextureWindow.Full;
+        return new TextureWindow(min, max);
+    }
+
+    private void SetTextureWindow(bool rightEye, TextureWindow textureWindow)
+    {
+        if (rightEye)
+        {
+            if (_textureWindowR.IsApprox(textureWindow)) return;
+            _textureWindowR = textureWindow;
+        }
+        else
+        {
+            if (_textureWindowL.IsApprox(textureWindow)) return;
+            _textureWindowL = textureWindow;
+        }
+        _liveMaterial?.SetShaderParameter(rightEye ? "mirror_uv_rect_r" : "mirror_uv_rect",
+                                           textureWindow.AsVector4);
+    }
+
+    // Kept internal for the rendered diagnostics. It lets them assert that a close full-screen
+    // mirror really uses a cropped source window, not a high-cost oversized full-glass target.
+    internal Vector4 TextureWindowForDiagnostic(Camera3D camera) =>
+        ReferenceEquals(camera, _mirrorCamR) ? _textureWindowR.AsVector4 : _textureWindowL.AsVector4;
+
+    internal Vector2I TextureTargetSizeForDiagnostic(Camera3D camera) =>
+        ReferenceEquals(camera, _mirrorCamR) && _viewportR != null ? _viewportR.Size : _viewport.Size;
 
     /// Recover a frustum's near-plane rectangle from its projection matrix, restated at `near`.
     ///
