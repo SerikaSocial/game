@@ -38,7 +38,7 @@ public partial class Main
         if (_eventControlsHint != null) {
             _eventControlsHint.Visible = _eventVenue;
             _eventControlsHint.Text = _vrMode ? "Concert venue · Jumping disabled" :
-                $"{KeyBindings.KeyFor("toggle_view")} · Focus stage / return to audience view   ·   Jumping disabled";
+                $"{KeyBindings.KeyFor("toggle_view")} · Tracked stage camera / first-person view   ·   Jumping disabled";
         }
         if (!GodotObject.IsInstanceValid(_eventFocusCamera)) return;
         if (!_eventVenue || !GodotObject.IsInstanceValid(_eventShow) || !_eventShow.ReadyToPlay) { LeaveEventFocus(); return; }

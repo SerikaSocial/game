@@ -41,7 +41,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             if (value) _beforeEventCamera = _cameraMode;
             _eventAudienceMode = value;
             ExternalJump = false;
-            SetCameraMode(value ? CameraModeEnum.ThirdPersonBack : _beforeEventCamera);
+            SetCameraMode(value ? CameraModeEnum.FirstPerson : _beforeEventCamera);
         }
     }
     public bool JumpEnabled => !EventAudienceMode;
@@ -198,7 +198,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
     public CameraModeEnum CycleCameraMode()
     {
-        _cameraMode = EventAudienceMode ? CameraModeEnum.ThirdPersonBack : _cameraMode switch
+        _cameraMode = EventAudienceMode ? CameraModeEnum.FirstPerson : _cameraMode switch
         {
             CameraModeEnum.FirstPerson => CameraModeEnum.ThirdPersonBack,
             CameraModeEnum.ThirdPersonBack => CameraModeEnum.ThirdPersonFront,
@@ -210,7 +210,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
     public void SetCameraMode(CameraModeEnum mode)
     {
-        _cameraMode = EventAudienceMode ? CameraModeEnum.ThirdPersonBack : mode;
+        _cameraMode = EventAudienceMode ? CameraModeEnum.FirstPerson : mode;
         ApplyCameraMode();
     }
 
