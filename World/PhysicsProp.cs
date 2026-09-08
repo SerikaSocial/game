@@ -53,6 +53,11 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
     private Vector3 _targetVel;
     private bool _hasTarget;
     private double _syncTimer;
+    private double _sinceSync;      // seconds since the last ObjectSync for this prop
+
+    // Held-remote staleness: if syncs stop while someone remote is holding, they left
+    // mid-grab and nobody will ever send the release — unfreeze rather than levitate.
+    private const double RemoteHoldTimeout = 0.75;
 
     // The static body we swap to when held (so we can move it manually)
     private bool _wasSleeping;
@@ -118,17 +123,30 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         {
             if (_held)
             {
-                // Someone else is holding — snap more aggressively
-                GlobalPosition = GlobalPosition.Lerp(_targetPos, dt * 15f);
-                var curRot = Quaternion.FromEuler(GlobalRotation);
-                var newRot = curRot.Slerp(_targetRot, dt * 15f);
-                GlobalRotation = newRot.GetEuler();
+                _sinceSync += delta;
+                if (_sinceSync > RemoteHoldTimeout)
+                {
+                    // The remote holder vanished (left, crashed, teleported away) and the
+                    // release frame never came. Drop the prop back into local physics
+                    // instead of leaving it frozen in mid-air forever.
+                    _held = false;
+                    Freeze = false;
+                    LinearVelocity = Vector3.Zero;
+                    _hasTarget = false;
+                }
+                else
+                {
+                    // Someone else is holding — snap more aggressively
+                    GlobalPosition = GlobalPosition.Lerp(_targetPos, dt * 15f);
+                    var curRot = Quaternion.FromEuler(GlobalRotation);
+                    var newRot = curRot.Slerp(_targetRot, dt * 15f);
+                    GlobalRotation = newRot.GetEuler();
+                }
             }
-            else
-            {
-                // Free physics — apply velocity from network
-                LinearVelocity = LinearVelocity.Lerp(_targetVel, dt * 5f);
-            }
+            // Free physics is LOCAL again the moment no one is holding: the old code kept
+            // lerping LinearVelocity toward `_targetVel` — stale by definition, since syncs
+            // only flow while a peer holds the prop — so any prop that had ever been held
+            // fell in slow motion and rolled as if through honey, forever.
         }
     }
 
@@ -163,6 +181,10 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         Freeze = true;
         _wasSleeping = Sleeping;
         GlobalPosition = handPos;
+        // Announce the take so peers freeze the prop immediately rather than fighting local
+        // physics for up to a sync interval before the first ObjectSync lands.
+        if (Networked)
+            WorldNetwork.SendPhysGrab?.Invoke(0, NetId, handPos.X, handPos.Y, handPos.Z);
         return true;
     }
 
@@ -178,17 +200,24 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
 
     protected void Release()
     {
+        bool wasLocal = _heldByLocal;
         _held = false;
         _heldByLocal = false;
         Freeze = false;
         _returnTimer = 0;
+        // Peers otherwise never learn about a release at all: their copy stays frozen until
+        // the stale-holder timeout drops it, and a throw's velocity is lost entirely.
+        if (wasLocal && Networked)
+            WorldNetwork.SendPhysGrab?.Invoke(2, NetId, LinearVelocity.X, LinearVelocity.Y, LinearVelocity.Z);
     }
 
     /// Apply a throw impulse when releasing with a velocity.
     public void ReleaseWithVelocity(Vector3 velocity)
     {
-        Release();
+        // Velocity is set BEFORE Release so the release broadcast carries the throw — the old
+        // order sent the pre-throw velocity (usually zero) and then set it only locally.
         LinearVelocity = velocity;
+        Release();
     }
 
     private void SendSync()
@@ -203,6 +232,19 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         }
     }
 
+    /// Freeze the prop because a remote peer just took hold of it. Position keeps arriving via
+    /// the holder's ObjectSync stream; this only stops local physics fighting the hold during
+    /// the gap before that stream's first frame lands.
+    public void ApplyNetworkGrab()
+    {
+        if (_heldByLocal) return; // our own take echoed back — we already own it
+        _held = true;
+        _heldByLocal = false;
+        Freeze = true;
+        _hasTarget = true;
+        _sinceSync = 0;
+    }
+
     /// Called by Main.cs when an ObjectSync is received from another peer.
     public void ApplyNetworkSync(float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz)
     {
@@ -212,6 +254,7 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
         _targetRot = new Quaternion(qx, qy, qz, qw);
         _targetVel = new Vector3(lvx, lvy, lvz);
         _hasTarget = true;
+        _sinceSync = 0;
 
         // If someone else is now holding, mark as held
         if (!_held)
@@ -234,9 +277,12 @@ public partial class PhysicsProp : RigidBody3D, IInteractable
 }
 
 /// Static bridge for PhysicsProp to send network updates without a direct transport reference.
-/// Main.cs sets the Send delegate on connect.
+/// Main.cs sets the delegates on connect.
 public static class WorldNetwork
 {
     /// (objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz)
     public static System.Action<ushort, float, float, float, float, float, float, float, float, float, float>? Send;
+
+    /// (grabType 0=take/2=release, objId, x, y, z) — release carries the throw velocity.
+    public static System.Action<byte, ushort, float, float, float>? SendPhysGrab;
 }

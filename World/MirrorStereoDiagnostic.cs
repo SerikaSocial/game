@@ -8,31 +8,12 @@ namespace SerikaSocial.World;
 /// Verification for the STEREO (VR) mirror path — `Godot --path game -- --serika-mirrortest
 /// --stereo [--ska path] [--out /tmp/ms]`. Needs a display; headless renders nothing.
 ///
-/// There is no OpenXR runtime on the dev machine, so this cannot prove what a Quest sees. What it
-/// CAN prove is everything downstream of tracking, which is where the mirror was broken:
-///
-///  A. `Mirror.DecodeFrustum` recovers a frustum's near-plane rect from its projection matrix
-///     exactly, for symmetric desktop projections and for asymmetric HMD ones, at a near plane
-///     different from the one the matrix was built with (the reflection camera always clips past
-///     the glass, so the restatement has to be exact or every reflection is subtly zoomed).
-///
-///  B. **The optics are right for an ASYMMETRIC viewer.** This is the part that actually broke
-///     VR: HMD projections carry a nonzero frustum offset, the old code hard-coded ZERO, and the
-///     flipped reflection camera additionally needs that offset NEGATED. Rather than reason about
-///     it, the studio here renders the real `Mirror` against a real viewer camera put into
-///     `SetFrustum` mode with eye-like offsets, and checks — analytically, per marker, per pose —
-///     that each coloured marker's reflection lands on the pixel the light path says it must.
-///     Because Godot's mono and stereo paths run the same `RenderView`, a rendered pass with an
-///     asymmetric viewer exercises exactly the code an eye will exercise.
-///
-///  C. The stereo plumbing: with a simulated two-view `XRInterface` installed and the root
-///     viewport in XR mode, a `Mirror` must go stereo, stand up a second render target, place
-///     each reflection camera on the reflection of its OWN eye, and give each camera a projection
-///     that is that eye's rect with the horizontal centre negated.
-///
-/// What is NOT covered, and needs a headset: that `VIEW_INDEX` in the shader actually selects the
-/// matching texture under real multiview, that the runtime's own per-view matrices are what
-/// `get_projection_for_view` reports, and the cost of two extra scene renders on Quest hardware.
+/// A. Decode symmetric and asymmetric frustum matrices to verify projection inspection.
+/// B. Render the real mirror from symmetric and asymmetric viewer projections against a
+///    flush backing wall, checking independently calculated reflected marker positions.
+/// C. Install a simulated two-eye XRInterface and verify separate reflected eye positions,
+///    window-corner mapping, backing exclusion and preservation of geometry in front of glass.
+/// Actual headset multiview texture selection, comfort and device cost still need hardware.
 public static partial class MirrorStereoDiagnostic
 {
     private const int WarmupFrames = 30;
@@ -271,10 +252,14 @@ public static partial class MirrorStereoDiagnostic
         });
         st.Root.AddChild(floorBody);
 
-        // A back wall for context only. Deliberately NO wall behind the glass: the coplanar-wall
-        // z-fight and the near-plane clip are already proven by --serika-mirrortest, and leaving
-        // it out means nothing can occlude a marker's light path, so every check is live rather
-        // than silently skipped.
+        st.Root.AddChild(new MeshInstance3D
+        {
+            Name = "MirrorBackingRegression",
+            Mesh = new BoxMesh { Size = new Vector3(12, 6, .18f) },
+            Position = new Vector3(0, 2, MirrorZ + .1f),
+            MaterialOverride = new StandardMaterial3D { AlbedoColor = new Color(.5f, .27f, .08f) },
+        });
+
         var wall = new MeshInstance3D
         {
             Name = "BackWall",
@@ -448,7 +433,7 @@ public static partial class MirrorStereoDiagnostic
             if (_phaseCFrames >= 0) { PhaseCStep(); return; }
 
             _st.Frames++;
-            _st.Avatar?.Animate(delta, 0f, true);
+            _st.Avatar?.Animate(1.0 / 60.0, 0f, true);
             if (_st.Frames < WarmupFrames) return;
 
             if (_st.PoseIndex >= _st.Poses.Count) { BeginPhaseC(); return; }
@@ -505,34 +490,7 @@ public static partial class MirrorStereoDiagnostic
                 if (eyeErr > 0.002f)
                     problems.Add($"reflection-cam off mirrored-eye by {eyeErr * 1000:0.0} mm");
 
-                // The reflection camera's rect must be the viewer's with the horizontal centre
-                // NEGATED. Decoding the camera's own live projection is the direct statement of
-                // that, and it fails loudly if the offset is dropped or left un-negated.
-                float distToPlane = _st.Normal.Dot(_st.PlanePoint - mirCam.GlobalPosition);
-                float near = Mathf.Max(0.01f, distToPlane + 0.01f);
-                Mirror.DecodeFrustum(mirCam.GetCameraProjection(), near,
-                                     out float gh, out Vector2 gc, out float gr);
-                float k = near / ProbeNear;
-                float wantH = EyeHeightAtNear(0) * k;
-                float wantCx = -off.X * k, wantCy = off.Y * k;
-                if (Mathf.Abs(gh - wantH) > 0.004f * Mathf.Max(0.02f, wantH) + 1e-4f)
-                    problems.Add($"reflection frustum height {gh:0.00000} want {wantH:0.00000}");
-                if (Mathf.Abs(gc.X - wantCx) > 0.004f * Mathf.Max(0.02f, Mathf.Abs(wantCx)) + 2e-4f)
-                    problems.Add($"reflection frustum centre.x {gc.X:+0.00000;-0.00000} " +
-                                 $"want {wantCx:+0.00000;-0.00000} (offset dropped or not negated)");
-                if (Mathf.Abs(gc.Y - wantCy) > 0.004f * Mathf.Max(0.02f, Mathf.Abs(wantCy)) + 2e-4f)
-                    problems.Add($"reflection frustum centre.y {gc.Y:+0.00000;-0.00000} want {wantCy:+0.00000;-0.00000}");
-
-                // The render target must carry the VIEWER's frustum aspect: it is the only place
-                // the horizontal extent can be stated, since SetFrustum derives width from it.
-                // For this mono probe the viewer's rect aspect is the main viewport's, because
-                // Camera3D.SetFrustum takes its width from the viewport it renders into.
-                float wantRatio = vpRect.X / vpRect.Y;
-                float gotAspect = vp.Size.X / (float)Math.Max(1, vp.Size.Y);
-                if (Mathf.Abs(gr - wantRatio) / wantRatio > 0.005f)
-                    problems.Add($"reflection frustum ratio {gr:0.0000} want {wantRatio:0.0000}");
-                if (Mathf.Abs(gotAspect - gr) / gr > 0.005f)
-                    problems.Add($"subviewport aspect {gotAspect:0.0000} vs frustum ratio {gr:0.0000}");
+                problems.AddRange(MirrorDiagnostic.WindowDefects(_st.Glass, mirCam, vp));
             }
 
             // ── Optical probes ────────────────────────────────────────────────────────
@@ -610,10 +568,16 @@ public static partial class MirrorStereoDiagnostic
             {
                 _sim = new Player.VrSimDevice();
                 _sim.Install();
-                // Stand the play space so the head lands 2.4 m in front of the glass, facing it.
+                // Stand close enough that the glass fills each eye. This exercises the per-eye
+                // source-window crop rather than merely proving the normal full-glass path.
                 _origin = new XROrigin3D { Name = "SimOrigin" };
                 _st.Root.AddChild(_origin);
-                _origin.GlobalPosition = new Vector3(0, 0, MirrorZ - 2.4f);
+                _origin.GlobalPosition = new Vector3(0, 0, MirrorZ - .30f);
+                // Godot cameras look along local -Z. The glass faces this test position from
+                // +Z, so turn the simulated head toward it just as the mono probe does. Leaving
+                // the origin at identity made its corner rays point away from the glass and
+                // correctly disabled close-window cropping as an unsafe edge case.
+                _origin.GlobalRotation = new Vector3(0, Mathf.Pi, 0);
                 _xrCam = new XRCamera3D { Name = "SimXrCam", Near = 0.05f, Far = 400f, Current = true };
                 _origin.AddChild(_xrCam);
 
@@ -667,28 +631,19 @@ public static partial class MirrorStereoDiagnostic
                 if (posErr > 0.002f)
                     _cNotes.Add($"view {view}: reflection cam off mirrored eye by {posErr * 1000:0.0} mm");
 
-                float distToPlane = _st.Normal.Dot(_st.PlanePoint - cam.GlobalPosition);
-                float near = Mathf.Max(0.01f, distToPlane + 0.01f);
-                var eyeProj = SimStereoXr.ProjFor(view, near, 400f);
-                Mirror.DecodeFrustum(eyeProj, near, out float wantH, out Vector2 wantC, out float wantRatio);
-                Mirror.DecodeFrustum(cam.GetCameraProjection(), near, out float gotH, out Vector2 gotC, out float gotRatio);
-
-                bool okH = Mathf.Abs(gotH - wantH) <= 0.004f * wantH;
-                bool okX = Mathf.Abs(gotC.X - (-wantC.X)) <= 0.004f * Mathf.Max(0.02f, Mathf.Abs(wantC.X));
-                bool okY = Mathf.Abs(gotC.Y - wantC.Y) <= 0.004f * Mathf.Max(0.02f, Mathf.Abs(wantC.Y));
-                bool okR = Mathf.Abs(gotRatio - wantRatio) / wantRatio <= 0.005f;
-
-                GD.Print($"MIRRORSTEREO view{view} eye={eye.Origin} camPos={cam.GlobalPosition} " +
-                         $"posErr={posErr * 1000:0.00}mm near={near:0.000}");
-                GD.Print($"MIRRORSTEREO view{view} height {gotH:0.00000}/{wantH:0.00000} {(okH ? "ok" : "BAD")}  " +
-                         $"centre.x {gotC.X:+0.00000;-0.00000}/want {-wantC.X:+0.00000;-0.00000} {(okX ? "ok" : "BAD")}  " +
-                         $"centre.y {gotC.Y:+0.00000;-0.00000}/{wantC.Y:+0.00000;-0.00000} {(okY ? "ok" : "BAD")}  " +
-                         $"ratio {gotRatio:0.0000}/{wantRatio:0.0000} {(okR ? "ok" : "BAD")}  vp={vp.Size}");
-
-                if (!okH) _cNotes.Add($"view {view}: frustum height {gotH:0.00000} want {wantH:0.00000}");
-                if (!okX) _cNotes.Add($"view {view}: frustum centre.x {gotC.X:0.00000} want {-wantC.X:0.00000}");
-                if (!okY) _cNotes.Add($"view {view}: frustum centre.y {gotC.Y:0.00000} want {wantC.Y:0.00000}");
-                if (!okR) _cNotes.Add($"view {view}: frustum ratio {gotRatio:0.0000} want {wantRatio:0.0000}");
+                foreach (var defect in MirrorDiagnostic.WindowDefects(_st.Glass, cam, vp))
+                    _cNotes.Add($"view {view}: {defect}");
+                Vector4 crop = _st.Glass.TextureWindowForDiagnostic(cam);
+                Vector2 cropSpan = new(crop.Z - crop.X, crop.W - crop.Y);
+                if (cropSpan.X >= .75f || cropSpan.Y >= .5f)
+                    _cNotes.Add($"view {view}: close reflection did not crop its source window ({cropSpan})");
+                float targetPixels = vp.Size.X * vp.Size.Y;
+                float budgetPixels = _xr.GetRenderTargetSize().X * _xr.GetRenderTargetSize().Y *
+                                     UI.DeviceProfile.MirrorResolutionScale * UI.DeviceProfile.MirrorResolutionScale;
+                if (targetPixels > budgetPixels * 1.05f)
+                    _cNotes.Add($"view {view}: close target uses {targetPixels:0} px over its {budgetPixels:0} px budget");
+                GD.Print($"MIRRORSTEREO view{view} eye={eye.Origin} camera={cam.GlobalPosition} " +
+                    $"posErr={posErr * 1000:0.00}mm near={cam.Near:0.000} vp={vp.Size} crop={cropSpan}");
             }
 
             // The two eyes must not collapse onto one camera — that is precisely the old bug.

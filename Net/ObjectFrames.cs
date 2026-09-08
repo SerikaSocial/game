@@ -63,6 +63,10 @@ public static class ObjectFrames
 
     public static byte[] WritePhysGrab(byte grabType, uint targetPeer, ushort boneOrObjId, float x, float y, float z)
     {
+        // grabType convention: 0=take, 1=update, 2=release for PHYSICS PROPS (payload =
+        // prop NetId). Values with the top bit set (0x80 | 0/1/2) are HAIR/physbone grabs
+        // (payload = spring chain index). The two payloads share one 16-bit id space with no
+        // other discriminator, so receivers route on this bit — see Main.OnPhysGrabReceived.
         var buf = new byte[PhysGrabSendSize];
         int o = 0;
         buf[o++] = grabType;

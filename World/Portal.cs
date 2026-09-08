@@ -44,8 +44,9 @@ public partial class Portal : Area3D
     private MeshInstance3D _surface;
     private ShaderMaterial _portalShader;
 
-    private const float PortalWidth = 1.6f;
-    private const float PortalHeight = 2.2f;
+    public float PortalWidth { get; private set; } = 1.6f;
+    public float PortalHeight { get; private set; } = 2.2f;
+    public float TriggerDepth { get; private set; } = .8f;
 
     public static Portal Create(string label, Color tint, Vector3 position, float yawDeg = 0)
     {
@@ -53,7 +54,8 @@ public partial class Portal : Area3D
     }
 
     public static Portal Create(string label, Color tint, Vector3 position, float yawDeg,
-        PortalMode mode, string targetWorldId = null, List<string> allowedWorlds = null)
+        PortalMode mode, string targetWorldId = null, List<string> allowedWorlds = null,
+        float width = 1.6f, float height = 2.2f, float depth = .8f)
     {
         var p = new Portal
         {
@@ -61,14 +63,29 @@ public partial class Portal : Area3D
             Position = position,
             RotationDegrees = new Vector3(0, yawDeg, 0),
             Monitoring = true,
+            CollisionLayer = 0,
             CollisionMask = PhysicsLayers.LocalPlayer,
             Mode = mode,
             TargetWorldId = targetWorldId ?? "",
             AllowedWorldIds = allowedWorlds ?? new List<string>(),
             Label = label,
+            PortalWidth = Mathf.Clamp(width, .6f, 10f),
+            PortalHeight = Mathf.Clamp(height, 1f, 10f),
+            TriggerDepth = Mathf.Clamp(depth, .2f, 3f),
         };
         p.Build(label, tint);
         return p;
+    }
+
+    /// Bind only portals in the new world; outgoing QueueFree worlds must never be re-bound.
+    public static void BindWorld(Node world, Action<Portal> handler)
+    {
+        if (world is Portal portal)
+        {
+            portal.Entered -= handler;
+            portal.Entered += handler;
+        }
+        foreach (Node child in world.GetChildren()) BindWorld(child, handler);
     }
 
     /// Load a world thumbnail image onto the portal surface so it displays like a framed picture.
@@ -143,7 +160,7 @@ public partial class Portal : Area3D
         // Trigger volume filling the portal.
         var col = new CollisionShape3D
         {
-            Shape = new BoxShape3D { Size = new Vector3(PortalWidth + 0.3f, PortalHeight + 0.2f, 0.8f) },
+            Shape = new BoxShape3D { Size = new Vector3(PortalWidth, PortalHeight, TriggerDepth) },
             Position = new Vector3(0, PortalHeight * 0.5f, 0),
         };
         AddChild(col);
@@ -154,7 +171,8 @@ public partial class Portal : Area3D
     private void OnBodyEntered(Node3D body)
     {
         // Only the local player triggers travel (remote avatars are Node3D, not CharacterBody3D).
-        if (body is not CharacterBody3D) return;
+        if (body is not CharacterBody3D player ||
+            (player.CollisionLayer & PhysicsLayers.LocalPlayer) == 0) return;
         if (_cooldown > 0) return;
         _cooldown = 2.0;
         Entered?.Invoke(this);

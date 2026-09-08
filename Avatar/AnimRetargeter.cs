@@ -188,15 +188,15 @@ public sealed partial class AnimRetargeter : Node
     public static AnimRetargeter Create(string resPath, Skeleton3D target,
         Dictionary<string, int> targetRoleToBone)
     {
-        if (target == null) return null;
-        var retargeter = new AnimRetargeter(target, targetRoleToBone);
-
         var packed = ResourceLoader.Load<PackedScene>(resPath);
-        if (packed == null) { GD.PrintErr($"retargeter: cannot load {resPath}"); return null; }
+        return packed == null ? null : CreateFromScene(packed.Instantiate(), target, targetRoleToBone);
+    }
 
-        var scene = packed.Instantiate();
-        if (scene == null) { GD.PrintErr("retargeter: PackedScene instantiation failed"); return null; }
-
+    /// Runtime show GLBs use the same direction-based retargeter as locomotion.
+    public static AnimRetargeter CreateFromScene(Node scene, Skeleton3D target, Dictionary<string, int> targetRoleToBone)
+    {
+        if (target == null || scene == null) return null;
+        var retargeter = new AnimRetargeter(target, targetRoleToBone);
         retargeter.AddChild(scene);
         if (scene is Node3D scene3d) scene3d.Visible = false;
 
@@ -216,7 +216,11 @@ public sealed partial class AnimRetargeter : Node
         for (int i = 0; i < retargeter._srcSkeleton.GetBoneCount(); i++)
         {
             string boneName = retargeter._srcSkeleton.GetBoneName(i);
-            if (MixamoRoleMap.TryGetValue(boneName, out string role))
+            string normalized = boneName.Replace(":", "");
+            foreach (var pair in targetRoleToBone)
+                if (boneName == target.GetBoneName(pair.Value).ToString() || boneName.Equals(pair.Key, StringComparison.OrdinalIgnoreCase))
+                    retargeter._srcRoleToBone.TryAdd(pair.Key, i);
+            if (MixamoRoleMap.TryGetValue(normalized, out string role))
             {
                 if (!retargeter._srcRoleToBone.ContainsKey(role))
                     retargeter._srcRoleToBone[role] = i;
@@ -299,6 +303,7 @@ public sealed partial class AnimRetargeter : Node
             retargeter._dirRoles.Add(role);
         }
 
+        retargeter.ConfigureBakedConcert(scene);
         retargeter.Calibrate();
 
         int clipCount = 0;
@@ -306,6 +311,23 @@ public sealed partial class AnimRetargeter : Node
         foreach (string n in retargeter._srcPlayer.GetAnimationList()) { clipCount++; animNames.Add(n); }
         GD.Print($"retargeter: loaded {retargeter._orderedRoles.Count} role mappings, {clipCount} clips: [{string.Join(", ", animNames)}]");
         return retargeter;
+    }
+
+    public string[] ShowClips => _srcPlayer?.GetAnimationList() ?? Array.Empty<string>();
+    public int MappedShowBones => _orderedRoles.Count;
+    public double ShowClipLength(string clip) => _srcPlayer.HasAnimation(clip) ? _srcPlayer.GetAnimation(clip).Length : 0;
+    public void SampleShowClip(string clip, double seconds)
+    {
+        if (!_srcPlayer.HasAnimation(clip)) throw new InvalidOperationException($"Animation clip '{clip}' was not found.");
+        if (_srcPlayer.CurrentAnimation != clip) {
+            _srcPlayer.GetAnimation(clip).LoopMode = Animation.LoopModeEnum.None;
+            _srcPlayer.Play(clip, 0);
+        }
+        if (!_alignResolved) Calibrate(clip);
+        _srcPlayer.Seek(Math.Clamp(seconds, 0, ShowClipLength(clip)), update: true);
+        _blend = 1f;
+        if (UsesBakedConcertPose) { SampleBakedConcert(); return; }
+        Update(0);
     }
 
     private static Transform3D GetGlobalRest(Skeleton3D skel, int boneIdx)
@@ -389,9 +411,9 @@ public sealed partial class AnimRetargeter : Node
     /// upright clip. Both references must come from a *standing* pose: sampling them from
     /// whatever clip happens to play first would calibrate "standing" against a crouch or a
     /// bow, which puts the pelvis at the wrong height for every other clip.
-    private void Calibrate()
+    private void Calibrate(string showClip = null)
     {
-        string reference = FindClip("Idle_A") ?? FindClip("Walk");
+        string reference = showClip ?? FindClip("Idle_A") ?? FindClip("Walk");
         if (reference == null || !_haveTgtFrame) return;
 
         _srcPlayer.Play(reference);

@@ -4,14 +4,22 @@ using SerikaSocial.Avatar;
 
 namespace SerikaSocial.Player;
 
-/// Another player's avatar. Buffers the latest wire pose and interpolates toward it, so
-/// remote motion stays smooth at a 20Hz pose rate. The 100ms buffer matches the plan's
-/// snapshot-interpolation delay — we render slightly in the past to hide jitter.
+/// Another player's avatar, driven by SNAPSHOT INTERPOLATION.
+///
+/// Every wire pose is buffered with its arrival time; each rendered frame we reconstruct the
+/// peer's state as of `now − delay` by blending the two snapshots that bracket that moment —
+/// position lerp, rotation slerp, and per-bone quaternion slerp onto the rig. The delay tracks
+/// ~2.5× the measured pose interval (≈125 ms at the 20 Hz pose rate), which hides network
+/// jitter by rendering slightly in the past: a pose that arrives late is still in the buffer's
+/// future, so playback never hitches. When the render time runs past the newest snapshot
+/// (packet gap), motion coasts on the last measured velocity for a bounded window instead of
+/// freezing or rubber-banding.
+///
+/// This replaces an exponential lerp toward whatever frame arrived last — the M1 stopgap that
+/// steered every joint at a speed proportional to its error, snapped bones between raw
+/// quantized poses at 20 Hz, and turned a burst of packets into a twitch.
 public partial class RemoteAvatar : Node3D
 {
-    private Vector3 _targetPos;
-    private Quaternion _targetRot = Quaternion.Identity;
-    private bool _hasTarget;
     private bool _streamingBones;   // peer sends real bone rotations → don't animate locally
     private bool _hasRealAvatar;
 
@@ -102,6 +110,8 @@ public partial class RemoteAvatar : Node3D
         FitBody(avatar.Height);
         _hasRealAvatar = isReal;
         _streamingBones = false; // re-decide against the new skeleton
+        avatar.ResetStreamedHipsDrop();
+        ClearBufferedBones();
     }
 
     /// Replace this remote's avatar with the bean — used when the user has blocked them,
@@ -115,6 +125,12 @@ public partial class RemoteAvatar : Node3D
         _capsule.Visible = false;
         _nameTag.Position = new Vector3(0, avatar.Height + 0.25f, 0);
         FitBody(avatar.Height);
+        // The peer's bones must stop driving this rig too, not merely stop being collected:
+        // leaving `_streamingBones` set kept replaying a blocked peer's pose onto the bean.
+        _hasRealAvatar = false;
+        _streamingBones = false;
+        avatar.ResetStreamedHipsDrop();
+        ClearBufferedBones();
     }
 
     /// Match the blocking capsule to the equipped avatar, so a short avatar isn't surrounded by
@@ -136,20 +152,109 @@ public partial class RemoteAvatar : Node3D
     /// Light this peer's nameplate while their voice is arriving, or grey it when locally muted.
     public void SetSpeaking(bool speaking, bool muted) => _nameTag?.SetVoiceState(speaking, muted);
 
+    // ── Snapshot buffer ──────────────────────────────────────────────────────────────
+
+    private sealed class Snapshot
+    {
+        public double Time;             // local receive time, seconds
+        public Vector3 Pos;
+        public Quaternion Rot = Quaternion.Identity;
+        public Vector3 Vel;             // measured between the previous snapshot and this one
+        public int BoneCount;           // 0 = this frame carried no usable bone pose
+        public readonly Quat[] Bones = new Quat[LodExt.HumanoidBoneCount];
+    }
+
+    private const int MaxSnapshots = 24;
+    private const float TeleportDistance = 3.0f;
+
+    private readonly Snapshot[] _ring = new Snapshot[MaxSnapshots];
+    private int _newest = -1;
+    private int _count;
+    private bool _hasTarget;
+
+    // Jitter-adaptive render delay and the state it is measured from.
+    private double _avgInterval = 0.05;   // seed = the nominal 20 Hz pose interval
+    private double _lastArrival = -1;
+    private double _interpDelay = 0.125;
+
+    private static double Now() => Time.GetTicksMsec() / 1000.0;
+
+    private void ClearBufferedBones()
+    {
+        for (int i = 0; i < MaxSnapshots; i++)
+            if (_ring[i] != null) _ring[i].BoneCount = 0;
+    }
+
+    private void ClearSnapshots()
+    {
+        _newest = -1;
+        _count = 0;
+        _lastArrival = -1;
+    }
+
+    /// Buffer one wire pose. Called from the transport poll on the game thread.
     public void ApplyPose(PoseFrame f)
     {
         var (pos, rot) = AvatarPose.ToTransform(f);
-        _targetPos = pos;
-        _targetRot = rot;
-        if (!_hasTarget) { Position = pos; _hasTarget = true; } // snap on first frame
+        double now = Now();
 
-        // Replay the sender's actual rig — but only onto the peer's OWN resolved avatar, since
-        // bone rotations are meaningless on a different skeleton. While the peer is still on the
-        // shared default outfit, animate them procedurally from observed motion instead.
-        if (_hasRealAvatar && f.Bones != null && f.Bones.Count > 0 && !AllIdentity(f.Bones))
+        bool hasBones = _hasRealAvatar && f.Bones != null && f.Bones.Count > 0 && !AllIdentity(f.Bones);
+
+        // A jump larger than conversation range is a teleport/respawn, not motion —
+        // interpolating across it plays the peer flying across the map in slow motion.
+        if (_count > 0 && _ring[_newest].Pos.DistanceTo(pos) > TeleportDistance)
         {
-            _streamingBones = true;
-            _avatar?.ApplyBonePose(f.Bones);
+            ClearSnapshots();
+            Position = pos;
+            _hasTarget = true;
+        }
+        if (!_hasTarget)
+        {
+            Position = pos; // snap on first frame
+            _hasTarget = true;
+        }
+
+        // Interval EMA → render delay. Gaps outside (5 ms, 1 s) are teleports/drops, not
+        // jitter, and would poison the estimate.
+        if (_lastArrival > 0)
+        {
+            double gap = now - _lastArrival;
+            if (gap > 0.005 && gap < 1.0) _avgInterval += (gap - _avgInterval) * 0.1;
+        }
+        _lastArrival = now;
+        _interpDelay = System.Math.Clamp(_avgInterval * 2.5 + 0.02, 0.10, 0.35);
+
+        int slot = (_newest + 1) % MaxSnapshots;
+        var s = _ring[slot] ??= new Snapshot();
+
+        // Velocity between arrivals is what extrapolation coasts on during packet gaps.
+        // Measured against the CURRENT newest, never the slot being reused — when the ring is
+        // full that slot holds the oldest snapshot, and against a recycled slot's timestamp
+        // the velocity collapses to near zero, killing the coast entirely.
+        float dt = _count > 0 ? (float)System.Math.Max(1e-3, now - _ring[_newest].Time) : 0f;
+        Vector3 vel = _count > 0 ? (pos - _ring[_newest].Pos) / dt : Vector3.Zero;
+
+        _newest = slot;
+        _count = System.Math.Min(_count + 1, MaxSnapshots);
+
+        s.Time = now;
+        s.Pos = pos;
+        s.Rot = rot;
+        s.Vel = vel;
+        if (hasBones)
+        {
+            int n = System.Math.Min(f.Bones.Count, s.Bones.Length);
+            for (int i = 0; i < n; i++) s.Bones[i] = f.Bones[i];
+            s.BoneCount = n;
+        }
+        else
+        {
+            s.BoneCount = 0;
+        }
+        if (_streamingBones != hasBones)
+        {
+            _streamingBones = hasBones;
+            _avatar?.ResetStreamedHipsDrop();
         }
     }
 
@@ -180,20 +285,73 @@ public partial class RemoteAvatar : Node3D
             }
         }
 
-        if (!_hasTarget) return;
-        // Critically-damped-ish lerp; good enough for M1, replaced by proper snapshot
-        // interpolation with a timestamp buffer in M2.
+        if (!_hasTarget || _count == 0) return;
+
+        float dt = (float)delta;
         var prev = Position;
-        float t = (float)Mathf.Min(1.0, delta * 12.0);
-        Position = Position.Lerp(_targetPos, t);
-        Quaternion current = Quaternion;
-        Quaternion = current.Slerp(_targetRot, t).Normalized();
+
+        double renderT = Now() - _interpDelay;
+        var newest = _ring[_newest];
+
+        if (renderT >= newest.Time)
+        {
+            // Past the newest snapshot — a packet gap. Coast on the last measured velocity
+            // for a bounded window so motion degrades into a glide instead of a freeze;
+            // beyond that, hold. Never extrapolate bones — joints freeze, which reads fine,
+            // while guessed rotations read as twitching.
+            double over = renderT - newest.Time;
+            double coast = System.Math.Min(over, _avgInterval * 4.0 + 0.20);
+            SetRoot(newest.Pos + newest.Vel * (float)coast, newest.Rot);
+            ApplyBones(newest, newest, 0f);
+        }
+        else
+        {
+            // Find the bracketing pair: newest→oldest scan, buffer is ≤ 24 deep.
+            Snapshot s1 = newest;
+            Snapshot s0 = newest;
+            for (int i = 1; i < _count; i++)
+            {
+                int idx = (_newest - i + MaxSnapshots * 4) % MaxSnapshots;
+                var cand = _ring[idx];
+                if (cand.Time <= renderT) { s0 = cand; break; }
+                s0 = s1 = cand;
+            }
+
+            if (ReferenceEquals(s0, s1) || s1.Time <= s0.Time)
+            {
+                // Render time is older than everything buffered (delay just shrank) — clamp.
+                SetRoot(s0.Pos, s0.Rot);
+                ApplyBones(s0, s0, 0f);
+            }
+            else
+            {
+                float a = (float)((renderT - s0.Time) / (s1.Time - s0.Time));
+                SetRoot(s0.Pos.Lerp(s1.Pos, a), s0.Rot.Slerp(s1.Rot, a).Normalized());
+                ApplyBones(s0, s1, a);
+            }
+        }
+
+        // Hips height is not on the wire; a crouching peer's bent legs would otherwise hover
+        // at standing height. Reconstructed from the streamed leg pose, crouch-gated.
+        if (_streamingBones) _avatar?.ApplyStreamedHipsDrop(dt);
 
         // Only guess an animation from observed motion when the peer isn't streaming bones;
         // otherwise the local procedural cycle would fight the pose we just applied.
         if (_streamingBones) return;
-        float speed = delta > 0 ? (new Vector2(Position.X, Position.Z) - new Vector2(prev.X, prev.Z)).Length() / (float)delta : 0f;
+        float speed = dt > 0 ? (new Vector2(Position.X, Position.Z) - new Vector2(prev.X, prev.Z)).Length() / dt : 0f;
         _avatar?.Animate(delta, speed, true);
+    }
+
+    private void SetRoot(Vector3 pos, Quaternion rot)
+    {
+        Position = pos;
+        Quaternion = rot;
+    }
+
+    private void ApplyBones(Snapshot a, Snapshot b, float alpha)
+    {
+        if (!_streamingBones || a.BoneCount == 0) return;
+        _avatar?.BlendBonePose(a.Bones, a.BoneCount, b.Bones, b.BoneCount, alpha);
     }
 
     /// Stable per-peer colour so avatars are visually distinguishable without textures.

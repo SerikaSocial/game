@@ -152,40 +152,54 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         if (n < 1) return;
         switch ((MsgType)buf[0])
         {
+            // Length guards on every case: a truncated or malformed datagram must be dropped,
+            // not thrown out of _PhysicsProcess. The old code only checked n < 1, so a short
+            // Chat (n < 5 → negative GetString count) or an oversized Reject length byte
+            // threw ArgumentOutOfRangeException into the frame loop for as long as the
+            // packets kept coming.
             case MsgType.Welcome:
             {
+                if (n < 7) break;
                 SelfId = RelayProtocol.ReadU32(buf, 1);
                 int count = RelayProtocol.ReadU16(buf, 5);
                 var peers = new PeerInfo[count];
                 int o = 7;
+                bool ok = true;
                 for (int i = 0; i < count; i++)
                 {
+                    if (o + 4 > n || o + 5 > n) { ok = false; break; }
                     uint id = RelayProtocol.ReadU32(buf, o); o += 4;
                     int uidLen = buf[o++];
+                    if (o + uidLen > n || o + 1 > n) { ok = false; break; }
                     string userId = System.Text.Encoding.UTF8.GetString(buf, o, uidLen); o += uidLen;
                     int nameLen = buf[o++];
+                    if (o + nameLen > n) { ok = false; break; }
                     string name = System.Text.Encoding.UTF8.GetString(buf, o, nameLen); o += nameLen;
                     peers[i] = new PeerInfo(id, name, userId);
                 }
-                if (!_welcomed) { _welcomed = true; Connected?.Invoke(SelfId, peers); }
+                if (ok && !_welcomed) { _welcomed = true; Connected?.Invoke(SelfId, peers); }
                 break;
             }
             case MsgType.PeerJoin:
             {
+                if (n < 6) break;
                 uint id = RelayProtocol.ReadU32(buf, 1);
                 int uidLen = buf[5];
+                if (n < 7 + uidLen) break;
                 string userId = System.Text.Encoding.UTF8.GetString(buf, 6, uidLen);
                 int nameOff = 6 + uidLen;
                 int nameLen = buf[nameOff];
+                if (n < nameOff + 1 + nameLen) break;
                 string name = System.Text.Encoding.UTF8.GetString(buf, nameOff + 1, nameLen);
                 PeerJoined?.Invoke(new PeerInfo(id, name, userId));
                 break;
             }
             case MsgType.PeerLeave:
-                PeerLeft?.Invoke(RelayProtocol.ReadU32(buf, 1));
+                if (n >= 5) PeerLeft?.Invoke(RelayProtocol.ReadU32(buf, 1));
                 break;
             case MsgType.Pose:
             {
+                if (n < 5) break;
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 try { PoseReceived?.Invoke(sender, PoseFrame.Decode(buf.AsSpan(5, n - 5))); }
                 catch (CodecException) { /* drop malformed */ }
@@ -193,6 +207,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             }
             case MsgType.Voice:
             {
+                if (n < 5) break;
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 try { VoiceReceived?.Invoke(sender, VoiceFrame.Decode(buf.AsSpan(5, n - 5))); }
                 catch (CodecException) { }
@@ -200,6 +215,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             }
             case MsgType.Chat:
             {
+                if (n < 5) break;
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 string text = System.Text.Encoding.UTF8.GetString(buf, 5, n - 5);
                 ChatReceived?.Invoke(sender, text);
@@ -208,6 +224,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             case MsgType.ObjectSync:
             {
                 // [type][peer_id:u32][body…] — skip the 5-byte relay envelope to reach the body.
+                if (n < 5) break;
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 if (ObjectFrames.ReadObjectSync(buf.AsSpan(5, System.Math.Max(0, n - 5)), out var objId,
                         out var x, out var y, out var z,
@@ -220,6 +237,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             {
                 // hasTargetPeer: false — the relay strips that field and re-frames with the sender
                 // id, unlike the direct P2P channel in WebRtcTransport.
+                if (n < 5) break;
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 if (ObjectFrames.ReadPhysGrab(buf.AsSpan(5, System.Math.Max(0, n - 5)), hasTargetPeer: false,
                         out var grabType, out var boneId, out var gx, out var gy, out var gz))
@@ -228,7 +246,8 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             }
             case MsgType.Reject:
             {
-                int len = buf[1];
+                if (n < 2) break;
+                int len = System.Math.Min(buf[1], n - 2);
                 Rejected?.Invoke(System.Text.Encoding.UTF8.GetString(buf, 2, len));
                 break;
             }

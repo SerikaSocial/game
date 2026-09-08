@@ -258,8 +258,112 @@ public sealed partial class AvatarInstance : Node3D
         }
     }
 
-    /// Whether this rig has any finger bones worth sending at LOD0. Resolved once at load rather
-    /// than probed per frame.
+    /// Blend two wire bone poses and drive the rig from the result — the receiving half of
+    /// snapshot interpolation. Without this the rig is fed one raw 20 Hz frame after another
+    /// and every joint visibly steps between quantized poses.
+    ///
+    /// The two sides may carry different LODs (a peer upgrading to finger bones mid-blend):
+    /// indices past the shorter side's end come from whichever snapshot has them. Quats off
+    /// the wire are decoded largest-component-positive, so both sides live in the same
+    /// hemisphere and Slerp cannot take the long way round.
+    public void BlendBonePose(Serika.Net.Codec.Quat[] a, int countA, Serika.Net.Codec.Quat[] b, int countB, float t)
+    {
+        if (Skeleton == null) return;
+        if (countA <= 0) { if (countB > 0) ApplyBonePose(b, countB); return; }
+        if (countB <= 0) { ApplyBonePose(a, countA); return; }
+
+        t = Mathf.Clamp(t, 0f, 1f);
+        int n = System.Math.Min(System.Math.Max(countA, countB), HumanoidBones.Full.Length);
+        for (int i = 0; i < n; i++)
+        {
+            int bone = BoneOf(HumanoidBones.Full[i]);
+            if (bone < 0) continue;
+            var qa = i < countA ? a[i] : b[i];
+            var qb = i < countB ? b[i] : a[i];
+            var rot = new Quaternion(qa.X, qa.Y, qa.Z, qa.W)
+                .Slerp(new Quaternion(qb.X, qb.Y, qb.Z, qb.W), t).Normalized();
+            Skeleton.SetBonePoseRotation(bone, rot);
+        }
+    }
+
+    /// ApplyBonePose with an explicit count, for pooled buffers where the array is
+    /// over-allocated to the largest LOD.
+    public void ApplyBonePose(Serika.Net.Codec.Quat[] src, int count)
+    {
+        if (Skeleton == null || src == null || count <= 0) return;
+        int n = System.Math.Min(count, HumanoidBones.Full.Length);
+        for (int i = 0; i < n; i++)
+        {
+            int b = BoneOf(HumanoidBones.Full[i]);
+            if (b < 0) continue;
+            var q = src[i];
+            var rot = new Quaternion(q.X, q.Y, q.Z, q.W);
+            if (!rot.IsNormalized()) rot = rot.Normalized();
+            Skeleton.SetBonePoseRotation(b, rot);
+        }
+    }
+
+    // ── Streamed hips drop ────────────────────────────────────────────────────────
+    // The wire carries bone ROTATIONS only — hips position is not in the codec. A crouching
+    // sender's clip drops their pelvis 30-40 cm; replayed here with the hips left at standing
+    // height, the bent legs leave both feet floating well above the floor, which reads as a
+    // hovering half-squat. This pass reconstructs the drop on the receiving side: FK the
+    // animated feet, and settle the pelvis until the under-hips foot meets the avatar's root
+    // plane (its feet). Gated so it only fires for genuinely crouch-like poses.
+
+    private float _streamedHipsDrop;
+
+    /// Smoothed recovery of a remote peer's hips height from their streamed leg pose.
+    /// Call every frame after the bones are applied, ONLY on avatars driven by the wire.
+    public void ApplyStreamedHipsDrop(float dt)
+    {
+        if (Skeleton == null) return;
+        if (!_feetBonesResolved) ResolveFootBones();
+        if (_hipsBone < 0 || _lFootBone < 0 || _rFootBone < 0) return;
+
+        var rootInv = GlobalTransform.AffineInverse();
+        Vector3 hipsLocal = rootInv * (Skeleton.GlobalTransform * Skeleton.GetBoneGlobalPose(_hipsBone).Origin);
+
+        float LowestOf(int foot, int toes, out Vector3 footLocal)
+        {
+            footLocal = rootInv * (Skeleton.GlobalTransform * Skeleton.GetBoneGlobalPose(foot).Origin);
+            float y = footLocal.Y;
+            if (toes >= 0)
+            {
+                float ty = (rootInv * (Skeleton.GlobalTransform * Skeleton.GetBoneGlobalPose(toes).Origin)).Y;
+                if (ty < y) y = ty;
+            }
+            return y;
+        }
+
+        float yl = LowestOf(_lFootBone, _lToesBone, out var leftLocal);
+        float yr = LowestOf(_rFootBone, _rToesBone, out var rightLocal);
+        float lowestY = yl, lowestHipsDist = leftLocal.DistanceTo(hipsLocal);
+        if (yr < lowestY) { lowestY = yr; lowestHipsDist = rightLocal.DistanceTo(hipsLocal); }
+
+        // How far the lowest foot hovers above (positive) or sinks under (negative) the root
+        // plane. The pelvis moves by roughly this much to put it back on the ground.
+        float wantDrop = -lowestY;
+
+        // Gates, all tuned to pass a crouch and reject everything else:
+        //  - feet far from under the hips → seated/kneeling-style pose, the chair or clip
+        //    already decided the pelvis height;
+        //  - float beyond ~half a metre → airborne tuck or an absurd pose, not a crouch;
+        //  - nothing to do → decay the previous drop back out.
+        bool plausible = lowestHipsDist < 0.20f && Mathf.Abs(wantDrop) < 0.55f;
+        if (!plausible) wantDrop = 0f;
+
+        _streamedHipsDrop = Mathf.Lerp(_streamedHipsDrop, wantDrop, Mathf.Clamp(dt * 12f, 0f, 1f));
+        if (Mathf.Abs(_streamedHipsDrop) < 0.001f) return;
+
+        var hips = Skeleton.GetBonePosePosition(_hipsBone);
+        Skeleton.SetBonePosePosition(_hipsBone, hips + new Vector3(0, _streamedHipsDrop, 0));
+    }
+
+    /// Forget any streamed hips drop — call when the driving pose source changes (avatar
+    /// swap, back to procedural animation) so a stale drop doesn't leak into the new rig.
+    public void ResetStreamedHipsDrop() => _streamedHipsDrop = 0f;
+
     ///
     /// Without this the sender would pay 232 bytes a frame to transmit 30 identity quaternions
     /// for a rig that has no fingers at all — which is most PMX conversions and a fair number of
@@ -1208,8 +1312,9 @@ public sealed partial class AvatarInstance : Node3D
     public void Animate(double delta, float speed, bool onFloor, bool crouching = false, bool sprinting = false)
     {
         if (Skeleton == null || _animBones.Count == 0) return;
-        if (_customClipActive) return;   // a custom clip owns the skeleton this frame
-        if (_animPlayer != null) return; // embedded clips drive the rig
+        RestoreConcertCheerArmBase();
+        if (_customClipActive) { ReleaseConcertCheerGrip(); return; } // custom clips own the skeleton
+        if (_animPlayer != null) { ReleaseConcertCheerGrip(); return; } // embedded clips own the rig
 
         float dt = (float)delta;
         _idleTime += dt;
@@ -1316,7 +1421,14 @@ public sealed partial class AvatarInstance : Node3D
         UpdateFacialDynamics(dt);
 
         // ── Terrain Slope & Ground Foot Conformance ─────────────────────────────────
-        ApplyGroundSlopeIk(dt, onFloor, speed);
+        // Authored lower-body poses own their own legs: the Crouch clips drop the hips and
+        // bend the knees by design, and the emote clips pose the legs too. The ground IK is
+        // a *locomotion* conformer — running it under a crouch used to overwrite the clip's
+        // dropped hips back to standing height and re-straighten the bent knees, which is
+        // what made crouching read as a broken shuffle.
+        bool legsAuthored = crouching || _emoteBlend > 0.05f;
+        ApplyGroundSlopeIk(dt, onFloor, speed, legsAuthored);
+        ApplyConcertCheer(dt, speed, onFloor, crouching);
     }
 
     /// Map movement + emote state to a retargeter animation state.
@@ -1730,7 +1842,12 @@ public sealed partial class AvatarInstance : Node3D
     private bool _targetsInitialized = false;
 
     /// Adapt feet, legs, and pelvis to terrain slopes, ledges, and steps (Genshin / AAA ground conformance).
-    public void ApplyGroundSlopeIk(float dt, bool onFloor, float speed = 0f)
+    ///
+    /// `legsAuthored` skips the solve entirely for states whose clip already places the legs
+    /// (crouch, sitting, emotes): this pass runs LAST in `Animate`, so anything it writes wins
+    /// over the clip, and its whole job — planting feet on the measured floor and settling the
+    /// hips to make the reach — is the exact opposite of what an authored crouch wants.
+    public void ApplyGroundSlopeIk(float dt, bool onFloor, float speed = 0f, bool legsAuthored = false)
     {
         if (Skeleton == null) return;
         if (!_feetBonesResolved) ResolveFootBones();
@@ -1742,9 +1859,13 @@ public sealed partial class AvatarInstance : Node3D
         var skelXform = Skeleton.GlobalTransform;
         var skelInv = skelXform.AffineInverse();
 
-        if (!onFloor)
+        if (!onFloor || legsAuthored)
         {
-            // Smoothly recover rest height when in mid-air
+            // Smoothly recover rest height when in mid-air, and stand down entirely while an
+            // authored pose owns the legs. `_targetsInitialized = false` makes the next
+            // locomotion frame re-snap rather than lerp in from whatever stale target this
+            // pass last held — a crouch on a step followed by walking off it must not drag
+            // the legs toward a target measured under the crouch.
             _targetsInitialized = false;
             _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, 0f, dt * 10f);
             return;
@@ -1787,11 +1908,16 @@ public sealed partial class AvatarInstance : Node3D
         float targetHipDrop = Mathf.Clamp(minDrop * 1.0f, -0.55f, 0f);
         _smoothedHipDrop = Mathf.Lerp(_smoothedHipDrop, targetHipDrop, smoothRate);
 
-        // Apply Hip offset relative to bind rest position (no compounding)
+        // Apply Hip offset ADDITIVELY on the animated height. The old write —
+        // `_restHipsPos.Y + drop` — overwrote whatever the animation had done to the pelvis
+        // this frame (the retargeter's walk bounce, its crouch drop), snapping the body back
+        // to standing height under every clip. min() keeps the conformer strictly downward:
+        // it may settle the hips lower onto a ledge, never lift them above the animation.
         if (_hipsBone >= 0)
         {
             var curHip = Skeleton.GetBonePosePosition(_hipsBone);
-            Skeleton.SetBonePosePosition(_hipsBone, new Vector3(curHip.X, _restHipsPos.Y + _smoothedHipDrop, curHip.Z));
+            float wantY = curHip.Y + _smoothedHipDrop;
+            Skeleton.SetBonePosePosition(_hipsBone, new Vector3(curHip.X, Mathf.Min(curHip.Y, wantY), curHip.Z));
         }
 
         // Solve Two-Bone IK for left leg

@@ -28,9 +28,15 @@ public partial class StrokeCanvas : MultiMeshInstance3D
     private readonly Dictionary<ushort, List<StrokePoint>> _strokes = new();
     private int _segmentCount;
 
-    /// Local stroke id counter — only the local player allocates, starting above the network
-    /// alias range so there's no collision with remote strokes.
-    private ushort _localStrokeId = 1;
+    /// Local stroke id allocator. The wire carries no sender discriminator — the stroke id is
+    /// all a receiver gets — so the old counter starting at 1 meant every client's FIRST stroke
+    /// was also id 1: two people drawing at once interleaved their points into one polyline,
+    /// and stray cylinders sprang between unrelated pens. Each canvas now starts at a random
+    /// base inside the stroke range: ~32k ids against the dozens a session actually draws, so
+    /// two clients meeting is vanishingly unlikely, and a rejoin re-rolls the dice. Ids below
+    /// StrokeRangeStart never collide with this scheme, so strokes from older clients are safe.
+    private ushort _localStrokeId = (ushort)(NetIds.StrokeRangeStart
+        + GD.Randi() % (NetIds.StrokeRangeEnd - NetIds.StrokeRangeStart));
 
     /// Set by Main.cs so the canvas can broadcast stroke points over the ObjectSync channel.
     /// Signature matches <c>ISerikaTransport.SendObjectSync</c> for direct wiring.
@@ -66,7 +72,7 @@ public partial class StrokeCanvas : MultiMeshInstance3D
     public ushort BeginStroke(Vector3 pos, float hue, float radius)
     {
         ushort id = _localStrokeId++;
-        if (_localStrokeId >= NetIds.StrokeRangeEnd) _localStrokeId = 1; // wrap
+        if (_localStrokeId > NetIds.StrokeRangeEnd) _localStrokeId = NetIds.StrokeRangeStart; // wrap
         AddPoint(id, 0, pos, hue, radius, StrokeNetwork.FlagStart);
         return id;
     }

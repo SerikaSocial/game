@@ -42,6 +42,8 @@ public partial class SocialPanel : CanvasLayer
     /// Raised when the user acts on an invite. Main joins the world; the panel has no business
     /// knowing how joining works.
     public event Action<SerikaNotification> InviteAccepted;
+    public Func<string> InviteInstanceId;
+    private bool _sendingInvite;
 
     /// Raised whenever the unread count changes, so the quick-menu badge can follow it.
     public event Action<int> UnreadChanged;
@@ -438,7 +440,23 @@ public partial class SocialPanel : CanvasLayer
             return;
         }
         foreach (var u in _graph.Friends)
-            AddRow(u.Name, $"@{u.Username}", "Unfriend", () => _ = RemoveAsync(u));
+        {
+            if (!string.IsNullOrEmpty(InviteInstanceId?.Invoke()))
+                AddRow(u.Name, $"@{u.Username}", _sendingInvite ? "Sending…" : "Invite",
+                    _sendingInvite ? null : () => _ = InviteFriendAsync(u), "Unfriend", () => _ = RemoveAsync(u));
+            else AddRow(u.Name, $"@{u.Username}", "Unfriend", () => _ = RemoveAsync(u));
+        }
+    }
+
+    private async System.Threading.Tasks.Task InviteFriendAsync(ApiClient.SocialUser friend)
+    {
+        string instanceId = InviteInstanceId?.Invoke();
+        if (_api == null || _sendingInvite || string.IsNullOrEmpty(instanceId)) return;
+        _sendingInvite = true;
+        Render();
+        try { await _api.InviteToInstanceAsync(friend.Id, instanceId); _status.Text = $"Invited {friend.Name}."; }
+        catch (Exception e) { ShowError(e); }
+        finally { _sendingInvite = false; Render(); }
     }
 
     private void RenderRequests()

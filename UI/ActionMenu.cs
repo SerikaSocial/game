@@ -30,6 +30,7 @@ public partial class ActionMenu : CanvasLayer
     /// always appended so a custom dance can be cancelled from the same menu.
     public void SetCustomEmotes(System.Collections.Generic.IReadOnlyList<string> names)
     {
+        if (_inCustomSub) ResetToRoot();
         if (names == null || names.Count == 0) { _customRing = null; return; }
 
         int n = Math.Min(names.Count, 7);
@@ -48,19 +49,17 @@ public partial class ActionMenu : CanvasLayer
     }
 
     private Control _radialControl;
-    private bool _active;
     private int _hoveredSlice = -1;
-    private Vector2 _centerPos;
+    private bool _usingStick;
+    private bool _stickReady;
+    private bool _stickEngaged;
+    private bool _pointerInside;
+    public int SelectedSlice => _hoveredSlice;
+    public string PageTitle => _inCustomSub ? "Avatar emotes" : _openSub >= 0 ? RootSlices[_openSub].title : "Actions";
 
-    /// Larger on the VR panel.
-    ///
-    /// The wheel is drawn in logical pixels, so its angular size is fixed by these two numbers: at
-    /// 190 px against `VrUiSurface.LogicalSize` of 1000 across a 60.9° panel it subtends 23°, on a
-    /// surface with 61° to spend, and every wedge is a *ray* target aimed from 1.7 m away. 260 px
-    /// takes it to 32° and each of the six wedges to roughly 16° of arc, without the ring reaching
-    /// the panel edge where the curvature starts to skew the hit test.
-    private static float OuterRadius => VrUiSurface.Active ? 260f : 190f;
-    private static float InnerRadius => VrUiSurface.Active ? 88f : 65f;
+    /// The VR ring leaves room for its title and control hints inside the 1000×640 panel.
+    private static float OuterRadius => VrUiSurface.Active ? 240f : 218f;
+    private static float InnerRadius => VrUiSurface.Active ? 84f : 78f;
     /// Follows the active ring so submenus of a different size still line up.
     private int SliceCount => _slices.Length;
 
@@ -132,7 +131,10 @@ public partial class ActionMenu : CanvasLayer
 
     public void Open()
     {
-        _active = true;
+        _usingStick = false;
+        _stickReady = false;
+        _stickEngaged = false;
+        _pointerInside = false;
         Visible = true;
         ResetToRoot();
     }
@@ -143,12 +145,14 @@ public partial class ActionMenu : CanvasLayer
         _inCustomSub = false;
         _slices = RootSlices;
         _hoveredSlice = -1;
+        _stickReady = false;
+        _stickEngaged = false;
         _radialControl?.QueueRedraw();
     }
 
     public new void Hide()
     {
-        _active = false;
+        if (!Visible) return;
         Visible = false;
         Closed?.Invoke();
     }
@@ -158,8 +162,7 @@ public partial class ActionMenu : CanvasLayer
     public override void _Process(double delta)
     {
         if (!IsOpen) return;
-        Vector2 mousePos = GetViewport().GetMousePosition();
-        UpdateHoverSlice(mousePos);
+        if (!_usingStick) UpdateHoverSlice(GetViewport().GetMousePosition());
     }
 
     // Handled in _Input rather than _UnhandledInput so nothing higher in the UI can eat the
@@ -170,6 +173,8 @@ public partial class ActionMenu : CanvasLayer
 
         if (@event is InputEventMouseMotion mm)
         {
+            if (_stickEngaged || (_usingStick && mm.Relative.LengthSquared() < 9f)) return;
+            _usingStick = false;
             UpdateHoverSlice(mm.Position);
             return;
         }
@@ -184,7 +189,7 @@ public partial class ActionMenu : CanvasLayer
             else if (mb.ButtonIndex == MouseButton.Right)
             {
                 // Right-click steps back out of a submenu, or closes.
-                if (_openSub >= 0) ResetToRoot(); else Hide();
+                if (!BackOut()) Hide();
                 GetViewport().SetInputAsHandled();
             }
             return;
@@ -197,6 +202,22 @@ public partial class ActionMenu : CanvasLayer
         {
             int idx = (int)(k.Keycode - Key.Key1);
             if (idx < SliceCount) { _hoveredSlice = idx; Activate(); }
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
+        if (k.Keycode is Key.Left or Key.Right or Key.Up or Key.Down)
+        {
+            _usingStick = true;
+            _hoveredSlice = k.Keycode == Key.Up ? 0 : k.Keycode == Key.Down ? SliceCount / 2
+                : Mathf.PosMod(_hoveredSlice + (k.Keycode == Key.Right ? 1 : -1), SliceCount);
+            _radialControl.QueueRedraw();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+        if (k.Keycode == Key.Backspace)
+        {
+            if (!BackOut()) Hide();
             GetViewport().SetInputAsHandled();
             return;
         }
@@ -223,9 +244,10 @@ public partial class ActionMenu : CanvasLayer
         Vector2 center = GetViewport().GetVisibleRect().Size * 0.5f;
         Vector2 delta = mousePos - center;
         float dist = delta.Length();
+        _pointerInside = dist <= OuterRadius + 12f;
 
         int oldHover = _hoveredSlice;
-        if (dist < InnerRadius || dist > OuterRadius + 30f)
+        if (dist < InnerRadius || dist > OuterRadius + 12f)
         {
             _hoveredSlice = -1; // Center ring or outside
         }
@@ -246,8 +268,29 @@ public partial class ActionMenu : CanvasLayer
 
     private void SelectSlice(Vector2 clickPos)
     {
+        _usingStick = false;
         UpdateHoverSlice(clickPos);
-        Activate();
+        if (_pointerInside) Activate();
+    }
+
+    /// A stick must return to neutral after opening or changing a page. OpenXR stick +Y is up;
+    /// screen-space Y points down. Selection stays put when the thumb returns to neutral.
+    public bool SelectFromStick(Vector2 stick)
+    {
+        if (!IsOpen) return false;
+        _stickEngaged = stick.LengthSquared() >= .16f;
+        if (stick.LengthSquared() < .04f) { _stickReady = true; return false; }
+        if (!_stickReady || stick.LengthSquared() < .16f) return false;
+        int previous = _hoveredSlice;
+        _usingStick = true;
+        UpdateHoverSlice(GetViewport().GetVisibleRect().Size * .5f
+            + new Vector2(stick.X, -stick.Y).Normalized() * ((InnerRadius + OuterRadius) * .5f));
+        return previous != _hoveredSlice;
+    }
+
+    public void ConfirmSelection()
+    {
+        if (IsOpen && _hoveredSlice >= 0) Activate();
     }
 
     /// Act on whatever wedge is currently hovered (or the centre, if none).
@@ -319,6 +362,8 @@ public partial class ActionMenu : CanvasLayer
         for (int i = 0; i < entries.Length; i++) ring[i] = (entries[i].title, entries[i].icon);
         _slices = ring;
         _hoveredSlice = -1;
+        _stickReady = false;
+        _stickEngaged = false;
         _radialControl.QueueRedraw();
     }
 
@@ -331,54 +376,71 @@ public partial class ActionMenu : CanvasLayer
         for (int i = 0; i < _customRing.Length; i++) ring[i] = (_customRing[i].title, _customRing[i].icon);
         _slices = ring;
         _hoveredSlice = -1;
+        _stickReady = false;
+        _stickEngaged = false;
         _radialControl.QueueRedraw();
     }
 
     private void DrawRadialMenu()
     {
         if (!Visible) return;
-
-        Vector2 center = _radialControl.Size * 0.5f;
-        _centerPos = center;
-
-        // Dark backdrop glow circle
-        _radialControl.DrawCircle(center, OuterRadius + 10f, new Color(0.05f, 0.08f, 0.12f, 0.85f));
-
+        Vector2 center = _radialControl.Size * .5f;
+        var font = ThemeDB.FallbackFont;
+        float radius = OuterRadius;
+        _radialControl.DrawCircle(center, radius + 14, Brand.Bg0 with { A = .94f });
+        _radialControl.DrawArc(center, radius + 14, 0, Mathf.Tau, 96, Brand.Border, 1.5f, true);
         float sliceAngle = Mathf.Tau / SliceCount;
-        float startAngleOffset = -Mathf.Pi / 2f - sliceAngle / 2f;
-
-        // Draw 6 radial slices
+        float offset = -Mathf.Pi / 2 - sliceAngle / 2;
         for (int i = 0; i < SliceCount; i++)
         {
-            float a1 = startAngleOffset + i * sliceAngle;
-            float a2 = a1 + sliceAngle;
-
-            bool isHovered = (i == _hoveredSlice);
-            Color fillCol = isHovered ? Brand.Primary : new Color(0.12f, 0.16f, 0.24f, 0.9f);
-            Color borderCol = isHovered ? Brand.Accent : Brand.Border;
-
-            DrawArcSegment(center, InnerRadius, OuterRadius, a1, a2, fillCol, borderCol);
-
-            // Draw Icon & Title in slice center
-            float midAngle = (a1 + a2) * 0.5f;
-            float iconRadius = (InnerRadius + OuterRadius) * 0.5f;
-            Vector2 labelPos = center + new Vector2(Mathf.Cos(midAngle), Mathf.Sin(midAngle)) * iconRadius;
-
-            var sliceData = _slices[i];
-            var font = ThemeDB.FallbackFont;
-            const int iconPx = 26;
-            var iconTex = Icons.Get(sliceData.icon, iconPx, isHovered ? Colors.White : Brand.AccentSoft);
-            _radialControl.DrawTexture(iconTex, labelPos + new Vector2(-iconPx / 2f, -iconPx - 2));
-            _radialControl.DrawString(font, labelPos + new Vector2(-40, 16), sliceData.title, HorizontalAlignment.Center, 80, 12, isHovered ? Colors.White : Brand.TextMid);
+            float a1 = offset + i * sliceAngle, a2 = a1 + sliceAngle;
+            bool selected = i == _hoveredSlice;
+            DrawArcSegment(center, InnerRadius + 5, radius, a1 + .014f, a2 - .014f,
+                selected ? Brand.PrimaryLo : Brand.Bg2,
+                selected ? Brand.Accent : Brand.BorderSoft);
+            float angle = (a1 + a2) * .5f;
+            var direction = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+            var label = center + direction * ((InnerRadius + radius) * .51f);
+            int iconSize = VrUiSurface.Active ? 32 : 28;
+            _radialControl.DrawTexture(Icons.Get(_slices[i].icon, iconSize, selected ? Brand.TextHi : Brand.AccentSoft),
+                label + new Vector2(-iconSize * .5f, -iconSize - 2));
+            int fontSize = Brand.Fs(VrUiSurface.Active ? 17 : 15);
+            string title = _slices[i].title;
+            float width = font.GetStringSize(title, HorizontalAlignment.Left, -1, fontSize).X;
+            _radialControl.DrawString(font, label + new Vector2(-width * .5f, 16), title,
+                HorizontalAlignment.Left, -1, fontSize, selected ? Brand.TextHi : Brand.TextMid);
+            if (!VrUiSurface.Active)
+            {
+                var number = center + direction * (radius - 19);
+                _radialControl.DrawString(font, number + new Vector2(-4, 4), (i + 1).ToString(),
+                    HorizontalAlignment.Left, -1, 11, selected ? Brand.AccentSoft : Brand.TextDim);
+            }
         }
+        _radialControl.DrawCircle(center, InnerRadius, Brand.Bg1);
+        _radialControl.DrawArc(center, InnerRadius, 0, Mathf.Tau, 64, Brand.Border, 1.5f, true);
+        bool back = _openSub >= 0 || _inCustomSub;
+        string centerTitle = back ? "Back" : "Close";
+        if (back)
+        {
+            _radialControl.DrawLine(center + new Vector2(7, -28), center + new Vector2(-5, -16), Brand.AccentSoft, 2.5f, true);
+            _radialControl.DrawLine(center + new Vector2(-5, -16), center + new Vector2(7, -4), Brand.AccentSoft, 2.5f, true);
+        }
+        else _radialControl.DrawTexture(Icons.Get(Icons.Kind.Close, 24, Brand.AccentSoft), center + new Vector2(-12, -28));
+        float labelWidth = font.GetStringSize(centerTitle, HorizontalAlignment.Left, -1, 16).X;
+        _radialControl.DrawString(font, center + new Vector2(-labelWidth * .5f, 21), centerTitle,
+            HorizontalAlignment.Left, -1, 16, Brand.TextHi);
+        DrawCentered(PageTitle, center + new Vector2(0, -radius - 30), 22, Brand.TextHi);
+        DrawCentered(VrUiSurface.Active ? "Aim + trigger  ·  Stick + A  ·  B / Y to close"
+            : "Click to choose  ·  1–6 shortcuts  ·  Esc to go back",
+            center + new Vector2(0, radius + 40), Brand.Fs(13), Brand.TextMid);
+    }
 
-        // Draw Center Circle (Close ring)
-        Color centerCol = (_hoveredSlice < 0) ? Brand.PrimaryLo : Brand.Bg2;
-        _radialControl.DrawCircle(center, InnerRadius, centerCol);
-        _radialControl.DrawArc(center, InnerRadius, 0, Mathf.Tau, 32, Brand.Border, 2f);
-        const int closePx = 20;
-        _radialControl.DrawTexture(Icons.Get(Icons.Kind.Close, closePx, Brand.TextHi),
-                                   center - new Vector2(closePx / 2f, closePx / 2f));
+    private void DrawCentered(string text, Vector2 at, int size, Color color)
+    {
+        var font = ThemeDB.FallbackFont;
+        float width = font.GetStringSize(text, HorizontalAlignment.Left, -1, size).X;
+        _radialControl.DrawString(font, at - new Vector2(width * .5f, 0), text,
+            HorizontalAlignment.Left, -1, size, color);
     }
 
     private void DrawArcSegment(Vector2 center, float innerR, float outerR, float a1, float a2, Color fill, Color border)

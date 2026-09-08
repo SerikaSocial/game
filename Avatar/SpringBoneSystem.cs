@@ -669,7 +669,13 @@ public sealed partial class SpringBoneSystem : Node
                 // Publish this joint's world rotation for its children, still inside the step —
                 // children solved later in this pass need the *current* orientation, not last
                 // frame's, or a chain lags one joint per link and whips.
-                j.WorldRot = SwingTo(restDir, (tail - head) / length) * restWorldRot;
+                //
+                // Normalized at the write, because one denormal here propagates to every child
+                // and then throws inside Quaternion's own multiply on the next step — observed
+                // on a PMX-sourced rig under saturation. If the swing itself produced garbage
+                // (NaN tail), fall back to the rest rotation, which is unit by construction.
+                Quaternion worldRot = (SwingTo(restDir, (tail - head) / length) * restWorldRot).Normalized();
+                j.WorldRot = worldRot.IsNormalized() ? worldRot : restWorldRot;
             }
 
             // A chain that has stopped moving, hanging off a body that has stopped moving, is

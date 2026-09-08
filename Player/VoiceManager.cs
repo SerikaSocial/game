@@ -364,6 +364,10 @@ public partial class VoiceManager : Node
             // Voice Activity Detection (VAD)
             float threshold = Mathf.Max(MinVadThreshold, _noiseFloor * 2.2f) * VadSensitivity;
             bool gateOpen = _mode != MicMode.PushToTalk || PushToTalkHeld;
+            // The hangover tail runs after key-up too: PTT exists to gate what you START
+            // sending, and clipping the 250 ms decay the instant the key lifts cut the end
+            // off every word said while releasing — audible as chopped final syllables.
+            bool tailFlowing = gateOpen || _mode == MicMode.PushToTalk;
 
             if (rms > threshold && gateOpen)
             {
@@ -374,7 +378,7 @@ public partial class VoiceManager : Node
             {
                 if (rms <= threshold)
                     _noiseFloor = Mathf.Lerp(_noiseFloor, rms, 0.02f); // slow adapt to background noise
-                if (_vadHangoverTimer > 0f && gateOpen)
+                if (_vadHangoverTimer > 0f && tailFlowing)
                 {
                     _vadHangoverTimer -= FrameMs / 1000f;
                     IsSpeaking = true;

@@ -158,6 +158,20 @@ public static class BreastRig
         Vector3 leftOrigin = leftApex - forward * (lobeRadius * 0.7f);
         Vector3 rightOrigin = rightApex - forward * (lobeRadius * 0.7f);
 
+        // Mirror the two pivots about the chest's sagittal plane. The apex search is
+        // data-driven, and asymmetric clothing defeats it: a jacket lapel dragged one side's
+        // candidate apex several centimetres off, planting the two bones at different
+        // heights. Chest tissue is mirror-symmetric by anatomy, so height, protrusion and
+        // lateral offset are averaged and applied to both sides — the data still decides the
+        // magnitude, symmetry decides the arrangement.
+        float latL = Mathf.Abs((leftOrigin - chestPos).Dot(rightDir));
+        float latR = Mathf.Abs((rightOrigin - chestPos).Dot(rightDir));
+        float lateral = (latL + latR) * 0.5f;
+        float lift = ((leftOrigin.Y - chestPos.Y) + (rightOrigin.Y - chestPos.Y)) * 0.5f;
+        float protr = ((leftOrigin - chestPos).Dot(forward) + (rightOrigin - chestPos).Dot(forward)) * 0.5f;
+        leftOrigin = chestPos + rightDir * -lateral + Vector3.Up * lift + forward * protr;
+        rightOrigin = chestPos + rightDir * lateral + Vector3.Up * lift + forward * protr;
+
         int leftIdx = AddBonePair(skeleton, chest, LeftBone, leftOrigin, leftApex);
         int rightIdx = AddBonePair(skeleton, chest, RightBone, rightOrigin, rightApex);
         if (leftIdx < 0 || rightIdx < 0) return result;

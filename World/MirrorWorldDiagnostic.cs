@@ -131,7 +131,7 @@ public static partial class MirrorWorldDiagnostic
         var cam = new Camera3D { Name = "MirrorWorldCam", Fov = 70, Current = true };
         worldRoot.AddChild(cam);
 
-        host.AddChild(new Driver(host, worldRoot, cam, avatar, mirrors, centre, normal, quad,
+        host.AddChild(new Driver(host, worldRoot, cam, avatar, target, mirrors, centre, normal, quad,
                                  spawn.Y, outPrefix));
     }
 
@@ -141,20 +141,23 @@ public static partial class MirrorWorldDiagnostic
         private readonly Node3D _worldRoot;
         private readonly Camera3D _cam;
         private readonly SerikaSocial.Avatar.AvatarInstance _avatar;
+        private readonly Mirror _target;
         private readonly List<Mirror> _mirrors;
         private readonly Vector3 _centre, _normal;
         private readonly Vector2 _quad;
         private readonly float _floorY;
         private readonly string _out;
 
-        // Viewpoints around the target glass: head-on, two obliques, and one further back.
-        private readonly (string Name, float Dist, float YawDeg, float Height)[] _shots =
+        // Viewpoints around the target glass: regular whole-mirror shots plus a deliberately
+        // close, frame-filling one. The latter catches the old whole-glass texture stretch.
+        private readonly (string Name, float Dist, float YawDeg, float Height, bool AtCentre)[] _shots =
         {
-            ("head_on",  3.6f,   0f, 1.60f),
-            ("oblique_l", 3.8f, -42f, 1.60f),
-            ("oblique_r", 3.8f,  42f, 1.60f),
-            ("far_back",  6.0f,   0f, 1.75f),
-            ("low",       3.4f,  18f, 1.05f),
+            ("head_on",  3.6f,   0f, 1.60f, false),
+            ("oblique_l", 3.8f, -42f, 1.60f, false),
+            ("oblique_r", 3.8f,  42f, 1.60f, false),
+            ("far_back",  6.0f,   0f, 1.75f, false),
+            ("low",       3.4f,  18f, 1.05f, false),
+            ("close_fill", .30f, 0f, 0f, true),
         };
 
         private int _frames, _shotIndex, _shotFrames;
@@ -162,18 +165,18 @@ public static partial class MirrorWorldDiagnostic
         private int _peakLive;
 
         public Driver(Node host, Node3D worldRoot, Camera3D cam,
-                      SerikaSocial.Avatar.AvatarInstance avatar, List<Mirror> mirrors,
+                      SerikaSocial.Avatar.AvatarInstance avatar, Mirror target, List<Mirror> mirrors,
                       Vector3 centre, Vector3 normal, Vector2 quad, float floorY, string outPrefix)
         {
             _host = host; _worldRoot = worldRoot; _cam = cam; _avatar = avatar;
-            _mirrors = mirrors; _centre = centre; _normal = normal; _quad = quad;
+            _target = target; _mirrors = mirrors; _centre = centre; _normal = normal; _quad = quad;
             _floorY = floorY; _out = outPrefix;
         }
 
         public override void _Process(double delta)
         {
             _frames++;
-            _avatar.Animate(delta, 0f, true);
+            _avatar.Animate(1.0 / 60.0, 0f, true);
             if (_frames < WarmupFrames) return;
 
             if (_shotIndex >= _shots.Length) { Finish(); return; }
@@ -187,7 +190,7 @@ public static partial class MirrorWorldDiagnostic
                 float rad = Mathf.DegToRad(shot.YawDeg);
                 Vector3 dir = (_normal * Mathf.Cos(rad) + right * Mathf.Sin(rad)).Normalized();
                 Vector3 eye = _centre + dir * shot.Dist;
-                eye.Y = _floorY + shot.Height;
+                eye.Y = shot.AtCentre ? _centre.Y : _floorY + shot.Height;
                 _cam.GlobalPosition = eye;
                 _cam.LookAt(_centre, Vector3.Up);
                 _shotFrames++;
@@ -213,6 +216,25 @@ public static partial class MirrorWorldDiagnostic
             bool budgetOk = live <= budget;
             _ok &= budgetOk;
 
+            bool closeQualityOk = true;
+            if (name == "close_fill")
+            {
+                Vector4 window = _target.TextureWindowForDiagnostic(_cam);
+                Vector2 span = new(window.Z - window.X, window.W - window.Y);
+                Vector2I targetSize = _target.TextureTargetSizeForDiagnostic(_cam);
+                Vector2 mainSize = _worldRoot.GetViewport().GetVisibleRect().Size;
+                float scale = UI.DeviceProfile.MirrorResolutionScale;
+                float pixelBudget = mainSize.X * mainSize.Y * scale * scale;
+                float targetPixels = targetSize.X * targetSize.Y;
+                // A close mirror should have a small source window but no larger render target
+                // than the ordinary per-view budget. That is what fixes resolution without
+                // masking the defect by silently allocating a 4× texture.
+                closeQualityOk = span.X < .5f && span.Y < .5f && targetPixels <= pixelBudget * 1.05f;
+                _ok &= closeQualityOk;
+                GD.Print($"MIRRORWORLD close crop={span} target={targetSize} " +
+                         $"budget={pixelBudget:0} {(closeQualityOk ? "ok" : "FAIL")}");
+            }
+
             var img = _worldRoot.GetViewport().GetTexture()?.GetImage();
             string path = $"{_out}_{name}.png";
             if (img != null)
@@ -222,7 +244,7 @@ public static partial class MirrorWorldDiagnostic
             }
 
             GD.Print($"MIRRORWORLD [{name}] live={live}/{_mirrors.Count} (budget {budget}) " +
-                     $"{(budgetOk ? "ok" : "FAIL — over budget")} → {path}");
+                     $"{(budgetOk && closeQualityOk ? "ok" : "FAIL")} → {path}");
         }
 
         private void Finish()

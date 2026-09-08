@@ -103,7 +103,12 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
 
     /// Pinch edge-detection for hand-tracked UI clicks, the bare-hands equivalent of the
     /// trigger's Schmitt trigger in `VrUiPointer`.
-    private bool _pinchLatch;
+    private readonly UI.VrPointerPress[] _pointerPress = { new(), new() };
+    private bool _pointerHovering;
+    private int _lastPointerHand = -1;
+    private int _menuHand = 1;
+    private bool _actionMenuWasOpen, _actionConfirmArmed, _actionConfirmLatch;
+    public ActionMenu ActionMenu { get; set; }
 
     public float MouseSensitivity { get; set; } = 0.003f; // unused in VR; satisfies IPlayer
 
@@ -180,10 +185,44 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     public float GetTriggerValue(int i)
     {
         var hand = i == 0 ? _leftHand : _rightHand;
-        return GodotObject.IsInstanceValid(hand) ? hand.GetFloat(ActTrigger) : 0f;
+        return ControlsEnabled && _worldTriggerReady[i] && GodotObject.IsInstanceValid(hand) && hand.GetHasTrackingData() ? hand.GetFloat(ActTrigger) : 0f;
     }
 
-    public bool ControlsEnabled { get; set; } = true;
+    private bool _controlsEnabled = true;
+    private bool _worldSticksReady = true;
+    private readonly bool[] _worldTriggerReady = { true, true };
+    public bool ControlsEnabled
+    {
+        get => _controlsEnabled;
+        set
+        {
+            if (_controlsEnabled == value) return;
+            _controlsEnabled = value;
+            _worldSticksReady = false;
+            _worldTriggerReady[0] = _worldTriggerReady[1] = false;
+        }
+    }
+
+    private Vector2 WorldStick(XRController3D hand) => _worldSticksReady && ControlsEnabled
+        ? StickOf(hand, hand == _leftHand) : Vector2.Zero;
+
+    private void SyncMenuInputGates()
+    {
+        if (StickOf(_leftHand, true).LengthSquared() < .04f && StickOf(_rightHand, false).LengthSquared() < .04f)
+            _worldSticksReady = true;
+        for (int i = 0; i < 2; i++)
+        {
+            var hand = i == 0 ? _leftHand : _rightHand;
+            float pressure = IsHandTracked(i) ? _handTrack[i].Pinch : hand.GetFloat(ActTrigger);
+            if (pressure < .4f) _worldTriggerReady[i] = true;
+            if (!ControlsEnabled)
+            {
+                _triggerLatch[i] = pressure > .4f;
+                _gripLatch[i] = IsHandTracked(i)
+                    ? (_curl[i][2] + _curl[i][3] + _curl[i][4]) / 3 > .6f : GripOf(hand, i == 0) > .6f;
+            }
+        }
+    }
 
     // ── Input reads ──────────────────────────────────────────────────────────────────
     // Routed through these three accessors so the headless diagnostic can inject controller
@@ -194,17 +233,20 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private static Vector2 StickOf(XRController3D hand, bool left)
     {
         if (VrTestInput.Active) return left ? VrTestInput.LeftStick : VrTestInput.RightStick;
-        return hand.GetVector2(ActStick);
+        return hand.GetHasTrackingData() ? hand.GetVector2(ActStick) : Vector2.Zero;
     }
 
     private static float GripOf(XRController3D hand, bool left)
     {
         if (VrTestInput.Active) return left ? VrTestInput.LeftGrip : 0f;
-        return hand.GetFloat(ActGrip);
+        return hand.GetHasTrackingData() ? hand.GetFloat(ActGrip) : 0f;
     }
 
+    private static bool ButtonOf(XRController3D hand, string action)
+        => hand.GetHasTrackingData() && hand.IsButtonPressed(action);
+
     private static bool JumpButton(XRController3D hand)
-        => VrTestInput.Active ? VrTestInput.JumpHeld : hand.IsButtonPressed(ActPrimaryBtn);
+        => VrTestInput.Active ? VrTestInput.JumpHeld : ButtonOf(hand, ActPrimaryBtn);
 
     public override void _Ready()
     {
@@ -530,7 +572,7 @@ void fragment() {
     /// auto-calibrate, so equipping a 1.2 m chibi shrinks the world and a 2 m giant expands it.
     private void ApplyHeightOffset()
     {
-        if (_origin == null) return;
+        if (_origin == null || _occupying != null) return;
 
         float manualOffset = UI.DeviceProfile.Settings.VrHeightOffset;
         float avatarEyeHeight = _avatar != null ? _avatar.Height * 0.93f : DefaultPlayerEyeHeight;
@@ -907,6 +949,7 @@ void fragment() {
         // through the floor before the first tracked frame arrives. Clamp to a long-but-sane
         // frame; nothing here needs to simulate a real 30-second step.
         float dt = Mathf.Min((float)delta, 0.1f);
+        if (UpdateSeat(dt)) return;
 
         // Deliberately OUTSIDE TryAutoCalibrate, and ahead of it. The calibrator bails early when
         // `XRServer` has no "head" tracker, which is the right guard for *measuring a height* —
@@ -926,14 +969,15 @@ void fragment() {
         UpdateHeadVelocity(dt);
         SyncBodyToHead();
 
+        // Resolve menu ownership before gameplay so the opening frame cannot also turn or grab.
+        HandleButtons(dt);
+        SyncMenuInputGates();
+        UpdateActionNavigation();
         if (ControlsEnabled)
         {
             HandleTurn(dt);
             HandleGrab(dt);
         }
-
-        // Menu buttons stay live while a menu is open — that is how you close it again.
-        HandleButtons(dt);
         UpdatePointer();
 
         var planarSpeed = HandleLocomotion(dt);
@@ -1078,7 +1122,7 @@ void fragment() {
         if (!IsOnFloor()) v.Y -= _gravity * dt;
 
         var moveHand = MoveHand;
-        var stick = ControlsEnabled ? StickOf(moveHand, left: moveHand == _leftHand) : Vector2.Zero;
+        var stick = WorldStick(moveHand);
 
         if (UI.DeviceProfile.Settings.VrLocomotion == UI.DeviceProfile.Settings.Locomotion.Teleport)
         {
@@ -1111,7 +1155,7 @@ void fragment() {
             if (UI.DeviceProfile.Settings.VrDashTeleport)
             {
                 var turnHand = TurnHand;
-                var right = ControlsEnabled ? StickOf(turnHand, left: turnHand == _leftHand) : Vector2.Zero;
+                var right = WorldStick(turnHand);
                 // Only the forward push arms the dash, and only when the stick is not being used
                 // to turn, so a diagonal flick turns rather than blinking you across the room.
                 var dashStick = Mathf.Abs(right.X) < TurnDeadzone ? right : Vector2.Zero;
@@ -1292,7 +1336,7 @@ void fragment() {
     private void HandleTurn(float dt)
     {
         var turnHand = TurnHand;
-        float x = StickOf(turnHand, left: turnHand == _leftHand).X;
+        float x = WorldStick(turnHand).X;
 
         if (UI.DeviceProfile.Settings.VrSnapTurn)
         {
@@ -1339,92 +1383,83 @@ void fragment() {
     ///
     /// Only runs while a menu owns input (`ControlsEnabled == false`), so the laser never
     /// interferes with normal play.
+    private void UpdateActionNavigation()
+    {
+        bool open = ActionMenu?.IsOpen == true;
+        bool confirm = JumpButton(_rightHand);
+        if (!open) { _actionMenuWasOpen = false; _actionConfirmArmed = false; _actionConfirmLatch = confirm; return; }
+        if (!_actionMenuWasOpen) { _actionMenuWasOpen = true; _actionConfirmArmed = false; }
+        if (!confirm) _actionConfirmArmed = true;
+        var hand = _menuHand == 0 ? _leftHand : _rightHand;
+        if (ActionMenu.SelectFromStick(StickOf(hand, _menuHand == 0)))
+            Pulse(hand, .12f, .015f);
+        if (_actionConfirmArmed && confirm && !_actionConfirmLatch) ActionMenu.ConfirmSelection();
+        _actionConfirmLatch = confirm;
+    }
+
     private void UpdatePointer()
     {
-        // The pointer exists to click menus, so it appears only when there is a menu — not merely
-        // whenever control is suspended, and emphatically not because some always-on HUD chrome
-        // happens to be drawn. See `VrUiSurface.HasInteractiveUi`.
-        bool menuOpen = UiSurface != null && UiSurface.HasInteractiveUi;
-
+        bool menuOpen = UiSurface?.HasInteractiveUi == true;
         int i = _pointerHand;
         var hand = i == 0 ? _leftHand : _rightHand;
         bool bare = IsHandTracked(i);
-
-        // With bare hands the ray leaves the index fingertip; with a controller it leaves the
-        // controller's aim axis.
         Vector3 origin, aim;
-        bool haveRay = bare
-            ? _handTrack[i].TryGetPointerRay(out origin, out aim)
+        bool haveRay = bare ? _handTrack[i].TryGetPointerRay(out origin, out aim)
             : TryControllerRay(hand, out origin, out aim);
-
-        // The laser is a stand-in for a finger. When the player has an actual finger to point
-        // with, drawing a beam out of it is redundant clutter — the fingertip and the dot on the
-        // panel already say everything the beam would.
-        _laser.Visible = menuOpen && haveRay && !bare;
-        // The laser is parented to the right controller but the pointer can be either hand.
-        if (_laser.Visible && _laser.GetParent() != hand) Reparent(_laser, hand);
-
-        if (!menuOpen || !haveRay)
+        if (i != _lastPointerHand)
         {
-            if (_laserDot != null) _laserDot.Visible = false;
             if (_pointerDown) ReleasePointer();
-            _pinchLatch = false;
-            return;
+            _lastPointerHand = i;
         }
-
+        _laser.Visible = menuOpen && haveRay && !bare;
+        if (_laser.Visible && _laser.GetParent() != hand) Reparent(_laser, hand);
         Vector2 screen = Vector2.Zero;
-        bool hitPanel = UiSurface.RayHit(origin, aim, out var hit) && UiSurface.WorldToViewport(hit, out screen);
-
+        Vector3 hit = default;
+        bool hitPanel = menuOpen && haveRay && UiSurface.RayHit(origin, aim, out hit)
+            && UiSurface.WorldToViewport(hit, out screen);
+        if (_laserDot != null) _laserDot.Visible = hitPanel;
         if (hitPanel)
         {
-            if (_laserDot != null)
+            _laserDot.GlobalPosition = hit;
+            float reach = Mathf.Clamp(origin.DistanceTo(hit), .05f, 3f);
+            _laser.Scale = new Vector3(1, 1, reach / 2f);
+            _laser.Position = new Vector3(0, 0, -reach * .5f);
+            var relative = screen - _pointerPos;
+            _pointerPos = screen;
+            UiSurface.Viewport.PushInput(new InputEventMouseMotion
             {
-                _laserDot.Visible = true;
-                _laserDot.GlobalPosition = hit;
-            }
-
-            if (screen != _pointerPos)
-            {
-                _pointerPos = screen;
-                UiSurface.Viewport.PushInput(
-                    new InputEventMouseMotion { Position = screen, GlobalPosition = screen }, true);
-            }
-        }
-        else
-        {
-            if (_laserDot != null) _laserDot.Visible = false;
-        }
-
-        // Click: a pinch with bare hands, the trigger with a controller. Both use a Schmitt
-        // trigger — a single threshold makes an analogue input held near it chatter press/release
-        // for several frames, which reads as a dead or double-firing button.
-        bool pressed;
-        if (bare)
-        {
-            float pinch = _handTrack[i].Pinch;
-            pressed = _pinchLatch ? pinch > 0.55f : pinch > 0.8f;
-            _pinchLatch = pressed;
-        }
-        else
-        {
-            pressed = _pointerDown ? hand.GetFloat(ActTrigger) > 0.4f : hand.GetFloat(ActTrigger) > 0.7f;
-        }
-
-        // A press only counts on the panel; a release always fires, so dragging off the panel can
-        // never latch a button down forever.
-        if (pressed != _pointerDown && (hitPanel || !pressed))
-        {
-            _pointerDown = pressed;
-            UiSurface.Viewport.PushInput(new InputEventMouseButton
-            {
-                Position = hitPanel ? screen : _pointerPos,
-                GlobalPosition = hitPanel ? screen : _pointerPos,
-                ButtonIndex = MouseButton.Left,
-                ButtonMask = pressed ? MouseButtonMask.Left : 0,
-                Pressed = pressed,
+                Position = screen, GlobalPosition = screen, Relative = relative,
+                ButtonMask = _pointerDown ? MouseButtonMask.Left : 0,
             }, true);
-            if (pressed) Pulse(hand, 0.3f, 0.02f);
         }
+        else
+        {
+            _laser.Scale = Vector3.One;
+            _laser.Position = new Vector3(0, 0, -1);
+            if (_pointerHovering) UiSurface?.Viewport.PushInput(new InputEventMouseMotion
+                { Position = new Vector2(-100, -100), GlobalPosition = new Vector2(-100, -100) }, true);
+        }
+        _pointerHovering = hitPanel;
+        float pressure = bare ? _handTrack[i].Pinch : hand.GetFloat(ActTrigger);
+        // Observe the other hand too: a neutral controller may take over with its first fresh
+        // trigger pull, while a controller already held through menu-open still cannot click.
+        int otherIndex = 1 - i;
+        var otherHand = otherIndex == 0 ? _leftHand : _rightHand;
+        bool otherBare = IsHandTracked(otherIndex);
+        float otherPressure = otherBare ? _handTrack[otherIndex].Pinch : otherHand.GetFloat(ActTrigger);
+        _pointerPress[otherIndex].Step(menuOpen && (otherBare || otherHand.GetHasTrackingData()), false,
+            otherPressure, otherBare ? .8f : .7f, otherBare ? .55f : .4f);
+        var change = _pointerPress[i].Step(menuOpen && haveRay, hitPanel, pressure, bare ? .8f : .7f, bare ? .55f : .4f);
+        if (change == UI.VrPointerPress.Change.None) return;
+        bool pressed = change == UI.VrPointerPress.Change.Press;
+        var at = change == UI.VrPointerPress.Change.Cancel ? new Vector2(-100, -100) : screen;
+        _pointerDown = pressed;
+        UiSurface?.Viewport.PushInput(new InputEventMouseButton
+        {
+            Position = at, GlobalPosition = at, ButtonIndex = MouseButton.Left,
+            ButtonMask = pressed ? MouseButtonMask.Left : 0, Pressed = pressed,
+        }, true);
+        if (pressed) Pulse(hand, .3f, .02f);
     }
 
     /// A controller's aim ray, or false when the controller is not tracked — a stale pose points
@@ -1455,8 +1490,8 @@ void fragment() {
         if (_laserDot != null) _laserDot.Visible = false;
         UiSurface?.Viewport.PushInput(new InputEventMouseButton
         {
-            Position = _pointerPos,
-            GlobalPosition = _pointerPos,
+            Position = new Vector2(-100, -100),
+            GlobalPosition = new Vector2(-100, -100),
             ButtonIndex = MouseButton.Left,
             Pressed = false,
         }, true);
@@ -1490,14 +1525,14 @@ void fragment() {
         // Explicitly latched. The floor check was never an edge trigger, whatever the old comment
         // claimed: holding A while grounded re-applied jump velocity on every single frame, so the
         // player pogoed continuously instead of jumping once.
-        bool jump = ControlsEnabled && JumpButton(_rightHand);
-        if (jump && !_jumpLatch && IsOnFloor())
+        bool jump = JumpButton(_rightHand);
+        if (ControlsEnabled && jump && !_jumpLatch && IsOnFloor())
             Velocity = Velocity with { Y = JumpVelocity };
         _jumpLatch = jump;
 
         // Mute — X. Live while a menu is open: needing to close a menu before you can stop
         // transmitting is exactly backwards.
-        bool mute = _leftHand.IsButtonPressed(ActPrimaryBtn);
+        bool mute = ButtonOf(_leftHand, ActPrimaryBtn);
         if (mute && !_muteLatch) MutePressed?.Invoke();
         _muteLatch = mute;
 
@@ -1507,10 +1542,19 @@ void fragment() {
         // the radial appears under a thumb that is still down, which is how it is then used. The
         // release is swallowed in that case, or every hold would also open the quick menu behind
         // it on the way out.
-        bool face = _leftHand.IsButtonPressed(ActSecondaryBtn) || _rightHand.IsButtonPressed(ActSecondaryBtn)
-                    || _leftHand.IsButtonPressed(ActMenu) || _rightHand.IsButtonPressed(ActMenu);
-        if (face)
+        bool leftFace = ButtonOf(_leftHand, ActSecondaryBtn) || ButtonOf(_leftHand, ActMenu);
+        bool rightFace = ButtonOf(_rightHand, ActSecondaryBtn) || ButtonOf(_rightHand, ActMenu);
+        bool bothMenu = ButtonOf(_leftHand, ActMenu) && ButtonOf(_rightHand, ActMenu);
+        bool face = leftFace || rightFace;
+        if (_faceHeld > 0 && !(_menuHand == 0 ? _leftHand : _rightHand).GetHasTrackingData()) _faceConsumed = true;
+        if (bothMenu)
         {
+            _faceConsumed = true;
+            _faceHeld = 0;
+        }
+        else if (face)
+        {
+            if (_faceHeld == 0) _menuHand = leftFace ? 0 : 1;
             _faceHeld += dt;
             if (!_faceConsumed && _faceHeld >= ActionMenuHoldSeconds)
             {
@@ -1526,8 +1570,13 @@ void fragment() {
         }
 
         // Stick click — the action menu directly, VRChat's "Action Menu Left/Right".
-        bool stickClick = _leftHand.IsButtonPressed(ActStickClick) || _rightHand.IsButtonPressed(ActStickClick);
-        if (stickClick && !_actionLatch) ActionMenuPressed?.Invoke();
+        bool stickClick = ButtonOf(_leftHand, ActStickClick) || ButtonOf(_rightHand, ActStickClick);
+        if (stickClick && !_actionLatch && !bothMenu)
+        {
+            _menuHand = ButtonOf(_leftHand, ActStickClick) ? 0 : 1;
+            _faceConsumed = face;
+            ActionMenuPressed?.Invoke();
+        }
         _actionLatch = stickClick;
 
         // Bare hands have no buttons at all, so they reach the quick menu by the wrist tap.
@@ -1536,7 +1585,6 @@ void fragment() {
         _menuLatch = wrist;
 
         // Recentre — both menu buttons, held.
-        bool bothMenu = _leftHand.IsButtonPressed(ActMenu) && _rightHand.IsButtonPressed(ActMenu);
         _recenterHeld = bothMenu ? _recenterHeld + dt : 0f;
         if (_recenterHeld >= RecenterHoldSeconds && !_recenterLatch) { _recenterLatch = true; Recenter(); }
         if (!bothMenu) _recenterLatch = false;
@@ -1648,7 +1696,7 @@ void fragment() {
         bool trigger = bare
             ? !IsAimShape(i) && _handTrack[i].Pinch > 0.8f
             : hand.GetFloat(ActTrigger) > 0.6f;
-        if (trigger && !_triggerLatch[i])
+        if (_worldTriggerReady[i] && trigger && !_triggerLatch[i])
         {
             // A held item claims the trigger first: while you are holding a marker pen, pulling
             // the trigger has to mean "draw", not "sit on the nearest chair".
@@ -1816,7 +1864,7 @@ void fragment() {
     {
         if (_avatar == null) return;
 
-        UpdateBodyYaw(dt, speed);
+        if (_occupying == null) UpdateBodyYaw(dt, speed);
         var bodyFwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
 
         // **The avatar stands on the BODY, not under the headset.**
@@ -1836,12 +1884,12 @@ void fragment() {
         _avatarMount.GlobalBasis = Basis.LookingAt(bodyFwd, Vector3.Up);
 
         // Procedural locomotion first, then IK overrides the head, spine, legs and arms on top.
-        _avatar.Animate(dt, speed, IsOnFloor(), crouching: _crouchFraction > 0.35f,
+        _avatar.Animate(dt, speed, _occupying != null || IsOnFloor(), crouching: _crouchFraction > 0.35f,
                         sprinting: speed > (WalkSpeed + SprintSpeed) * 0.5f);
 
         // An emote owns the whole body; letting the hand IK write over it afterwards would
         // reduce a wave or a dance to a twitch.
-        if (_avatar.CurrentEmote != AvatarInstance.Emote.None) return;
+        if (_occupying == null && _avatar.CurrentEmote != AvatarInstance.Emote.None) return;
 
         // Use predicted head transform for IK — the camera pose is one frame stale by the time
         // the avatar renders, so extrapolating the head position/rotation closes the gap.
@@ -1888,8 +1936,9 @@ void fragment() {
         // While a nod or shake is running the gesture owns the head bone; re-solving it from the
         // headset every frame would overwrite the gesture before anyone could see it.
         _ik?.Solve(headTransform, leftTarget, rightTarget, dt,
-                   hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
-                   playerArmReach: PlayerArmReach, planarSpeed: speed, grounded: IsOnFloor());
+                   _occupying?.AnchorPosition ?? hipPos, leftFootPos, rightFootPos, solveHead: !_avatar.GestureActive,
+                   playerArmReach: PlayerArmReach, planarSpeed: speed, grounded: IsOnFloor(),
+                   seated: _occupying != null);
 
         // Fingers go on last, for the same reason `HeadAim` does: whatever writes a bone last
         // wins, and the arm IK above rewrites the hand bone these hang off.
@@ -2172,9 +2221,23 @@ void fragment() {
 
         // Bare hands point with a finger, so the pointer follows whichever hand is tracked.
         // Right wins a tie, matching where the laser lived before hand tracking existed.
+        if (_pointerDown) return; // A captured click keeps its hand until release or tracking loss.
         if (IsHandTracked(1)) _pointerHand = 1;
         else if (IsHandTracked(0)) _pointerHand = 0;
-        else _pointerHand = 1;
+        else if (_leftHand.GetHasTrackingData() && !_rightHand.GetHasTrackingData()) _pointerHand = 0;
+        else if (_rightHand.GetHasTrackingData() && !_leftHand.GetHasTrackingData()) _pointerHand = 1;
+        else if (_leftHand.GetFloat(ActTrigger) > .4f && _rightHand.GetFloat(ActTrigger) < .4f) _pointerHand = 0;
+        else if (_rightHand.GetFloat(ActTrigger) > .4f && _leftHand.GetFloat(ActTrigger) < .4f) _pointerHand = 1;
+        else if (UiSurface?.HasInteractiveUi == true)
+        {
+            // A neutral hand already aimed at the panel takes over before the click, so switching
+            // hands does not normally require a discarded first trigger pull.
+            var current = _pointerHand == 0 ? _leftHand : _rightHand;
+            var other = _pointerHand == 0 ? _rightHand : _leftHand;
+            if (!UiSurface.RayHit(current.GlobalPosition, -current.GlobalBasis.Z, out _)
+                && other.GetHasTrackingData() && UiSurface.RayHit(other.GlobalPosition, -other.GlobalBasis.Z, out _))
+                _pointerHand = 1 - _pointerHand;
+        }
     }
 
     private readonly Node3D[] _jointMarkers = new Node3D[2];
@@ -2299,12 +2362,15 @@ void fragment() {
     public Transform3D PoseTransform()
     {
         var fwd = new Vector3(Mathf.Sin(_bodyYaw), 0, Mathf.Cos(_bodyYaw));
-        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), _avatarMount.GlobalPosition);
+        var origin = _occupying == null ? _avatarMount.GlobalPosition
+            : SeatPose.NetworkOrigin(_avatar, _avatarMount.GlobalPosition);
+        return new Transform3D(Basis.LookingAt(fwd, Vector3.Up), origin);
     }
 
     /// Zero all momentum — used by respawn, matching `LocalPlayer.ResetMotion`.
     public void ResetMotion()
     {
+        ReleaseSeat(returnToApproach: false);
         Velocity = Vector3.Zero;
         for (int i = 0; i < 2; i++)
         {

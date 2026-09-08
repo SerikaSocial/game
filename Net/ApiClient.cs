@@ -11,7 +11,7 @@ namespace Serika.Net;
 
 /// HTTP client for server/api. Holds the session token after login and attaches it to
 /// authed calls. Godot-free so it can be exercised from tests and a headless harness.
-public sealed class ApiClient
+public sealed partial class ApiClient
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(180) };
     private readonly string _baseUrl;
@@ -70,6 +70,44 @@ public sealed class ApiClient
 
     public async Task<JsonElement> GetWorldsAsync() =>
         await GetAsync("/v1/worlds");
+
+    /// Public Home registry. A short lookup timeout keeps an API outage from delaying startup;
+    /// HTTP failures are distinct from an explicit empty selection for the cached fallback.
+    public async Task<JsonElement> GetDefaultHomeAsync()
+    {
+        using var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var response = await _http.GetAsync($"{_baseUrl}/v1/worlds/default-home", timeout.Token);
+        response.EnsureSuccessStatusCode();
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+        return json.RootElement.Clone();
+    }
+
+    /// Account-specific Home, falling back to the administrator's default on the server.
+    public async Task<JsonElement> GetPersonalHomeAsync()
+    {
+        using var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/v1/users/me/home");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        using var response = await _http.SendAsync(request, timeout.Token);
+        response.EnsureSuccessStatusCode();
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+        return json.RootElement.Clone();
+    }
+
+    public async Task<JsonElement> SetPersonalHomeAsync(string worldId)
+    {
+        using var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var request = new HttpRequestMessage(worldId == null ? HttpMethod.Delete : HttpMethod.Put,
+            $"{_baseUrl}/v1/users/me/home");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
+        if (worldId != null)
+            request.Content = new StringContent(JsonSerializer.Serialize(new { worldId }), Encoding.UTF8, "application/json");
+        using var response = await _http.SendAsync(request, timeout.Token);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(json.RootElement.TryGetProperty("error", out var error) ? error.GetString() : "home_save_failed");
+        return json.RootElement.Clone();
+    }
 
     /// Fetch full world detail including instances and review stats.
     public async Task<JsonElement> GetWorldDetailAsync(string worldId) =>
@@ -310,9 +348,9 @@ public sealed class ApiClient
     }
 
     /// Create a brand-new instance of a world (used when you explicitly want a private/fresh one).
-    public async Task<JsonElement> CreateInstanceAsync(string worldId)
+    public async Task<JsonElement> CreateInstanceAsync(string worldId, int access = 0)
     {
-        var body = JsonSerializer.Serialize(new { worldId });
+        var body = JsonSerializer.Serialize(new { worldId, access });
         return await PostAuthedAsync("/v1/instances", body);
     }
 
@@ -324,6 +362,9 @@ public sealed class ApiClient
         var body = JsonSerializer.Serialize(new { worldId });
         return await PostAuthedAsync("/v1/instances/join-world", body);
     }
+
+    public async Task<JsonElement> GetInstanceDetailAsync(string instanceId) =>
+        await GetAuthedAsync($"/v1/instances/{instanceId}");
 
     /// Join an existing instance, getting a fresh single-use ticket.
     public async Task<JsonElement> JoinInstanceAsync(string instanceId) =>

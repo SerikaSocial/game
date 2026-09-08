@@ -13,7 +13,7 @@ namespace SerikaSocial.Avatar;
 /// Expected for a sane humanoid (metres, relative to hips, +X right, +Y up, -Z forward):
 ///   hands  |x| ≈ 0.15–0.35, y ≈ -0.10..-0.35  (arms hang at the sides)
 ///   A flung-out T-pose/broken retarget shows |x| ≳ 0.55 with y ≈ 0 (arms horizontal).
-public static class AnimDiagnostic
+public static partial class AnimDiagnostic
 {
     private static readonly string[] Probes =
     {
@@ -36,8 +36,12 @@ public static class AnimDiagnostic
         var roles = avatar.RoleToBoneForDiagnostics();
         GD.Print($"ANIMTEST mapped roles={roles.Count}");
 
-        // Baseline (bind pose) before any retargeting.
+        // Baseline (bind pose) before any retargeting. Kept here rather than measured later:
+        // the diagnostic's own retargeter below re-poses the skeleton, so a "rest" sampled
+        // after it has run is whatever clip played, not the bind pose.
         DumpFrame("REST", skel, roles);
+        float restHips = BoneY(skel, roles, "hips");
+        float restFoot = LowestFootY(skel, roles);
 
         if (!Enum.TryParse(clip, ignoreCase: true, out AnimRetargeter.State state))
         {
@@ -65,8 +69,72 @@ public static class AnimDiagnostic
             }
         }
 
-        GD.Print("ANIMTEST DONE");
-        host.GetTree().Quit(0);
+        // ── Full-pipeline crouch regression, run from a PHYSICS frame ────────────────
+        // Drive the avatar's real Animate(crouching) and require the pelvis to STAY dropped.
+        // The terrain leg-IK runs last in Animate and used to overwrite the clip's hips
+        // offset and re-straighten the knees — but it only does anything inside a physics
+        // frame (it raycasts, and raycasts outside one are refused), so a phase sequenced
+        // from _Ready could never reproduce the defect it exists to catch.
+        var phase = new CrouchPipePhase
+        {
+            Avatar = avatar,
+            Skel = skel,
+            Roles = roles,
+            RestHips = restHips,
+            RestFoot = restFoot,
+        };
+        host.AddChild(phase);
+        // Run() returns; the phase quits the process when done.
+    }
+
+    private sealed partial class CrouchPipePhase : Node
+    {
+        public AvatarInstance Avatar;
+        public Skeleton3D Skel;
+        public Dictionary<string, int> Roles;
+        public float RestHips, RestFoot;
+
+        private int _ticks;
+
+        public override void _PhysicsProcess(double delta)
+        {
+            Avatar.Animate(delta, 0f, true, crouching: true);
+            if (++_ticks < 45) return;
+
+            float crouchHips = BoneY(Skel, Roles, "hips");
+            float crouchFoot = LowestFootY(Skel, Roles);
+            GD.Print($"ANIMTEST CROUCHPIPE restHipsY={RestHips:F2} crouchHipsY={crouchHips:F2} " +
+                     $"restFootY={RestFoot:F2} crouchFootY={crouchFoot:F2}");
+            if (crouchHips > RestHips - 0.15f)
+            {
+                GD.Print("ANIMTEST FAIL: crouch did not lower the pelvis — the ground leg-IK is " +
+                          "likely overwriting the Crouch clip's hips drop again");
+                GetTree().Quit(1);
+                return;
+            }
+            if (Mathf.Abs(crouchFoot - RestFoot) > 0.15f)
+            {
+                GD.Print("ANIMTEST FAIL: crouch moved the feet well off their rest height — " +
+                          "the legs are being driven somewhere the clip did not put them");
+                GetTree().Quit(1);
+                return;
+            }
+            GD.Print("ANIMTEST CROUCHPIPE PASS");
+            GD.Print("ANIMTEST DONE");
+            GetTree().Quit(0);
+        }
+    }
+
+    private static float BoneY(Skeleton3D skel, Dictionary<string, int> roles, string role) =>
+        roles.TryGetValue(role, out int i) ? skel.GetBoneGlobalPose(i).Origin.Y : 0f;
+
+    private static float LowestFootY(Skeleton3D skel, Dictionary<string, int> roles)
+    {
+        float best = float.MaxValue;
+        foreach (var role in new[] { "leftFoot", "rightFoot" })
+            if (roles.TryGetValue(role, out int i))
+                best = Mathf.Min(best, skel.GetBoneGlobalPose(i).Origin.Y);
+        return best == float.MaxValue ? 0f : best;
     }
 
     private static void DumpFrame(string label, Skeleton3D skel, Dictionary<string, int> roles)

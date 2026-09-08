@@ -1,4 +1,7 @@
 using Godot;
+using System;
+using System.Collections.Generic;
+using System.Text.Json;
 
 namespace SerikaSocial.Avatar;
 
@@ -20,6 +23,8 @@ public static class ToonShading
     private static Shader _toon;
     private static Shader _toonAvatar; // backface-culled variant — see ApplyToAvatar
     private static Shader _outline;
+    private static Shader _concert;
+    private static Shader _concertOutline;
 
     private static Shader Toon => _toon ??= GD.Load<Shader>("res://Shaders/toon_character.gdshader");
     private static Shader ToonAvatar => _toonAvatar ??=
@@ -44,6 +49,115 @@ public static class ToonShading
     /// interior; that trade is standard character rendering.
     public static void ApplyToAvatar(Node model, float outlineWidth = 1.4f)
         => Apply(model, outlineWidth, ToonAvatar);
+
+    /// Concert-only material treatment. The original VRM remains the portable source of truth:
+    /// recover its authored MToon face/hair ramp and shade colours, then apply light-energy-aware
+    /// stage shading. Ordinary avatars, first-person proxies and worlds keep their existing look.
+    public static void ApplyToConcertAvatar(Node model, byte[] skaBytes)
+    {
+        if (!Enabled || !UI.DeviceProfile.ToonShading || model == null) return;
+        _concert ??= GD.Load<Shader>("res://Shaders/concert_performer.gdshader");
+        _concertOutline ??= GD.Load<Shader>("res://Shaders/concert_outline.gdshader");
+        if (_concert == null || _concertOutline == null) return;
+        var authored = ReadConcertMaterials(skaBytes);
+        int count = 0, outlines = 0, matched = 0;
+        void Visit(Node node)
+        {
+            // A copied first-person/shadow representation must not be styled or counted again.
+            if (node.HasMeta("serika_avatar_copy")) return;
+            if (node is MeshInstance3D mesh && mesh.Mesh != null)
+            {
+                for (int s = 0; s < mesh.Mesh.GetSurfaceCount(); s++)
+                {
+                    // FromBytes has already installed the general toon override. Read the original
+                    // mesh surface, whose imported material still owns the name, texture and UVs.
+                    if (mesh.Mesh.SurfaceGetMaterial(s) is not BaseMaterial3D src) continue;
+                    string name = src.ResourceName;
+                    bool hair = name.Contains("HAIR", StringComparison.OrdinalIgnoreCase);
+                    bool skin = name.Contains("SKIN", StringComparison.OrdinalIgnoreCase);
+                    bool face = name.Contains("Face_", StringComparison.OrdinalIgnoreCase);
+                    bool detail = name.Contains("EYE", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Brow", StringComparison.OrdinalIgnoreCase) ||
+                        name.Contains("Mouth", StringComparison.OrdinalIgnoreCase);
+                    authored.TryGetValue(MaterialKey(name), out var settings);
+                    if (settings != null) matched++;
+                    var shade = settings?.Shade ?? (skin ? new Color(1, .88f, .85f) : new Color(.72f, .80f, .94f));
+                    var mat = new ShaderMaterial { Shader = _concert, ResourceName = name + " / concert" };
+                    mat.SetShaderParameter("albedo_color", src.AlbedoColor);
+                    mat.SetShaderParameter("has_texture", src.AlbedoTexture != null);
+                    if (src.AlbedoTexture != null) mat.SetShaderParameter("albedo_texture", src.AlbedoTexture);
+                    mat.SetShaderParameter("uv_scale", new Vector2(src.Uv1Scale.X, src.Uv1Scale.Y));
+                    mat.SetShaderParameter("uv_offset", new Vector2(src.Uv1Offset.X, src.Uv1Offset.Y));
+                    float cutout = src.Transparency == BaseMaterial3D.TransparencyEnum.Disabled ? 0 :
+                        src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaScissor ?
+                            Mathf.Min(src.AlphaScissorThreshold, .45f) : detail ? .25f : .4f;
+                    mat.SetShaderParameter("alpha_scissor", cutout);
+                    mat.SetShaderParameter("shade_color", shade);
+                    mat.SetShaderParameter("shade_shift", settings?.Shift ?? (face || detail ? -.8f : 0));
+                    mat.SetShaderParameter("shade_toony", settings?.Toony ?? (hair ? .6f : .8f));
+                    mat.SetShaderParameter("shade_depth", skin || detail ? .84f : .65f);
+                    mat.SetShaderParameter("light_wrap", face || detail ? .6f : .22f);
+                    mat.SetShaderParameter("highlight_strength", hair ? .07f : skin || detail ? 0 : .018f);
+                    mat.SetShaderParameter("rim_strength", hair ? .16f : skin || detail ? .025f : .055f);
+                    mat.SetShaderParameter("surface_roughness", hair ? .52f : .85f);
+                    // The face normals carry enough form already; importing its authored normal
+                    // map at full strength turns a small anime nose into a hard, mottled wedge.
+                    bool normal = hair && src.NormalEnabled && src.NormalTexture != null;
+                    mat.SetShaderParameter("has_normal_texture", normal);
+                    if (normal) mat.SetShaderParameter("normal_texture", src.NormalTexture);
+                    mat.SetShaderParameter("normal_strength", .2f);
+                    // Layered hair cards already have authored strand/highlight artwork. Hulls
+                    // on each card create crawling dark pinstripes at their shared crown roots.
+                    if (UI.DeviceProfile.AvatarOutline && !detail && !hair && (settings?.Outline ?? true))
+                    {
+                        var outline = new ShaderMaterial { Shader = _concertOutline };
+                        outline.SetShaderParameter("outline_pixels", face ? .35f : .65f);
+                        outline.SetShaderParameter("outline_color", skin ? new Color(.23f,.12f,.17f) : new Color(.07f,.07f,.105f));
+                        outline.SetShaderParameter("has_texture", src.AlbedoTexture != null);
+                        if (src.AlbedoTexture != null) outline.SetShaderParameter("albedo_texture", src.AlbedoTexture);
+                        outline.SetShaderParameter("alpha_scissor", cutout);
+                        outline.SetShaderParameter("uv_scale", new Vector2(src.Uv1Scale.X, src.Uv1Scale.Y));
+                        outline.SetShaderParameter("uv_offset", new Vector2(src.Uv1Offset.X, src.Uv1Offset.Y));
+                        mat.NextPass = outline; outlines++;
+                    }
+                    mesh.SetSurfaceOverrideMaterial(s, mat); count++;
+                }
+            }
+            foreach (Node child in node.GetChildren()) Visit(child);
+        }
+        Visit(model);
+        GD.Print($"Concert shading: {count} surfaces, {outlines} restrained outlines, {matched}/{authored.Count} authored MToon materials matched; renderer={RenderingServer.GetCurrentRenderingMethod()}");
+    }
+
+    private sealed record ConcertMaterial(Color Shade, float Shift, float Toony, bool Outline);
+    private static string MaterialKey(string value) => value.Replace(" (Instance)", "").Replace("_Instance_", "").Replace(" ", "").ToLowerInvariant();
+    private static Dictionary<string, ConcertMaterial> ReadConcertMaterials(byte[] skaBytes)
+    {
+        var result = new Dictionary<string, ConcertMaterial>();
+        if (skaBytes == null) return result;
+        try
+        {
+            byte[] glb = SkaFile.Parse(skaBytes).Glb;
+            if (glb.Length < 20) return result;
+            int length = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(12, 4)));
+            using var json = JsonDocument.Parse(glb.AsMemory(20, length));
+            if (!json.RootElement.TryGetProperty("extensions", out var extensions) ||
+                !extensions.TryGetProperty("VRM", out var vrm) ||
+                !vrm.TryGetProperty("materialProperties", out var materials)) return result;
+            foreach (var material in materials.EnumerateArray())
+            {
+                var f = material.GetProperty("floatProperties");
+                var v = material.GetProperty("vectorProperties");
+                float Float(string key, float fallback) => f.TryGetProperty(key, out var n) ? n.GetSingle() : fallback;
+                var shade = v.GetProperty("_ShadeColor");
+                result[MaterialKey(material.GetProperty("name").GetString() ?? "")] = new ConcertMaterial(
+                    new Color(shade[0].GetSingle(), shade[1].GetSingle(), shade[2].GetSingle()),
+                    Mathf.Clamp(Float("_ShadeShift", 0), -1, 1), Mathf.Clamp(Float("_ShadeToony", .8f), 0, 1), Float("_OutlineWidthMode", 0) > 0);
+            }
+        }
+        catch (Exception e) { GD.PrintErr($"Concert shading: MToon metadata unavailable ({e.Message}); using material-role defaults."); }
+        return result;
+    }
 
     /// Whether *worlds* get the cel treatment. Off by default — see `ApplyToWorld`.
     public static bool WorldsEnabled { get; set; }

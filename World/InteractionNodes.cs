@@ -66,6 +66,8 @@ public partial class SeatNode : Area3D, IOccupiable
 
     public override void _Ready()
     {
+        CollisionLayer = 0;
+        CollisionMask = 0;
         AddToGroup(Interactable.Group);
         AddChild(new CollisionShape3D
         {
@@ -98,12 +100,13 @@ public partial class SeatNode : Area3D, IOccupiable
     public void Interact(in InteractionContext ctx)
     {
         if (_occupied) return;
-        // Occupying plants the avatar and locks its pose, which only the desktop rig knows how to
-        // do. Room-scale VR seating is its own design problem — you are still physically standing —
-        // so VR declines here rather than appearing to work and then desyncing the rig.
-        if (ctx.Desktop == null) return;
-        _occupied = true;
-        ctx.Desktop.Occupy(this);
+        if (ctx.Desktop != null)
+        {
+            _occupied = true;
+            ctx.Desktop.Occupy(this);
+        }
+        else if (ctx.Player is VrPlayer vr)
+            _occupied = vr.TryOccupy(this);
     }
 
     public void Vacate() => _occupied = false;
