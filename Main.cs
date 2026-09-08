@@ -1190,6 +1190,7 @@ public partial class Main : Node3D
         }
         _touch.Configure(player, () =>
         {
+            if (player.EventAudienceMode) { ToggleEventFocus(); return; }
             bool fp = player.ToggleCameraMode();
             _persistThirdPerson = !fp;
             _inWorldHud?.Toast(fp ? "First-person view" : "Third-person view");
@@ -2571,6 +2572,7 @@ public partial class Main : Node3D
     private void ToggleCameraView()
     {
         if (_localDesktop == null) return;
+        if (_localDesktop.EventAudienceMode) { ToggleEventFocus(); return; }
         var mode = _localDesktop.CycleCameraMode();
         string toastMsg = mode switch
         {
@@ -2899,6 +2901,7 @@ public partial class Main : Node3D
 
     public override void _Process(double delta)
     {
+        TickEventAudienceControls(delta);
         TickEvents(delta);
         // Keep the VR UI panel smoothly positioned in front of whichever camera is currently live — the boot
         // rig before login, the player rig after.

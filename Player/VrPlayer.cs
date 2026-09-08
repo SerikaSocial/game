@@ -42,6 +42,7 @@ public partial class VrPlayer : CharacterBody3D, IPlayer
     private const float WalkSpeed = 2.2f;
     private const float SprintSpeed = 4.2f;
     private const float JumpVelocity = 4.5f;
+    public bool EventAudienceMode { get; set; }
     private const float StickDeadzone = 0.18f;
     private const float TurnDeadzone = 0.65f;
     private const float SnapTurnCooldown = 0.28f;
@@ -1526,7 +1527,7 @@ void fragment() {
         // claimed: holding A while grounded re-applied jump velocity on every single frame, so the
         // player pogoed continuously instead of jumping once.
         bool jump = JumpButton(_rightHand);
-        if (ControlsEnabled && jump && !_jumpLatch && IsOnFloor())
+        if (!EventAudienceMode && ControlsEnabled && jump && !_jumpLatch && IsOnFloor())
             Velocity = Velocity with { Y = JumpVelocity };
         _jumpLatch = jump;
 

@@ -31,6 +31,20 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
     public Vector2 ExternalMove { get; set; } = Vector2.Zero;
     /// One-shot jump request from a touch button.
     public bool ExternalJump { get; set; }
+    private bool _eventAudienceMode;
+    private CameraModeEnum _beforeEventCamera;
+    public Camera3D ViewCamera => _camera;
+    public bool EventAudienceMode {
+        get => _eventAudienceMode;
+        set {
+            if (_eventAudienceMode == value) return;
+            if (value) _beforeEventCamera = _cameraMode;
+            _eventAudienceMode = value;
+            ExternalJump = false;
+            SetCameraMode(value ? CameraModeEnum.ThirdPersonBack : _beforeEventCamera);
+        }
+    }
+    public bool JumpEnabled => !EventAudienceMode;
 
     /// Raised when the player falls below the void threshold so Main can respawn.
     public event System.Action RespawnRequested;
@@ -184,7 +198,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
     public CameraModeEnum CycleCameraMode()
     {
-        _cameraMode = _cameraMode switch
+        _cameraMode = EventAudienceMode ? CameraModeEnum.ThirdPersonBack : _cameraMode switch
         {
             CameraModeEnum.FirstPerson => CameraModeEnum.ThirdPersonBack,
             CameraModeEnum.ThirdPersonBack => CameraModeEnum.ThirdPersonFront,
@@ -196,14 +210,13 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
 
     public void SetCameraMode(CameraModeEnum mode)
     {
-        _cameraMode = mode;
+        _cameraMode = EventAudienceMode ? CameraModeEnum.ThirdPersonBack : mode;
         ApplyCameraMode();
     }
 
     public void SetFirstPerson(bool firstPerson)
     {
-        _cameraMode = firstPerson ? CameraModeEnum.FirstPerson : CameraModeEnum.ThirdPersonBack;
-        ApplyCameraMode();
+        SetCameraMode(firstPerson ? CameraModeEnum.FirstPerson : CameraModeEnum.ThirdPersonBack);
     }
 
     public bool ToggleCameraMode() => CycleCameraMode() == CameraModeEnum.FirstPerson;
@@ -540,7 +553,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
             {
                 var moveInput = Input.GetVector("move_left", "move_right", "move_forward", "move_backward");
                 if (ExternalMove.LengthSquared() > 0.01f) moveInput = ExternalMove;
-                bool jumpInput = Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump;
+                bool jumpInput = JumpEnabled && (Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump);
                 if (moveInput.LengthSquared() > 0.05f || jumpInput)
                 {
                     StandUp();
@@ -568,7 +581,7 @@ public partial class LocalPlayer : CharacterBody3D, IPlayer
         }
 
         if (!onFloor) v.Y -= _gravity * (float)delta;
-        bool wantJump = ControlsEnabled && (Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump);
+        bool wantJump = JumpEnabled && ControlsEnabled && (Input.IsPhysicalKeyPressed(Key.Space) || ExternalJump);
         if (wantJump && onFloor && !_isCrouching)
             v.Y = JumpVelocity;
         ExternalJump = false;
