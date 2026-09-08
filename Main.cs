@@ -2349,6 +2349,11 @@ public partial class Main : Node3D
         udp.PoseReceived += (id, pose) => { if (_transport == udp) OnPoseReceived(id, pose); };
         udp.ChatReceived += (id, text) => { if (_transport == udp) OnChatReceived(id, text); };
         udp.AvatarChanged += id => { if (_transport == udp) OnPeerAvatarChanged(id); };
+        // Loud, but not fatal. Spawning a remote avatar runs user-supplied content through the
+        // importer; one peer whose model blows up must not take the whole client with it.
+        udp.OnHandlerFault += e => GD.PrintErr($"transport handler faulted: {e}");
+        udp.SendFailed += why => GD.PrintErr($"transport send failed ({why}) — the client could not "
+            + "put a datagram on the wire; this is a local socket/network problem, not the relay");
         udp.VoiceReceived += (id, frame) => { if (_transport == udp) OnVoiceReceived(id, frame); };
         udp.ObjectSyncReceived += (id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz) =>
             { if (_transport == udp) OnObjectSyncReceived(id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz); };
@@ -2498,10 +2503,16 @@ public partial class Main : Node3D
         _inWorld = true;
         UI.InputMode.ReleaseAll();
         UI.InputMode.SetPlayable(true);
-        _inWorldHud.SetWorld(_worldName);
-        _inWorldHud.SetPlayerCount(1 + others);
+        // Null-guarded like every other screen touched here — `_hud` and `_videoManager` already
+        // were, these two were not. This method runs on the WELCOME datagram, so anything that
+        // throws lands in the transport's receive loop and, before that loop caught exceptions,
+        // in the engine's frame loop. Desktop Godot logs that and carries on, which is why it
+        // went unnoticed; Android kills the process, and joining multiplayer is precisely when
+        // it happens. The smoke harness reaches here with no UI built and reproduced it.
+        _inWorldHud?.SetWorld(_worldName);
+        _inWorldHud?.SetPlayerCount(1 + others);
         UpdatePrivatePresence(1 + others);
-        _chat.AddSystem(resumed ? "Reconnected." : $"Welcome to {_worldName}.");
+        _chat?.AddSystem(resumed ? "Reconnected." : $"Welcome to {_worldName}.");
         _videoManager?.RequestSync();
     }
 

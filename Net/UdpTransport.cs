@@ -41,6 +41,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     // link declares a perfectly healthy session dead the instant the frame finally lands.
     private const double HitchSeconds = 0.75;
     private long _lastPollMs;
+    private bool _reportedSendError;
     private readonly byte[] _rx = new byte[2048];
 
     public event Action<uint, PeerInfo[]> Connected;
@@ -53,6 +54,12 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     /// A peer swapped avatar. Carries only who — the new model is looked up from the API.
     public event Action<uint> AvatarChanged;
+    /// A message handler threw. Reported rather than rethrown so one bad datagram cannot take
+    /// down the frame loop, but never swallowed silently — the owner logs it.
+    public event Action<Exception> OnHandlerFault;
+    /// The socket refused to send. Raised once per connection: a link that never sends at all is
+    /// a different problem from a dropped datagram, and used to look identical.
+    public event Action<string> SendFailed;
     public event Action<string> Rejected;
     /// A welcomed session went quiet. Distinct from `Rejected`, which is the relay refusing us:
     /// this one is retryable against the SAME instance and must not drop the player to Home.
@@ -72,6 +79,7 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         _helloTimer = 0;
         _sinceRecv = 0;
         _lastPollMs = 0;
+        _reportedSendError = false;
         _connectTimeout = ConnectTimeoutSeconds;
         SendHello();
 
@@ -145,7 +153,16 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             // other type still goes through — a discarded join or leave is a ghost avatar.
             if (drained > TransientBacklogBudget && n >= 1
                 && ((MsgType)_rx[0] == MsgType.Pose || (MsgType)_rx[0] == MsgType.Voice)) continue;
-            Handle(_rx, n);
+
+            // A handler runs arbitrary game code — spawning a remote avatar, routing a reject,
+            // starting a reconnect. Two things must not happen as a result: an exception from one
+            // datagram must not escape into the engine's frame loop (on Android that is a hard
+            // crash, and a single malformed or unlucky packet should never take the client down),
+            // and a handler that disconnects us must stop the drain rather than have the next
+            // iteration touch a socket that is gone.
+            try { Handle(_rx, n); }
+            catch (Exception e) { OnHandlerFault?.Invoke(e); }
+            if (_sock == null) break;
         }
         if (got) _sinceRecv = 0; // any datagram (even another peer's pose) proves the link is up
 
@@ -209,14 +226,22 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     private bool TryReceive(out int n)
     {
         n = 0;
+        // Read the field ONCE into a local. Handlers dispatched from the drain loop can tear the
+        // transport down mid-loop — a Reject or a Lost routes into Main, which calls Disconnect
+        // and nulls `_sock` — and the next iteration then dereferenced a null field. Only
+        // SocketException was caught, so that surfaced as a NullReferenceException thrown out of
+        // Poll, out of _PhysicsProcess and into the engine's frame loop.
+        var sock = _sock;
+        if (sock == null) return false;
         try
         {
-            if (_sock.Client.Available <= 0) return false;
+            if (sock.Client.Available <= 0) return false;
             EndPoint any = new IPEndPoint(IPAddress.Any, 0);
-            n = _sock.Client.ReceiveFrom(_rx, ref any);
+            n = sock.Client.ReceiveFrom(_rx, ref any);
             return n > 0;
         }
         catch (SocketException) { return false; }
+        catch (ObjectDisposedException) { return false; }   // closed under us during teardown
     }
 
     private void Handle(byte[] buf, int n)
@@ -349,7 +374,20 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         lock (_sendLock)
         {
             try { _sock?.Send(data, data.Length); }
-            catch (SocketException) { /* transient; retransmit logic covers control msgs */ }
+            catch (SocketException e)
+            {
+                // Transient loss is normal on UDP and the retransmit logic covers control
+                // messages — but a socket that NEVER sends is not transient, and swallowing
+                // this made the two indistinguishable. A client that could not send a single
+                // datagram looked exactly like a relay that was not answering: an eight-second
+                // wait and "connection timed out", with the real error discarded here. Report
+                // the first failure of each connection, once, so the cause is on the record.
+                if (!_reportedSendError)
+                {
+                    _reportedSendError = true;
+                    SendFailed?.Invoke($"{e.SocketErrorCode}: {e.Message}");
+                }
+            }
             catch (ObjectDisposedException) { /* closed under us during teardown */ }
         }
     }

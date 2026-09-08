@@ -68,6 +68,13 @@ public sealed class TransportLivenessTests
             }
         }
 
+        /// Push an unsolicited datagram at the client (it must have talked to us first, so we
+        /// know where it lives).
+        public void SendToClient(byte[] data)
+        {
+            if (_client != null) _sock.Client.SendTo(data, _client);
+        }
+
         public void Dispose() { _running = false; _sock.Dispose(); }
     }
 
@@ -157,6 +164,67 @@ public sealed class TransportLivenessTests
 
         Assert.True(lost);
         Assert.False(rejected, "a quiet link is not a refusal, and must not send the player Home");
+    }
+
+    /// Handlers run real game code, and two of them (Rejected, Lost) route into Main and call
+    /// Disconnect. The drain loop then went round again and dereferenced a `_sock` that was now
+    /// null — and only SocketException was caught, so a NullReferenceException came out of Poll,
+    /// out of _PhysicsProcess, and into the engine. On desktop that is a logged error; on Android
+    /// it is a crash on joining a session.
+    [Fact]
+    public void AHandlerThatDisconnectsMidDrainDoesNotThrow()
+    {
+        using var relay = new FakeRelay();
+        var t = Connected(relay);
+
+        // Exactly what Main does on a relay REJECT: tear the transport down from inside the
+        // handler. Dispatched from the drain loop, so the loop is about to go round again.
+        t.Rejected += _ => t.Disconnect();
+
+        // REJECT: [type][reason_len u8][reason]
+        var reason = System.Text.Encoding.UTF8.GetBytes("instance full");
+        var reject = new byte[2 + reason.Length];
+        reject[0] = (byte)MsgType.Reject;
+        reject[1] = (byte)reason.Length;
+        reason.CopyTo(reject, 2);
+        relay.SendToClient(reject);
+        // Queue more behind it, so the loop MUST iterate again after the disconnect. Without
+        // that the socket is never touched post-teardown and the bug hides.
+        for (int i = 0; i < 8; i++) relay.SendToClient(new[] { (byte)MsgType.Ping });
+        Thread.Sleep(250);   // let them all land in the receive buffer
+
+        var ex = Record.Exception(() => t.Poll(1.0 / 60.0));
+
+        Assert.Null(ex);
+        Assert.False(t.Connected_);
+    }
+
+    /// A throwing handler must not escape into the frame loop either — one peer whose avatar
+    /// blows up on import should not take the client down with it.
+    [Fact]
+    public void AThrowingHandlerIsReportedNotPropagated()
+    {
+        using var relay = new FakeRelay();
+        using var t = Connected(relay);
+
+        Exception reported = null;
+        t.OnHandlerFault += e => reported = e;
+        t.PeerLeft += _ => throw new InvalidOperationException("avatar import blew up");
+
+        // PEER_LEAVE: [type][peer_id u32]
+        var leave = new byte[5];
+        leave[0] = (byte)MsgType.PeerLeave;
+        BitConverter.GetBytes(42u).CopyTo(leave, 1);
+        relay.SendToClient(leave);
+
+        var ex = Record.Exception(() =>
+        {
+            for (int i = 0; i < 100 && reported == null; i++) { t.Poll(1.0 / 60.0); Thread.Sleep(5); }
+        });
+
+        Assert.Null(ex);
+        Assert.NotNull(reported);
+        Assert.True(t.Connected_, "one bad datagram must not end the session");
     }
 
     /// Disconnect has to stop the keepalive thread, or every world change leaks one that goes on
