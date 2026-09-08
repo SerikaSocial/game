@@ -2296,6 +2296,10 @@ public partial class Main : Node3D
         // ghost peer until its own timeout, and world-A avatars survived in `_remotes` — where
         // a colliding relay id made SpawnRemote skip the new peer and its poses drove a stale
         // avatar. EnterHome tears down properly; every join path deserves the same.
+        // Any connect supersedes an in-flight reconnect: the retry loop checks this flag and
+        // bails, so a player who joins somewhere else mid-retry is not yanked back.
+        _reconnecting = false;
+
         if (_transport != null || _remotes.Count > 0)
         {
             _inWorld = false;
@@ -2316,6 +2320,7 @@ public partial class Main : Node3D
         udp.PhysGrabReceived += (id, type, bone, x, y, z) =>
             { if (_transport == udp) OnPhysGrabReceived(id, type, bone, x, y, z); };
         udp.Rejected += reason => { if (_transport == udp) OnTransportRejected(reason); };
+        udp.Lost += reason => { if (_transport == udp) OnTransportLost(reason); };
         _transport = udp;
         _transportTravelVersion = _joiningInstance ? _travel.Version : 0;
         udp.Connect(endpoint, ticket);
@@ -2353,6 +2358,87 @@ public partial class Main : Node3D
         _inWorldHud?.Toast($"Disconnected: {reason}", 5);
     }
 
+    /// How many times a lost session re-joins its own instance before giving up and going Home.
+    private const int ReconnectAttempts = 4;
+    private int _reconnectAttempt;
+    private bool _reconnecting;
+    /// Set for the one ConnectTo that resumes an interrupted session, so the welcome reads as a
+    /// reconnection rather than announcing the world all over again.
+    private bool _resumedSession;
+
+    /// A welcomed session went quiet. Unlike a relay REJECT this is retryable, and dropping the
+    /// player to Home over it is the wrong answer: the common cause is the client's own frame
+    /// stall (first visit to a heavy event venue compiles its shaders and can freeze for
+    /// minutes, far past the relay's 10 s PEER_TIMEOUT). The old behaviour ejected everyone the
+    /// moment the show finished loading, and because the relay had already emptied the roster
+    /// the API then swept the instance — so the next join allocated a fresh one and the event
+    /// scattered into single-player rooms. Re-join the SAME instance instead, keeping the world
+    /// and the local player exactly where they are.
+    private void OnTransportLost(string reason)
+    {
+        GD.PrintErr($"transport lost: {reason}");
+        if (_reconnecting) return;
+        if (_api == null || string.IsNullOrEmpty(_currentInstanceId) || !_inWorld)
+        {
+            OnTransportRejected(reason);
+            return;
+        }
+        _reconnecting = true;
+        _reconnectAttempt = 0;
+        TeardownRemotes();
+        _transport?.Disconnect();
+        _transport = null;
+        _inWorldHud?.Toast("Connection interrupted — reconnecting…", 4);
+        _ = ReconnectLoop(_currentInstanceId);
+    }
+
+    private async Task ReconnectLoop(string instanceId)
+    {
+        try
+        {
+            while (_reconnectAttempt < ReconnectAttempts)
+            {
+                _reconnectAttempt++;
+                // The relay ticket is single-use with a 60 s TTL, so every attempt needs its own.
+                try
+                {
+                    var joined = await _api.JoinInstanceByIdAsync(instanceId);
+                    // Anything that moved us elsewhere while this was in flight wins.
+                    if (!_reconnecting || _currentInstanceId != instanceId) return;
+                    string endpoint = joined.GetProperty("endpoint").GetString();
+                    string ticket = joined.GetProperty("ticket").GetString();
+                    CallDeferred(nameof(ResumeAfterReconnect), endpoint, ticket, instanceId);
+                    return;
+                }
+                catch (Exception e)
+                {
+                    GD.PrintErr($"reconnect {_reconnectAttempt}/{ReconnectAttempts} failed: {e.Message}");
+                    // A closed or full instance will not become joinable by waiting.
+                    string code = e.Message ?? "";
+                    if (code.Contains("not_found") || code.Contains("closed") || code.Contains("private")) break;
+                }
+                await Task.Delay(1000 * _reconnectAttempt);
+                if (!_reconnecting || _currentInstanceId != instanceId) return;
+            }
+            CallDeferred(nameof(GiveUpReconnecting));
+        }
+        catch (Exception e) { GD.PrintErr("reconnect: " + e.Message); CallDeferred(nameof(GiveUpReconnecting)); }
+    }
+
+    private void ResumeAfterReconnect(string endpoint, string ticket, string instanceId)
+    {
+        if (!_reconnecting || _currentInstanceId != instanceId) return;
+        _resumedSession = true;
+        ConnectTo(endpoint, ticket);
+    }
+
+    private void GiveUpReconnecting()
+    {
+        if (!_reconnecting) return;
+        _reconnecting = false;
+        OnTransportRejected("the world server stopped responding");
+    }
+
     // ── Transport events (fire on the game thread from Poll) ─────────────────────────
 
     private void OnConnected(uint selfId, PeerInfo[] peers)
@@ -2369,16 +2455,18 @@ public partial class Main : Node3D
             if (!string.IsNullOrEmpty(p.UserId)) _peerUserIds[p.PeerId] = p.UserId;
         }
         int others = peers.Length;
+        bool resumed = _resumedSession;
+        _resumedSession = false;
         string who = others == 0 ? "You're the first one here." : $"{others} other {(others == 1 ? "person" : "people")} here.";
         HideLoading();
-        _hud?.HideWithToast($"Welcome to {_worldName}. {who}");
+        _hud?.HideWithToast(resumed ? $"Reconnected to {_worldName}. {who}" : $"Welcome to {_worldName}. {who}");
         _inWorld = true;
         UI.InputMode.ReleaseAll();
         UI.InputMode.SetPlayable(true);
         _inWorldHud.SetWorld(_worldName);
         _inWorldHud.SetPlayerCount(1 + others);
         UpdatePrivatePresence(1 + others);
-        _chat.AddSystem($"Welcome to {_worldName}.");
+        _chat.AddSystem(resumed ? "Reconnected." : $"Welcome to {_worldName}.");
         _videoManager?.RequestSync();
     }
 
@@ -2509,6 +2597,8 @@ public partial class Main : Node3D
         var a = RemoteAvatar.Create(p.PeerId, p.Name);
         _remotes[p.PeerId] = a;
         AddChild(a);
+        // Someone arriving after the player chose "hide all players" must arrive hidden too.
+        if (_eventHidePlayers) a.Visible = false;
         a.SetTagPrefs(UI.DeviceProfile.Settings.NameTags, UI.DeviceProfile.Settings.ProfilePictures);
         if (!string.IsNullOrEmpty(p.UserId) && _blockedUserIds.Contains(p.UserId))
         {

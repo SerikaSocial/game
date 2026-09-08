@@ -27,6 +27,38 @@ public partial class Main
         _mainMenu.AdminEventsPressed += OpenEventAdmin;
         _quickMenu.EventsBanner.JoinRequested += id => _ = JoinEvent(id);
         _mainMenu.EventsBanner.JoinRequested += id => _ = JoinEvent(id);
+        _quickMenu.EventOptions.HidePlayersToggled += on => { _eventHidePlayers = on; ApplyEventPlayerVisibility(); };
+        _quickMenu.EventOptions.MutePlayersToggled += on => { _eventMutePlayers = on; if (_voice != null) _voice.MuteEveryone = on; };
+        _quickMenu.EventOptions.EffectsToggled += on => {
+            UI.DeviceProfile.Settings.EventEffects = !on;
+            UI.DeviceProfile.Settings.Save();
+            if (_eventShow != null && GodotObject.IsInstanceValid(_eventShow)) _eventShow.EffectsEnabled = !on;
+        };
+    }
+
+    private bool _eventHidePlayers, _eventMutePlayers;
+    /// Attendees only. Hiding "all players" at a concert means the other people in the hall —
+    /// the performer is the show, and the local player's own rig is not a peer.
+    private void ApplyEventPlayerVisibility()
+    {
+        foreach (var remote in _remotes.Values)
+            if (GodotObject.IsInstanceValid(remote)) remote.Visible = !_eventHidePlayers;
+    }
+
+    /// The venue owns these controls, so they follow the player in and out of it. Leaving drops
+    /// the blanket mute and un-hides everyone: they are venue triage, not standing preferences.
+    /// "Disable effects" is the exception — it lives in settings and survives the trip.
+    private void SyncEventPresence()
+    {
+        bool inEvent = _inWorld && _eventShow != null && GodotObject.IsInstanceValid(_eventShow);
+        _quickMenu.SetInEvent(inEvent);
+        _mainMenu.EventsBanner.Suppressed = inEvent;
+        if (!inEvent && (_eventHidePlayers || _eventMutePlayers)) {
+            _eventHidePlayers = _eventMutePlayers = false;
+            if (_voice != null) _voice.MuteEveryone = false;
+            ApplyEventPlayerVisibility();
+        }
+        if (inEvent) _quickMenu.EventOptions.SetState(_eventHidePlayers, _eventMutePlayers, !UI.DeviceProfile.Settings.EventEffects);
     }
     private void OpenEventAdmin()
     {
@@ -37,6 +69,7 @@ public partial class Main
     {
         if (_api?.SessionToken == null || _eventAdmin == null) return;
         _eventPoll += delta; _eventListPoll += delta;
+        SyncEventPresence();
         if (_eventPoll < 2 || _eventPolling) return;
         _eventPoll = 0; _ = PollEvents();
     }
@@ -70,9 +103,20 @@ public partial class Main
                     string worldId = _currentWorldId; var world = _worldRoot;
                     state = await api.GetEventAsync(state.Id);
                     if (_api != api || world != _worldRoot || worldId != _currentWorldId || !state.IsOpen) return;
-                    _eventShow = new EventShowPlayer { Name = "LiveEventShow" }; _worldRoot.AddChild(_eventShow);
+                    _eventShow = new EventShowPlayer { Name = "LiveEventShow", EffectsEnabled = UI.DeviceProfile.Settings.EventEffects };
+                    _worldRoot.AddChild(_eventShow);
                     _eventShow.Failed += message => _inWorldHud?.Toast("Show could not load: " + message, 8);
+                    // Building the show is one long synchronous frame — the performer rig, the
+                    // animation GLB, the stage rig and every one of its shaders. The first visit
+                    // on a machine compiles those shaders and the window simply stops responding
+                    // for a while, which reads as a crash unless something said so beforehand.
+                    // This toast is raised while the assets are still downloading so it is
+                    // already on screen when the stall lands.
+                    _inWorldHud?.Toast("Loading the show… the first time in a venue can take a few minutes.", 240);
+                    var show = _eventShow;
                     await _eventShow.Prepare(api, state, _worldRoot);
+                    if (GodotObject.IsInstanceValid(show) && show == _eventShow)
+                        _inWorldHud?.Toast(show.ReadyToPlay ? "The show is ready." : "The show could not be loaded.", 4);
                 }
             }
         } catch (Exception e) { GD.PrintErr("Events: " + e.Message); }

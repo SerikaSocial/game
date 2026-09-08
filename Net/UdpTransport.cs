@@ -24,6 +24,11 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     // After WELCOME, how long without any datagram before we call the session dead.
     private double _sinceRecv;
     private const double SilenceTimeoutSeconds = 4.0;
+    // A frame this long is not a network event — the app itself stalled (first-visit shader
+    // compilation in a heavy world is minutes on some machines). Charging that time to the
+    // link declares a perfectly healthy session dead the instant the frame finally lands.
+    private const double HitchSeconds = 0.75;
+    private long _lastPollMs;
     private readonly byte[] _rx = new byte[2048];
 
     public event Action<uint, PeerInfo[]> Connected;
@@ -35,6 +40,9 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public event Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     public event Action<string> Rejected;
+    /// A welcomed session went quiet. Distinct from `Rejected`, which is the relay refusing us:
+    /// this one is retryable against the SAME instance and must not drop the player to Home.
+    public event Action<string> Lost;
 
     public bool Connected_ => _welcomed;
     public uint SelfId { get; private set; }
@@ -48,6 +56,8 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         _ticket = ticket;
         _welcomed = false;
         _helloTimer = 0;
+        _sinceRecv = 0;
+        _lastPollMs = 0;
         _connectTimeout = ConnectTimeoutSeconds;
         SendHello();
     }
@@ -91,13 +101,29 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     {
         if (_sock == null) return;
 
+        // Drain FIRST. The liveness check used to run ahead of the receive loop, so a session
+        // with a full socket buffer waiting to be read was declared dead without a single
+        // datagram being looked at — which is what happens after any long frame, since `dt`
+        // then arrives already over the threshold.
+        bool got = false;
+        while (TryReceive(out int n)) { got = true; Handle(_rx, n); }
+        if (got) _sinceRecv = 0; // any datagram (even another peer's pose) proves the link is up
+
+        // `dt` is the physics step, not wall time, and it lags reality across a stall. Measure
+        // the real gap so a frame the app spent compiling shaders is recognised as a hitch
+        // rather than silently accumulated into the silence budget.
+        long nowMs = Environment.TickCount64;
+        double wall = _lastPollMs == 0 ? dt : (nowMs - _lastPollMs) / 1000.0;
+        _lastPollMs = nowMs;
+        bool hitched = wall >= HitchSeconds;
+
         // Retransmit HELLO until the relay welcomes us.
         if (!_welcomed)
         {
             _helloTimer -= dt;
             if (_helloTimer <= 0) { SendHello(); _helloTimer = 0.25; }
 
-            _connectTimeout -= dt;
+            if (!hitched) _connectTimeout -= dt;
             if (_connectTimeout <= 0)
             {
                 Rejected?.Invoke("Connection timed out — the world server may not be running. Check that the relay (instanced) is started on the expected endpoint.");
@@ -117,21 +143,22 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             // session should never go quiet for long. If it does — relay crashed, tunnel
             // dropped, laptop slept — nothing here ever noticed before; the client sat in a
             // frozen world sending pings into the void. Now we surface it as a disconnect.
-            _sinceRecv += dt;
+            //
+            // A hitched frame restarts the budget instead of adding to it. The player was not
+            // on a broken network, their machine was busy; give the link a full window to
+            // answer the ping we are about to send. If the stall outlasted the relay's own
+            // PEER_TIMEOUT it really has dropped us, and the very next quiet window says so.
+            if (hitched) _sinceRecv = 0;
+            else _sinceRecv += dt;
             if (_sinceRecv >= SilenceTimeoutSeconds)
             {
-                Rejected?.Invoke("Connection lost — the world server stopped responding.");
+                Lost?.Invoke("the world server stopped responding");
                 _welcomed = false;
                 _sock?.Close();
                 _sock = null;
                 return;
             }
         }
-
-        // Drain everything queued this frame.
-        bool got = false;
-        while (TryReceive(out int n)) { got = true; Handle(_rx, n); }
-        if (got) _sinceRecv = 0; // any datagram (even another peer's pose) proves the link is up
     }
 
     private bool TryReceive(out int n)

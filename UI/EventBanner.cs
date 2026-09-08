@@ -8,12 +8,22 @@ public partial class EventBanner : VBoxContainer
 {
     public event Action<string> JoinRequested;
     private string _signature = "";
+    private bool _suppressed;
+    /// Set while the player is already standing in this event's venue. Offering them "Join
+    /// event" there is at best noise and at worst a second join, so the banner gives its slot
+    /// up to the in-event options instead. Kept as state rather than a plain `Visible` write
+    /// because `SetEvents` re-decides visibility on every poll and would undo that.
+    public bool Suppressed
+    {
+        get => _suppressed;
+        set { _suppressed = value; if (value) Visible = false; else Visible = GetChildCount() > 0; }
+    }
     public void SetEvents(LiveEvent[] events, Func<string,Task<byte[]>> load)
     {
         string signature = string.Join("|", System.Array.ConvertAll(events, e => e.Id + e.Status + e.BannerUrl));
         if (signature == _signature) return; _signature = signature;
         foreach (Node child in GetChildren()) { RemoveChild(child); child.QueueFree(); }
-        Visible = events.Length > 0;
+        Visible = events.Length > 0 && !_suppressed;
         foreach (var item in events) {
             var button = Brand.Ghost_(new Button { Name = "JoinEvent", CustomMinimumSize = new Vector2(0, 88), TooltipText = "Join " + item.Title });
             var row = new HBoxContainer { MouseFilter = Control.MouseFilterEnum.Ignore };

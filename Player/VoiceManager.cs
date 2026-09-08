@@ -450,6 +450,11 @@ public partial class VoiceManager : Node
     /// Per-peer local gain, 0..2.
     private readonly Dictionary<uint, float> _peerGain = new();
 
+    /// Blanket local mute, kept separate from `_mutedPeers` on purpose: it has to be reversible
+    /// without forgetting who the player had already muted one by one, and folding it into the
+    /// set would either lose those or un-mute them on release.
+    public bool MuteEveryone { get; set; }
+
     /// Locally mute/unmute a peer. Client-side only; nothing is told to the server.
     public void SetPeerMuted(uint peerId, bool muted)
     {
@@ -458,7 +463,7 @@ public partial class VoiceManager : Node
         if (muted) _peerVolume[peerId] = 0f;
     }
 
-    public bool IsPeerMuted(uint peerId) => _mutedPeers.Contains(peerId);
+    public bool IsPeerMuted(uint peerId) => MuteEveryone || _mutedPeers.Contains(peerId);
 
     /// Per-peer playback gain (1.0 = unchanged).
     public void SetPeerGain(uint peerId, float gain) => _peerGain[peerId] = Mathf.Clamp(gain, 0f, 2f);
@@ -500,7 +505,7 @@ public partial class VoiceManager : Node
     public void PlayFrame(uint peerId, AudioStreamPlayer3D player, byte[] pcmData)
     {
         if (player == null || pcmData == null || pcmData.Length < 2) return;
-        if (_mutedPeers.Contains(peerId)) return;
+        if (MuteEveryone || _mutedPeers.Contains(peerId)) return;
 
         var playback = GetOrCreatePlayback(player);
         if (playback == null) return;

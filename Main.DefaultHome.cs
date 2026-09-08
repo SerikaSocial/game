@@ -17,6 +17,8 @@ public partial class Main
     // selection; concurrent Home clicks share the request and cannot build duplicate worlds.
     private void EnterHome()
     {
+        // Going Home abandons the instance, so any pending reconnect to it is moot.
+        _reconnecting = false;
         if (_travel.TryBegin(WorldTravelOperation.Destination.Home, out int version))
             _enterHomeTask = ResolveAndEnterHomeAsync(version);
     }

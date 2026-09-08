@@ -55,9 +55,10 @@ void fragment() { ALBEDO=beam_color; ALPHA=.012*strength*pow(1.0-UV.y,1.5)*pow(a
             if (node is Node3D mic && mic.Name == "SERIKA_EVENT_MIC_STAND") _microphones.Add((mic,mic.Visible));
         }
         SetupConcertRig(world);
-        SetupShowEffects(world);
-        SetupShowLasers(world);
-        SetupConcertAudience(world);
+        // Skipped outright when effects are off — building the pyro/laser/crowd rigs only to
+        // never step them still swaps every one of those materials and costs the shader
+        // compilation this option exists to avoid.
+        if (_effectsEnabled) { SetupShowEffects(world); SetupShowLasers(world); SetupConcertAudience(world); }
         foreach (Node node in world.FindChildren("*", "Node3D", true, false)) {
             string name = node.Name;
             if (node is MeshInstance3D mesh && name.StartsWith("SERIKA_EVENT_BACKDROP")) _backdrops.Add((mesh, mesh.MaterialOverride));
@@ -157,9 +158,11 @@ ALBEDO=(p.y<0.0 || p.y>1.0) ? vec3(0.0) : texture(video_frame,p).rgb; }" } };
         foreach(var mic in _microphones) mic.Node.Visible = mic.Visible && performance && seconds >= entranceEnd;
         foreach(var beam in _beams) beam.Mesh.Visible=false; // Legacy decorative beams are retired.
         UpdateConcertRig(seconds,performance,color,music,BeatStrength,highQuality);
-        UpdateShowEffects(seconds,performance,highQuality,runCinematicFx);
-        UpdateShowLasers(seconds,performance,highQuality,runCinematicFx);
-        UpdateConcertAudience(seconds,performance,runCinematicFx);
+        if(_effectsEnabled) {
+            UpdateShowEffects(seconds,performance,highQuality,runCinematicFx);
+            UpdateShowLasers(seconds,performance,highQuality,runCinematicFx);
+            UpdateConcertAudience(seconds,performance,runCinematicFx);
+        }
         // The authored vocal envelope opens the actual vowel morphs. Sampling between
         // 25 Hz keys keeps consonant closures visible without 5 Hz stair stepping.
         float level=revealed ? ShowTimeline.Envelope(config.Mouth,seconds,config.MouthFps) : 0;

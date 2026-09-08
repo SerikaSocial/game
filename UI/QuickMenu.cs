@@ -9,7 +9,15 @@ namespace SerikaSocial;
 public partial class QuickMenu : CanvasLayer
 {
     public UI.EventBanner EventsBanner { get; private set; }
+    public UI.EventOptions EventOptions { get; private set; }
     public event Action AdminEventsPressed;
+    /// In the venue: swap the join banner for the controls that matter once you are inside.
+    public void SetInEvent(bool inEvent)
+    {
+        if (EventOptions == null) return;
+        EventOptions.Visible = inEvent;
+        EventsBanner.Suppressed = inEvent;
+    }
     private Button _eventAdminButton;
     public void SetEventAdmin(bool enabled) { if (_eventAdminButton != null) _eventAdminButton.Visible = enabled; }
     public event Action Closed;
@@ -64,6 +72,8 @@ public partial class QuickMenu : CanvasLayer
 
         EventsBanner = new UI.EventBanner { Name = "EventsBanner", Visible = false };
         column.AddChild(EventsBanner);
+        EventOptions = new UI.EventOptions { Name = "EventOptions", Visible = false };
+        column.AddChild(EventOptions);
         _eventAdminButton = Brand.Ghost_(new Button { Text = "Admin · Events", Visible = false, CustomMinimumSize = new Vector2(0, 40) });
         _eventAdminButton.Pressed += () => AdminEventsPressed?.Invoke();
         column.AddChild(_eventAdminButton);

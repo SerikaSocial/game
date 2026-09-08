@@ -60,6 +60,17 @@ public partial class Main
                 _quickMenu.SetTrust("Trusted");
                 _quickMenu.Open(user);
             }),
+            // The same menu standing inside a live event: the join banner gives its slot up to
+            // the in-venue options, which is the whole point and is invisible in `quickmenu`.
+            new("quickmenu_event", () =>
+            {
+                _quickMenu.SetLocation("Comet Hall", true);
+                _quickMenu.SetPlayers(user, new (string, string)[] { ("u-aris", "Aris"), ("u-hoshino", "Hoshino") });
+                _quickMenu.SetTrust("Trusted");
+                _quickMenu.SetInEvent(true);
+                _quickMenu.EventOptions.SetState(false, true, false);
+                _quickMenu.Open(user);
+            }),
             new("mainmenu_worlds",  () => { _mainMenu.SetWorlds(worlds); _mainMenu.Open(user, 1); }),
             new("mainmenu_avatars", () => { _mainMenu.SetAvatars(avatars); _mainMenu.Open(user, 2); }),
             new("settings",  () => _settingsMenu.Open()),

@@ -38,6 +38,25 @@ public partial class EventShowPlayer : Node3D
     private double _fxAccumulator;
     public bool Preview { get; set; }
     public bool HighQuality => _highQuality;
+    private Node3D _world;
+    private bool _effectsEnabled = true;
+    /// Player-facing escape hatch for a venue their machine cannot carry. Drops the pyro/laser
+    /// surfaces, the audience penlights and the held light sticks — the expensive per-frame
+    /// shader work — while leaving the performer, the stage lighting, the screens and the audio
+    /// alone, so the show is still the show. Toggling it back on rebuilds those rigs from the
+    /// world, which is why the venue root is kept.
+    public bool EffectsEnabled
+    {
+        get => _effectsEnabled;
+        set
+        {
+            if (_effectsEnabled == value) return;
+            _effectsEnabled = value;
+            if (_world == null || !IsInstanceValid(_world)) return;
+            RestoreShowEffects(); RestoreShowLasers(); RestoreConcertAudience(); RestorePlayerLightSticks();
+            if (value) { SetupShowEffects(_world); SetupShowLasers(_world); SetupConcertAudience(_world); SetupPlayerLightSticks(_world); }
+        }
+    }
     public double PreviewPosition { get; set; }
     public bool PreviewPlaying { get; set; }
     public AvatarInstance Performer => _artist;
@@ -92,11 +111,12 @@ public partial class EventShowPlayer : Node3D
             AddChild(_feed);
             _camera = new Camera3D { Name = "BroadcastCamera", Current = true, Far = 2500, CullMask = 0xfffff & ~((1u << 19) | Player.LocalPlayer.NonFpCullLayers) }; _feed.AddChild(_camera);
             BindScreens(world);
+            _world = world;
             if (_screens.Count == 0) throw new InvalidOperationException("This venue has no SERIKA_EVENT_SCREEN display meshes.");
             SetupPresentation(world, files[3]);
             SetupBroadcastCamera(world);
             SetupStageAudio(world, files);
-            SetupPlayerLightSticks(world);
+            if (_effectsEnabled) SetupPlayerLightSticks(world);
             ReadyToPlay = true;
             _animation.SampleShowClip(c.Clip, 0);
             // Direction-retargeted clips have no finger tracks. Give those unmapped
@@ -162,7 +182,7 @@ public partial class EventShowPlayer : Node3D
         if (runCinematicFx) _fxAccumulator = 0;
         UpdatePresentation(seconds, running, highQuality, delta, runCinematicFx);
         UpdateIntroStageAudio(running);
-        UpdatePlayerLightSticks(seconds, running, delta);
+        if (_effectsEnabled) UpdatePlayerLightSticks(seconds, running, delta);
         // Both portrait screens share one camera render. Cap its refresh independently
         // of the player view, especially when the main frame budget is already exceeded.
         _broadcastAccumulator += delta;

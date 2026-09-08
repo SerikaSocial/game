@@ -309,6 +309,12 @@ public static class DeviceProfile
         public static bool ProfilePictures = true;
         public static bool StartThirdPerson = false;
 
+        /// Live-event show effects: pyro/laser surfaces, the audience penlights and the held
+        /// light sticks. Persisted rather than session-scoped because the machines that need it
+        /// off need it off at every event, and re-finding the toggle each time is the kind of
+        /// friction that makes people stop attending.
+        public static bool EventEffects = true;
+
         /// Discord Social SDK rich presence. Off skips the Authorize popup entirely.
         public static bool DiscordPresence = true;
 
@@ -533,6 +539,7 @@ public static class DeviceProfile
             NameTags = (bool)cfg.GetValue("ui", "name_tags", NameTags);
             ProfilePictures = (bool)cfg.GetValue("ui", "pfp", ProfilePictures);
             StartThirdPerson = (bool)cfg.GetValue("controls", "third_person", StartThirdPerson);
+            EventEffects = (bool)cfg.GetValue("events", "effects", EventEffects);
             DiscordPresence = (bool)cfg.GetValue("discord", "presence", DiscordPresence);
             DiscordConsent = (DiscordConsentKind)(int)cfg.GetValue("discord", "consent", (int)DiscordConsent);
 
@@ -608,6 +615,7 @@ public static class DeviceProfile
             cfg.SetValue("audio", "input_device", InputDevice);
             cfg.SetValue("ui", "name_tags", NameTags);
             cfg.SetValue("ui", "pfp", ProfilePictures);
+            cfg.SetValue("events", "effects", EventEffects);
             cfg.SetValue("discord", "presence", DiscordPresence);
             cfg.SetValue("discord", "consent", (int)DiscordConsent);
 
