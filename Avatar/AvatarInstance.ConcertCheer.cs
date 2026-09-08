@@ -90,7 +90,11 @@ public sealed partial class AvatarInstance
                 int upper = _concertCheerBones[1], lower = _concertCheerBones[2], hand = _concertCheerBones[3];
                 var h = pose[upper].Origin;
                 float a = h.DistanceTo(pose[lower].Origin), b = pose[lower].Origin.DistanceTo(pose[hand].Origin);
-                var forward = normal.Cross(Vector3.Up).Normalized();
+                // `normal` runs left shoulder -> right shoulder, i.e. the avatar's RIGHT (+X on a
+                // humanoid rig). `normal x Up` is then +Z — which is BEHIND a rig that faces -Z.
+                // So the reach solve pushed both hands 16 cm out through the back on every pump.
+                // `Up x normal` is the actual forward.
+                var forward = Vector3.Up.Cross(normal).Normalized();
                 int chest = BoneOf("chest"); if (chest < 0) chest = BoneOf("spine");
                 var center = chest >= 0 ? pose[chest].Origin : pose[upper].Origin - normal * .15f;
                 var goal = pose[hand].Origin;
@@ -152,7 +156,7 @@ public sealed partial class AvatarInstance
                 foreach (bool left in new[]{false,true}) {
                     int j = left ? 7 : 3, bone = _concertCheerBones[j];
                     if (!EventShowPlayer.TryGetLightStickGrip(this,left,out var grip)) continue;
-                    var forward = normal.Cross(Vector3.Up).Normalized();
+                        var forward = Vector3.Up.Cross(normal).Normalized();
                     var shaft = (Vector3.Up + normal * (left ? -.13f : .13f)).Normalized();
                     var across = shaft.Cross(forward).Normalized();
                     var desiredGrip = new Basis(across,shaft,across.Cross(shaft).Normalized());

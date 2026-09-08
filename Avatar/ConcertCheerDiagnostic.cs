@@ -23,6 +23,10 @@ public partial class ConcertCheerDiagnostic : Node3D
         var armNames = new HashSet<string>(new[] {"leftShoulder","leftUpperArm","leftLowerArm","leftHand","rightShoulder","rightUpperArm","rightLowerArm","rightHand"});
         int head = cheer.BoneOf("head"), left = cheer.BoneOf("leftHand"), right = cheer.BoneOf("rightHand");
         float preservedMax = 0, maxStep = 0, maxLiftLeft = -100, maxLiftRight = -100, minSeparation=100;
+        // Where the hands sit along the FACING axis. A humanoid rig faces -Z, so a hand in front
+        // of the chest has a MORE NEGATIVE Z than the chest. The reported failure is the pump
+        // throwing the arms behind the back, which nothing here measured.
+        float worstBehind = -100; int chestBone = cheer.BoneOf("chest"); if (chestBone < 0) chestBone = cheer.BoneOf("spine");
         string preservedRole="", stepRole="";double stepTime=0;int overhead = 0; var previous = new Quaternion[cheer.Skeleton.GetBoneCount()];
         Transform3D[] Globals(AvatarInstance avatar) {
             var result = new Transform3D[avatar.Skeleton.GetBoneCount()];
@@ -42,11 +46,24 @@ public partial class ConcertCheerDiagnostic : Node3D
             var g = Globals(cheer); float l = g[left].Origin.Y - g[head].Origin.Y, r = g[right].Origin.Y - g[head].Origin.Y;
             if (l > .1f && r > .1f) overhead++;
             if(i>20)minSeparation=Math.Min(minSeparation,g[left].Origin.DistanceTo(g[right].Origin));
+            if (chestBone >= 0) {
+                float cz = g[chestBone].Origin.Z;
+                worstBehind = Math.Max(worstBehind, Math.Max(g[left].Origin.Z - cz, g[right].Origin.Z - cz));
+            }
             maxLiftLeft = Math.Max(maxLiftLeft, l); maxLiftRight = Math.Max(maxLiftRight, r);
         }
         Check(cheer.ConcertCheerReady, "existing Victory arm cache is available on the supplied avatar");
         Check(overhead > 30 && maxLiftLeft > .2f && maxLiftRight > .2f, "both animated arms rise above the head together");
         Check(minSeparation>.18f,"mirrored hands retain clear separation across the complete pump");
+        // Compare against the SAME avatar standing idle. The chest bone sits forward of the arms
+        // at rest, so a hand "behind the chest origin" is normal and says nothing on its own.
+        var cg = Globals(control);
+        float idleBehind = chestBone >= 0
+            ? Math.Max(cg[left].Origin.Z - cg[chestBone].Origin.Z, cg[right].Origin.Z - cg[chestBone].Origin.Z) : 0;
+        GD.Print($"CHEER_REACH cheering={worstBehind:F3} m idle={idleBehind:F3} m (positive = behind the chest bone)");
+        // The bar is the avatar's own resting arms, not an absolute number: cheering must not put
+        // the hands further back than simply standing there does.
+        Check(worstBehind <= idleBehind + .02f, "cheering never reaches further behind the body than standing at rest");
         int leftIndex=cheer.BoneOf("leftIndexProximal"),rightIndex=cheer.BoneOf("rightIndexProximal");
         bool hasFingerRig=leftIndex>=0&&rightIndex>=0;
         float leftCurl=hasFingerRig?cheer.Skeleton.GetBonePoseRotation(leftIndex).AngleTo(cheer.Skeleton.GetBoneRest(leftIndex).Basis.GetRotationQuaternion()):0;
