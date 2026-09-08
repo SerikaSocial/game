@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Threading.Tasks;
 using Godot;
@@ -160,12 +161,60 @@ public partial class EventShowPlayer : Node3D
     };
     private void BindScreens(Node node)
     {
-        if (node is MeshInstance3D mesh && mesh.Name.ToString().StartsWith("SERIKA_EVENT_SCREEN", StringComparison.Ordinal)) {
-            _screens.Add((mesh, mesh.MaterialOverride, mesh.Layers)); mesh.Layers = 1u << 19;
-            mesh.MaterialOverride = new StandardMaterial3D { ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+        foreach (var screen in FindPortraitScreens(node)) {
+            if (_screens.Any(s => s.Mesh == screen)) continue;
+            if (screen.MaterialOverride is not null) _screens.Add((screen, screen.MaterialOverride, screen.Layers));
+            else _screens.Add((screen, null, screen.Layers));
+            screen.Layers = 1u << 19;
+            screen.MaterialOverride = new StandardMaterial3D { ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
                 AlbedoTexture = _feed.GetTexture(), CullMode = BaseMaterial3D.CullModeEnum.Disabled };
         }
-        foreach (Node child in node.GetChildren()) if (child != this) BindScreens(child);
+    }
+    internal static bool IsPortraitScreenNode(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        string lowered = name.ToLowerInvariant();
+        if (lowered.StartsWith("serika_event_screen", StringComparison.Ordinal) || lowered.Contains("serika_event_screen")) return true;
+        if (!lowered.Contains("event") || !lowered.Contains("screen")) return false;
+        bool hasSideHint = lowered.Contains("left") || lowered.Contains("right") || lowered.Contains("portra") || lowered.Contains("side");
+        if (!hasSideHint) return false;
+        if (lowered.Contains("enclosure") || lowered.Contains("housing") || lowered.Contains("graphic")) return false;
+        return true;
+    }
+    internal static List<MeshInstance3D> FindPortraitScreens(Node root)
+    {
+        var screens = new List<MeshInstance3D>();
+        var seen = new HashSet<MeshInstance3D>();
+
+        void Collect(Node node)
+        {
+            if (node is MeshInstance3D mesh && IsPortraitScreenNode(mesh.Name.ToString())) {
+                if (seen.Add(mesh)) screens.Add(mesh);
+            }
+            foreach (Node child in node.GetChildren()) if (child != null) Collect(child);
+        }
+
+        Collect(root);
+
+        if (screens.Count < 2) {
+            void Fallback(Node node)
+            {
+                if (node is MeshInstance3D mesh) {
+                    string lowered = mesh.Name.ToString().ToLowerInvariant();
+                    bool candidate = lowered.Contains("screen") &&
+                        (lowered.Contains("left") || lowered.Contains("right") || lowered.Contains("portra") || lowered.Contains("side")) &&
+                        !lowered.Contains("enclosure") && !lowered.Contains("housing") && !lowered.Contains("graphic");
+                    if (candidate && seen.Add(mesh)) screens.Add(mesh);
+                }
+                foreach (Node child in node.GetChildren()) if (child != null) Fallback(child);
+            }
+            Fallback(root);
+        }
+
+        if (screens.Count >= 2) {
+            screens.Sort((a, b) => Math.Sign(a.GlobalPosition.X - b.GlobalPosition.X));
+        }
+        return screens;
     }
     public override void _Process(double delta)
     {

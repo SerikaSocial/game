@@ -193,7 +193,7 @@ public partial class ConcertRehearsal : Node3D
         var physics=GetWorld3D().DirectSpaceState;
         Check(physics.IntersectRay(PhysicsRayQueryParameters3D.Create(new Vector3(0,1,-20),new Vector3(0,1,-40))).Count>0,"audience exclusion still blocks stage entry");
         Check(physics.IntersectRay(PhysicsRayQueryParameters3D.Create(new Vector3(78,1,0),new Vector3(84,1,0))).Count>0,"invisible map boundary remains solid");
-        var displays=_show.GetParent().FindChildren("SERIKA_EVENT_SCREEN*","MeshInstance3D",true,false).OfType<MeshInstance3D>().ToArray();
+        var displays=EventShowPlayer.FindPortraitScreens(_show.GetParent()).ToArray();
         Check(displays.Length==2,"two portrait screens preserved");
         var rig=_show.Performer.Skeleton;int hand=_show.Performer.RoleToBoneForDiagnostics()["rightHand"];
         foreach(var segment in _event.Config.Segments){PlayAt(segment.Start+Math.Min(40,segment.Duration/2));await ToSignal(GetTree().CreateTimer(.4),SceneTreeTimer.SignalName.Timeout);

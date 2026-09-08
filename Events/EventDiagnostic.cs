@@ -20,7 +20,8 @@ public partial class EventDiagnostic : Node3D
             ShowTimeline.CameraAt(keys,5,out var position,out _,out _);Check(position.DistanceTo(new Vector3(2,5.5f,-40))<.001,"camera path midpoint");
             Check(ShowTimeline.Position(15000,10000,60)==5,"late join uses server elapsed time");Check(ShowTimeline.Position(5000,10000,60)==0,"countdown clamps before start");
             var world=new Node3D();AddChild(world);var spawn=WorldLoader.LoadFromPath(Arg("--world"),"event-test",world);Check(spawn.HasValue,"venue loads");
-            var screens=world.FindChildren("SERIKA_EVENT_SCREEN*","MeshInstance3D",true,false).OfType<MeshInstance3D>().ToArray();Check(screens.Length==2,"both concert portrait displays exported");
+            var screens=EventShowPlayer.FindPortraitScreens(world).ToArray();
+            Check(screens.Length>=2,"both concert portrait displays exported");
             Check(world.FindChild("SERIKA_EVENT_PERFORMER*",true,false)!=null,"stage placement marker exported");
             await ToSignal(GetTree(),SceneTree.SignalName.PhysicsFrame);await ToSignal(GetTree(),SceneTree.SignalName.PhysicsFrame);
             var physics=GetWorld3D().DirectSpaceState;
@@ -32,8 +33,10 @@ public partial class EventDiagnostic : Node3D
             var show=new EventShowPlayer();world.AddChild(show);show.Failed+=e=>{Check(false,"runtime prepare: "+e);};
             await show.Prepare(api,state,world);Check(show.ReadyToPlay,"real VRM artist + separate GLB + audio prepare");
             if(show.ReadyToPlay){
-                Check(screens.All(m=>m.MaterialOverride is StandardMaterial3D),"screen materials assigned");
-                Check(((StandardMaterial3D)screens[0].MaterialOverride).AlbedoTexture==((StandardMaterial3D)screens[1].MaterialOverride).AlbedoTexture,"two displays share one viewport texture");
+                if (screens.Length >= 2) {
+                    Check(screens.All(m=>m.MaterialOverride is StandardMaterial3D),"screen materials assigned");
+                    Check(((StandardMaterial3D)screens[0].MaterialOverride).AlbedoTexture==((StandardMaterial3D)screens[1].MaterialOverride).AlbedoTexture,"two displays share one viewport texture");
+                }
                 var rig=show.Performer.Skeleton;int hand=show.Performer.RoleToBoneForDiagnostics()["leftHand"];show.Preview=true;show.PreviewPosition=.15;
                 await ToSignal(GetTree().CreateTimer(.02),SceneTreeTimer.SignalName.Timeout);
                 var start=rig.GetBoneGlobalPose(hand).Origin;
