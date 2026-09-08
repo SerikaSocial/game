@@ -13,6 +13,10 @@ public partial class Main
     private EventShowPlayer _eventShow;
     private LiveEvent[] _liveEvents = Array.Empty<LiveEvent>();
     private double _eventPoll, _eventListPoll;
+    /// Backoff for rebuilding a show that failed to load. Cleared on a successful build and
+    /// whenever the player leaves the venue, so a new visit always gets a fresh attempt.
+    private ulong _eventShowRetryAt;
+    private int _eventShowAttempt;
     private bool _eventPolling, _eventPreview, _eventStaff;
     private ApiClient _eventApi;
     private void InitializeEvents()
@@ -58,6 +62,9 @@ public partial class Main
             if (_voice != null) _voice.MuteEveryone = false;
             ApplyEventPlayerVisibility();
         }
+        // Leaving the world clears the load-failure backoff: the next visit is a fresh start,
+        // not a continuation of whatever went wrong last time.
+        if (!_inWorld) { _eventShowRetryAt = 0; _eventShowAttempt = 0; }
         if (inEvent) _quickMenu.EventOptions.SetState(_eventHidePlayers, _eventMutePlayers, !UI.DeviceProfile.Settings.EventEffects);
     }
     private void OpenEventAdmin()
@@ -97,7 +104,7 @@ public partial class Main
                 if (player != _eventShow || !GodotObject.IsInstanceValid(player)) return;
                 _eventShow.ApplyState(state, Time.GetTicksMsec() - before);
                 if (!state.IsOpen) { StopEventPlayer(); _inWorldHud?.Toast("The event has ended.", 4); EnterHome(); }
-            } else if (_inWorld && _currentWorldId != null) {
+            } else if (_inWorld && _currentWorldId != null && _eventShowRetryAt <= Time.GetTicksMsec()) {
                 var state = _liveEvents.FirstOrDefault(e => e.WorldId == _currentWorldId);
                 if (state != null) {
                     string worldId = _currentWorldId; var world = _worldRoot;
@@ -115,8 +122,23 @@ public partial class Main
                     _inWorldHud?.Toast("Loading the show… the first time in a venue can take a few minutes.", 240);
                     var show = _eventShow;
                     await _eventShow.Prepare(api, state, _worldRoot);
-                    if (GodotObject.IsInstanceValid(show) && show == _eventShow)
-                        _inWorldHud?.Toast(show.ReadyToPlay ? "The show is ready." : "The show could not be loaded.", 4);
+                    if (!GodotObject.IsInstanceValid(show) || show != _eventShow) return;
+                    if (show.ReadyToPlay) {
+                        _eventShowAttempt = 0;
+                        _inWorldHud?.Toast("The show is ready.", 4);
+                    } else {
+                        // A show that failed to build used to stay parented with ReadyToPlay
+                        // false, and because the poll only rebuilds when `_eventShow` is null it
+                        // was never retried — one flaky asset download meant no show for the
+                        // rest of the event, with nothing on screen explaining why. Drop it and
+                        // try again, backing off so a genuinely broken show is not rebuilt (and
+                        // re-stalled) every two seconds.
+                        _eventShowAttempt++;
+                        double wait = Math.Min(15 * Math.Pow(2, _eventShowAttempt - 1), 120);
+                        _eventShowRetryAt = Time.GetTicksMsec() + (ulong)(wait * 1000);
+                        StopEventPlayer();
+                        _inWorldHud?.Toast($"The show could not be loaded. Retrying in {wait:0}s.", 6);
+                    }
                 }
             }
         } catch (Exception e) { GD.PrintErr("Events: " + e.Message); }

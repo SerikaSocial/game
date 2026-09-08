@@ -26,6 +26,13 @@
          are both this client. That makes it as load-bearing as the byte layout, so it gets the
          same treatment: a frozen test in the same suite. Pure C#, no Godot dependency. -->
     <Compile Include="..\..\..\Avatar\HumanoidBones.cs" />
+    <!-- The transport itself. It is deliberately Godot-free (System.Net.Sockets, not
+         PacketPeerUDP) precisely so its liveness rules can be driven against a real socket
+         here. Those rules decide whether a player stays in a world, and they were twice wrong
+         in ways that reading the code did not catch. -->
+    <Compile Include="..\..\ISerikaTransport.cs" />
+    <Compile Include="..\..\RelayProtocol.cs" />
+    <Compile Include="..\..\UdpTransport.cs" />
   </ItemGroup>
 
   <ItemGroup>

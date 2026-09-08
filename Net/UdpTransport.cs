@@ -15,7 +15,19 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
 {
     private UdpClient _sock;
     private string _ticket = "";
-    private bool _welcomed;
+    private volatile bool _welcomed;
+    private readonly object _sendLock = new();
+    private System.Threading.Thread _keepalive;
+    private volatile bool _running;
+    private const int KeepaliveMs = 1000;
+    /// Cap on datagrams processed per frame. After a stall the socket holds a backlog that
+    /// would otherwise all be decoded in the frame that finally runs — another hitch, caused by
+    /// recovering from the last one.
+    private const int MaxDatagramsPerPoll = 512;
+    /// Past this many in one frame, poses and voice are drained but not decoded: they describe
+    /// where peers were, not where they are. Joins, leaves and chat are NEVER discarded — doing
+    /// so is how you end up with ghost avatars and missing messages.
+    private const int TransientBacklogBudget = 96;
     private double _helloTimer;
     private double _pingTimer;
     private double _connectTimeout;
@@ -60,6 +72,14 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         _lastPollMs = 0;
         _connectTimeout = ConnectTimeoutSeconds;
         SendHello();
+
+        _running = true;
+        _keepalive = new System.Threading.Thread(KeepaliveLoop)
+        {
+            IsBackground = true,   // must never hold the process open at quit
+            Name = "serika-keepalive",
+        };
+        _keepalive.Start();
     }
 
     public void SendPose(PoseFrame frame)
@@ -106,7 +126,18 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         // datagram being looked at — which is what happens after any long frame, since `dt`
         // then arrives already over the threshold.
         bool got = false;
-        while (TryReceive(out int n)) { got = true; Handle(_rx, n); }
+        int drained = 0;
+        while (drained < MaxDatagramsPerPoll && TryReceive(out int n))
+        {
+            got = true;
+            drained++;
+            // Shed a stale backlog rather than replaying it: past the budget, poses and voice
+            // are read off the socket and dropped, because they say where a peer WAS. Every
+            // other type still goes through — a discarded join or leave is a ghost avatar.
+            if (drained > TransientBacklogBudget && n >= 1
+                && ((MsgType)_rx[0] == MsgType.Pose || (MsgType)_rx[0] == MsgType.Voice)) continue;
+            Handle(_rx, n);
+        }
         if (got) _sinceRecv = 0; // any datagram (even another peer's pose) proves the link is up
 
         // `dt` is the physics step, not wall time, and it lags reality across a stall. Measure
@@ -135,9 +166,14 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
         }
         else
         {
-            // Keepalive doubles as an RTT probe and keeps NAT mappings open.
+            // The keepalive thread owns the ping. This is only a backstop for the case where
+            // that thread never started, and it is deliberately the same cadence.
             _pingTimer -= dt;
-            if (_pingTimer <= 0) { Send(RelayProtocol.Ping); _pingTimer = 1.0; }
+            if (_pingTimer <= 0)
+            {
+                if (_keepalive is not { IsAlive: true }) Send(RelayProtocol.Ping);
+                _pingTimer = 1.0;
+            }
 
             // Liveness: the relay echoes our 2 s pings and streams peer poses, so a welcomed
             // session should never go quiet for long. If it does — relay crashed, tunnel
@@ -294,16 +330,47 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
 
     private void Send(byte[] data)
     {
-        try { _sock?.Send(data, data.Length); }
-        catch (SocketException) { /* transient; retransmit logic covers control msgs */ }
+        // Serialised because the keepalive thread writes to the same socket.
+        lock (_sendLock)
+        {
+            try { _sock?.Send(data, data.Length); }
+            catch (SocketException) { /* transient; retransmit logic covers control msgs */ }
+            catch (ObjectDisposedException) { /* closed under us during teardown */ }
+        }
+    }
+
+    /// Keepalive lives on its OWN THREAD, and that is the whole point.
+    ///
+    /// The relay drops a peer after PEER_TIMEOUT (10 s) of silence. Pings used to be sent from
+    /// `Poll`, i.e. from the frame loop — so any stall longer than 10 s got the player dropped,
+    /// and the first visit to a heavy world stalls for far longer than that while its shaders
+    /// compile. The player was removed from the instance *every time*, and everyone else watched
+    /// them leave and come back. Reconnecting afterwards patched over the symptom; not being
+    /// dropped in the first place is the fix. A frozen renderer is not a dead connection.
+    ///
+    /// One byte a second, and it deliberately does no bookkeeping of its own: liveness is still
+    /// judged on the main thread from what actually arrives.
+    private void KeepaliveLoop()
+    {
+        while (_running)
+        {
+            System.Threading.Thread.Sleep(KeepaliveMs);
+            if (!_running || !_welcomed) continue;
+            Send(RelayProtocol.Ping);
+        }
     }
 
     public void Disconnect()
     {
-        _sock?.Close();
-        _sock?.Dispose();
-        _sock = null;
+        _running = false;
         _welcomed = false;
+        _keepalive = null;   // background thread; it observes _running and exits on its own
+        lock (_sendLock)
+        {
+            _sock?.Close();
+            _sock?.Dispose();
+            _sock = null;
+        }
     }
 
     public void Dispose() => Disconnect();
