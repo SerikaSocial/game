@@ -11,6 +11,10 @@ namespace SerikaSocial.Events;
 public partial class EventShowPlayer : Node3D
 {
     public event Action<string> Failed;
+    /// The automatic quality drop flipped. False means the show is now running reduced: half the
+    /// stage-screen refresh, thinned cinematic effects. Surfaced because it is otherwise
+    /// indistinguishable from the show being broken.
+    public event Action<bool> QualityChanged;
     public string EventId => _state?.Id;
     public bool ReadyToPlay { get; private set; }
     public Camera3D BroadcastCamera => _camera;
@@ -25,14 +29,32 @@ public partial class EventShowPlayer : Node3D
     private int _generation;
     private int _playingRevision = -1;
     private readonly List<(MeshInstance3D Mesh, Material Material, uint Layers)> _screens = new();
-    private const float FpsHysteresisDown = 42;
-    private const float FpsHysteresisUp = 48;
+    /// Quality thresholds are a FRACTION of the frame rate this machine is actually trying to
+    /// hit, not absolute numbers. The old pair was a flat 42 down / 48 up, which on a mid-range
+    /// GPU at a heavy venue is unreachable: the show dropped to reduced quality within seconds
+    /// and could never climb back, so the stage screens ran at half rate for the whole event
+    /// with nothing on screen explaining why. Reported as "the side displays don't do shit".
+    private const float FpsDownFraction = 0.62f;
+    private const float FpsUpFraction = 0.72f;
+    /// What "full speed" means here: an explicit cap if the player set one, otherwise the
+    /// display's own refresh rate. Clamped because a headless or unknown display reports -1.
+    private static float TargetFps => Engine.MaxFps > 0
+        ? Engine.MaxFps
+        : Mathf.Clamp(DisplayServer.ScreenGetRefreshRate(), 30f, 144f);
     private const int FpsDownFrames = 24;
     private const int FpsUpFrames = 60;
     private float _fpsSmoothing = 60;
     private int _fpsDropFrames;
     private int _fpsRecoverFrames;
     private bool _highQuality = true;
+    /// Pin full quality and ignore the frame rate entirely.
+    ///
+    /// The automatic drop is one-way in practice on mid-range hardware: a GPU that cannot hold
+    /// the down threshold at a heavy venue will never reach the up threshold either, so the show
+    /// runs reduced for the whole event and the player has no say in it. Some people would
+    /// rather have the stage screens at full rate and take the frame rate hit. This is that
+    /// choice, and it is theirs to make, not the hysteresis's.
+    public bool ForceFullQuality { get; set; }
     private double _broadcastAccumulator;
     private const double LowQualityFxCadence = 1.0 / 18.0;
     private double _fxAccumulator;
@@ -152,10 +174,11 @@ public partial class EventShowPlayer : Node3D
             // Measure the real frame duration; never clamp the show clock after a hitch.
             float fps = Mathf.Min(Mathf.Max(1f / (float)delta, 1), 500);
             _fpsSmoothing = Mathf.Lerp(_fpsSmoothing, fps, 0.15f);
-            if (_fpsSmoothing < FpsHysteresisDown) {
+            float target = TargetFps;
+            if (_fpsSmoothing < target * FpsDownFraction) {
                 _fpsDropFrames = Mathf.Min(_fpsDropFrames + 1, FpsDownFrames);
                 _fpsRecoverFrames = 0;
-            } else if (_fpsSmoothing > FpsHysteresisUp) {
+            } else if (_fpsSmoothing > target * FpsUpFraction) {
                 _fpsRecoverFrames = Mathf.Min(_fpsRecoverFrames + 1, FpsUpFrames);
                 _fpsDropFrames = 0;
             } else {
@@ -163,9 +186,18 @@ public partial class EventShowPlayer : Node3D
                 _fpsRecoverFrames = 0;
             }
             bool wasHighQuality = _highQuality;
-            if (_highQuality && _fpsDropFrames >= FpsDownFrames) _highQuality = false;
-            if (!_highQuality && _fpsRecoverFrames >= FpsUpFrames) _highQuality = true;
-            if (wasHighQuality != _highQuality) GD.Print("CONCERT_QUALITY high=" + _highQuality + " fps=" + _fpsSmoothing + " event=" + (_state?.Title ?? "local"));
+            if (ForceFullQuality) _highQuality = true;
+            else {
+                if (_highQuality && _fpsDropFrames >= FpsDownFrames) _highQuality = false;
+                if (!_highQuality && _fpsRecoverFrames >= FpsUpFrames) _highQuality = true;
+            }
+            if (wasHighQuality != _highQuality) {
+                GD.Print("CONCERT_QUALITY high=" + _highQuality + " fps=" + _fpsSmoothing + " event=" + (_state?.Title ?? "local"));
+                // Say it out loud. This halves the stage-screen refresh and thins the cinematic
+                // effects, and it did so silently — so a show that quietly degraded read as "the
+                // displays stopped doing anything" with nothing to connect it to frame rate.
+                QualityChanged?.Invoke(_highQuality);
+            }
         }
         long now = _serverTime + (long)(Time.GetTicksMsec() - _receivedAt);
         if (Preview && PreviewPlaying) PreviewPosition = Math.Min(PreviewPosition + delta, _state.Config.Duration);
@@ -186,7 +218,9 @@ public partial class EventShowPlayer : Node3D
         // Both portrait screens share one camera render. Cap its refresh independently
         // of the player view, especially when the main frame budget is already exceeded.
         _broadcastAccumulator += delta;
-        double feedInterval = highQuality ? 1.0 / 30.0 : 1.0 / 15.0;
+        // Reduced quality drops the stage-screen refresh, but 15 Hz reads as broken rather than
+        // as a saving. 20 Hz still cuts a third of the broadcast renders and stays motion.
+        double feedInterval = highQuality ? 1.0 / 30.0 : 1.0 / 20.0;
         if (running && _broadcastAccumulator >= feedInterval) {
             _broadcastAccumulator %= feedInterval;
             _feed.RenderTargetUpdateMode = SubViewport.UpdateMode.Once;

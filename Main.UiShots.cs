@@ -68,7 +68,7 @@ public partial class Main
                 _quickMenu.SetPlayers(user, new (string, string)[] { ("u-aris", "Aris"), ("u-hoshino", "Hoshino") });
                 _quickMenu.SetTrust("Trusted");
                 _quickMenu.SetInEvent(true);
-                _quickMenu.EventOptions.SetState(false, true, false);
+                _quickMenu.EventOptions.SetState(false, true, false, true);
                 _quickMenu.Open(user);
             }),
             new("mainmenu_worlds",  () => { _mainMenu.SetWorlds(worlds); _mainMenu.Open(user, 1); }),

@@ -10,6 +10,7 @@ public partial class EventShowPlayer
     private Material _introPortrait, _introLandscape;
     private bool? _presentationLive;
     private bool _compatibilityLighting;
+    private bool _mobileLighting;
     private bool? _revealedPresentation;
     private readonly Material _blackoutBackdrop = new StandardMaterial3D { ShadingMode=BaseMaterial3D.ShadingModeEnum.Unshaded, AlbedoColor=Colors.Black };
     private readonly List<(Godot.Environment Environment, float Ambient)> _showEnvironments = new();
@@ -18,7 +19,51 @@ public partial class EventShowPlayer
     public float RevealLevel { get; private set; } = 1;
     private readonly List<(MeshInstance3D Mesh, Material Material)> _backdrops = new();
     private readonly List<(Node3D Node, bool Visible)> _backdropArt = new();
-    private readonly List<(Light3D Light, Color Color, float Energy, Vector3 Position, bool Key, bool Rim, bool Hall, bool Shadow, Basis Basis, uint Mask, float Angle, float Range, float AngleAttenuation, float Bias, float NormalBias)> _showLights = new();
+    /// A stage light plus everything needed to drive it and to put it back.
+    ///
+    /// This used to be a tuple and the update loop wrote all fourteen properties to every light
+    /// on every frame, unconditionally — cull mask, colour, energy (twice), position, spot angle,
+    /// shadow flags, both biases. Each write crosses into the rendering server, and a cull-mask
+    /// write re-pairs the light against scene geometry. Measured on the real venue: 13 show
+    /// lights x 14 writes x 60 fps is ~11k binding calls a second for values that are constant
+    /// for seconds at a time. That is worth removing, but be honest about the size of it — it is
+    /// NOT why a GTX 1050 Ti runs this venue at 35 fps. Writes are now change-guarded and the
+    /// per-frame constants (name tests, `OS.HasFeature`) resolved once, here.
+    private sealed class ShowLight
+    {
+        public Light3D Light;
+        public SpotLight3D Spot;          // cached cast; the per-frame `is` test was not free
+        public Color Color;
+        public float Energy;
+        public Vector3 Position;
+        public bool Key, Rim, Hall, Shadow;
+        public Basis Basis;
+        public uint Mask;
+        public float Angle, Range, AngleAttenuation, Bias, NormalBias;
+        public bool StageFront, Moonlight;   // were string comparisons, every light, every frame
+    }
+    private readonly List<ShowLight> _showLights = new();
+
+    // Write only on change. Reading a property is a binding call; WRITING one is a binding call
+    // plus rendering-server work, and for the cull mask a pair/unpair cycle. The show holds most
+    // of these constant for seconds at a time, so the guard elides almost all of them.
+    private static void SetMask(Light3D l, uint v) { if (l.LightCullMask != v) l.LightCullMask = v; }
+    private static void SetColor(Light3D l, Color v) { if (l.LightColor != v) l.LightColor = v; }
+    private static void SetEnergy(Light3D l, float v) { if (!Mathf.IsEqualApprox(l.LightEnergy, v)) l.LightEnergy = v; }
+    private static void SetShadow(Light3D l, bool v) { if (l.ShadowEnabled != v) l.ShadowEnabled = v; }
+    private static void SetPosition(Node3D n, Vector3 v) { if (!n.GlobalPosition.IsEqualApprox(v)) n.GlobalPosition = v; }
+    private static void SetBias(Light3D l, float bias, float normalBias)
+    {
+        if (!Mathf.IsEqualApprox(l.ShadowBias, bias)) l.ShadowBias = bias;
+        if (!Mathf.IsEqualApprox(l.ShadowNormalBias, normalBias)) l.ShadowNormalBias = normalBias;
+    }
+    private static void SetSpot(SpotLight3D s, float angle, float attenuation, float range)
+    {
+        if (s == null) return;
+        if (!Mathf.IsEqualApprox(s.SpotAngle, angle)) s.SpotAngle = angle;
+        if (!Mathf.IsEqualApprox(s.SpotAngleAttenuation, attenuation)) s.SpotAngleAttenuation = attenuation;
+        if (!Mathf.IsEqualApprox(s.SpotRange, range)) s.SpotRange = range;
+    }
     private readonly List<(MeshInstance3D Mesh, Material Original, ShaderMaterial Material, Vector3 Rotation, bool Visible)> _beams = new();
     private readonly List<(MeshInstance3D Mesh, Material Original, StandardMaterial3D Material)> _practicals = new();
     public float BeatStrength { get; private set; }
@@ -34,9 +79,29 @@ public partial class EventShowPlayer
                 _showEnvironments.Add((environment.Environment,environment.Environment.AmbientLightEnergy));
         foreach (Node node in world.FindChildren("*", "DirectionalLight3D", true, false))
             if (node is DirectionalLight3D moon) _moonLights.Add((moon,moon.LightEnergy,moon.ShadowEnabled));
-        foreach (Node node in world.FindChildren("*", "Light3D", true, false))
-            if (node is Light3D light && light is not DirectionalLight3D && !light.Name.ToString().StartsWith("SERIKA_EVENT_SPOT") && !light.Name.ToString().StartsWith("SERIKA_EVENT_FX_LIGHT"))
-                _showLights.Add((light, light.LightColor, light.LightEnergy, light.GlobalPosition, light.Name.ToString().StartsWith("Performer key"), light.Name.ToString().StartsWith("Side key"), light.Name.ToString().StartsWith("SERIKA_EVENT_HALL") || light.Name.ToString().Contains("Audience") || light.Name == "Moonlight", light.ShadowEnabled, light.GlobalBasis, light.LightCullMask, (light as SpotLight3D)?.SpotAngle ?? 0, (light as SpotLight3D)?.SpotRange ?? 0, (light as SpotLight3D)?.SpotAngleAttenuation ?? 0, light.ShadowBias, light.ShadowNormalBias));
+        // Every name test and platform query is resolved HERE, once. They used to run per light
+        // per frame inside the update loop.
+        bool mobile = OS.HasFeature("mobile");
+        foreach (Node node in world.FindChildren("*", "Light3D", true, false)) {
+            if (node is not Light3D light || light is DirectionalLight3D) continue;
+            string lightName = light.Name.ToString();
+            if (lightName.StartsWith("SERIKA_EVENT_SPOT") || lightName.StartsWith("SERIKA_EVENT_FX_LIGHT")) continue;
+            var spot = light as SpotLight3D;
+            _showLights.Add(new ShowLight {
+                Light = light, Spot = spot,
+                Color = light.LightColor, Energy = light.LightEnergy, Position = light.GlobalPosition,
+                Key = lightName.StartsWith("Performer key"),
+                Rim = lightName.StartsWith("Side key"),
+                Hall = lightName.StartsWith("SERIKA_EVENT_HALL") || lightName.Contains("Audience") || lightName == "Moonlight",
+                StageFront = lightName == "Stage front light",
+                Moonlight = lightName == "Moonlight",
+                Shadow = light.ShadowEnabled, Basis = light.GlobalBasis, Mask = light.LightCullMask,
+                Angle = spot?.SpotAngle ?? 0, Range = spot?.SpotRange ?? 0,
+                AngleAttenuation = spot?.SpotAngleAttenuation ?? 0,
+                Bias = light.ShadowBias, NormalBias = light.ShadowNormalBias,
+            });
+        }
+        _mobileLighting = mobile;
         var beamShader = new Shader { Code = @"shader_type spatial;
 render_mode unshaded, blend_add, depth_draw_never, cull_disabled, shadows_disabled;
 uniform vec3 beam_color : source_color = vec3(.25,.55,1.0);
@@ -116,36 +181,40 @@ ALBEDO=(p.y<0.0 || p.y>1.0) ? vec3(0.0) : texture(video_frame,p).rgb; }" } };
         BeatStrength=performance ? ShowTimeline.Envelope(config.Beats,seconds,config.MusicFps) : 0;
         float music=performance ? ShowTimeline.Envelope(config.MusicEnergy,seconds,config.MusicFps) : 0;
         var alternate=color.Lerp(new Color(.42f,.22f,1),.4f);
+        // Energy is computed in full and written ONCE. It used to be assigned two or three times
+        // per light per frame, and every assignment was a separate trip into the rendering server.
+        float rendererExposure=_compatibilityLighting?.28f:1f;
+        var keyTint=new Color(1,.93f,.85f);
+        var rimTint=color.Lerp(new Color(.42f,.58f,.85f),.3f);
+        var hallTint=new Color(.22f,.32f,.52f);
         foreach(var lamp in _showLights) {
-            bool rim=lamp.Rim;
-            if(lamp.Key || rim) {
-                lamp.Light.LightCullMask=1u | (1u<<18) | (1u<<17);
+            if(!IsInstanceValid(lamp.Light)) continue;
+            if(lamp.Key || lamp.Rim) {
+                SetMask(lamp.Light, 1u | (1u<<18) | (1u<<17));
                 // Neutral follow spots illuminate the singer independently of the show look.
-                lamp.Light.GlobalPosition=lamp.Position+(performance?_artist.GlobalPosition-ShowTimeline.Vector(config.Performer):Vector3.Zero);
-                if(lamp.Light is SpotLight3D spot) {
-                    spot.LookAt(_artist.GlobalPosition+new Vector3(0,1.05f,0));
-                    spot.SpotAngle=lamp.Key?17:24;spot.SpotAngleAttenuation=1.5f;
-                    spot.SpotRange=lamp.Key?18:14;
+                SetPosition(lamp.Light, lamp.Position+(performance?_artist.GlobalPosition-ShowTimeline.Vector(config.Performer):Vector3.Zero));
+                if(lamp.Spot!=null) {
+                    lamp.Spot.LookAt(_artist.GlobalPosition+new Vector3(0,1.05f,0));
+                    SetSpot(lamp.Spot, lamp.Key?17:24, 1.5f, lamp.Key?18:14);
                 }
-                lamp.Light.LightColor=lamp.Key?new Color(1,.93f,.85f):color.Lerp(new Color(.42f,.58f,.85f),.3f);
+                SetColor(lamp.Light, lamp.Key?keyTint:rimTint);
                 // Actual scene review: Compatibility spots need lower exposure and no artist shadow pass.
-                float rendererExposure=_compatibilityLighting?.28f:1f;
                 float keyBaseEnergy = lamp.Key ? (lamp.Position.X < 0 ? 18f : 8f) : 7f * energy;
-                lamp.Light.LightEnergy = keyBaseEnergy * rendererExposure * (highQuality ? 1f : 0.85f);
-                lamp.Light.LightEnergy*=RevealLevel;
-                lamp.Light.ShadowEnabled=lamp.Key&&lamp.Position.X<0&&!OS.HasFeature("mobile")&&!_compatibilityLighting;
-                lamp.Light.ShadowBias=.035f;lamp.Light.ShadowNormalBias=.45f;
+                SetEnergy(lamp.Light, keyBaseEnergy * rendererExposure * (highQuality ? 1f : 0.85f) * RevealLevel);
+                SetShadow(lamp.Light, lamp.Key && lamp.Position.X<0 && !_mobileLighting && !_compatibilityLighting);
+                SetBias(lamp.Light, .035f, .45f);
             } else {
-                lamp.Light.LightCullMask=lamp.Light.Name=="Stage front light"?1u<<17:1u;
-                lamp.Light.LightColor=lamp.Hall?new Color(.22f,.32f,.52f):color;
+                SetMask(lamp.Light, lamp.StageFront?1u<<17:1u);
+                SetColor(lamp.Light, lamp.Hall?hallTint:color);
                 // Navigation stays dim and stable. No whole-venue beat flashing.
-                lamp.Light.LightEnergy = lamp.Energy * (lamp.Hall ? (performance ? 0.45f : 0.8f)
-                    : (performance ? Mathf.Lerp(.28f, .35f, highQuality ? 1 : .85f) * energy : 0.18f));
-                lamp.Light.LightEnergy*=RevealLevel*(_compatibilityLighting?.35f:1f);
                 // The directional moon already supplies the night wash; removing its
                 // broad point duplicate keeps the audience within the GL Omni budget.
-                if(lamp.Light.Name=="Moonlight") lamp.Light.LightEnergy=0;
-                lamp.Light.ShadowEnabled=false;
+                float e = lamp.Moonlight ? 0f
+                    : lamp.Energy * (lamp.Hall ? (performance ? 0.45f : 0.8f)
+                        : (performance ? Mathf.Lerp(.28f, .35f, highQuality ? 1 : .85f) * energy : 0.18f))
+                      * RevealLevel * (_compatibilityLighting?.35f:1f);
+                SetEnergy(lamp.Light, e);
+                SetShadow(lamp.Light, false);
             }
         }
         for(int i=0;i<_practicals.Count;i++) {
@@ -187,6 +256,18 @@ ALBEDO=(p.y<0.0 || p.y>1.0) ? vec3(0.0) : texture(video_frame,p).rgb; }" } };
         foreach(var mic in _microphones) if(IsInstanceValid(mic.Node)) mic.Node.Visible=mic.Visible;
         foreach(var backdrop in _backdrops) if(IsInstanceValid(backdrop.Mesh)) backdrop.Mesh.MaterialOverride=backdrop.Material;
         foreach(var art in _backdropArt) if(IsInstanceValid(art.Node)) art.Node.Visible=art.Visible;
-        foreach(var lamp in _showLights) if(IsInstanceValid(lamp.Light)) { lamp.Light.LightColor=lamp.Color; lamp.Light.LightEnergy=lamp.Energy; lamp.Light.GlobalPosition=lamp.Position; lamp.Light.ShadowEnabled=lamp.Shadow; lamp.Light.GlobalBasis=lamp.Basis; lamp.Light.LightCullMask=lamp.Mask; lamp.Light.ShadowBias=lamp.Bias; lamp.Light.ShadowNormalBias=lamp.NormalBias; if(lamp.Light is SpotLight3D spot) { spot.SpotAngle=lamp.Angle;spot.SpotRange=lamp.Range;spot.SpotAngleAttenuation=lamp.AngleAttenuation; } }
+        // Change-guarded, like the update loop. Restoring unconditionally re-paired every light
+        // against scene geometry and tripped `geom->softshadow_count==0 - BUG!` once per light,
+        // each with a full stack trace — 448 of them, 1.5 MB of log, in a single teardown.
+        foreach(var lamp in _showLights) if(IsInstanceValid(lamp.Light) && lamp.Light.IsInsideTree()) {
+            SetColor(lamp.Light, lamp.Color);
+            SetEnergy(lamp.Light, lamp.Energy);
+            SetPosition(lamp.Light, lamp.Position);
+            SetShadow(lamp.Light, lamp.Shadow);
+            if(!lamp.Light.GlobalBasis.IsEqualApprox(lamp.Basis)) lamp.Light.GlobalBasis=lamp.Basis;
+            SetMask(lamp.Light, lamp.Mask);
+            SetBias(lamp.Light, lamp.Bias, lamp.NormalBias);
+            SetSpot(lamp.Spot, lamp.Angle, lamp.AngleAttenuation, lamp.Range);
+        }
     }
 }

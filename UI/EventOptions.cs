@@ -14,7 +14,8 @@ public partial class EventOptions : VBoxContainer
     public event Action<bool> HidePlayersToggled;
     public event Action<bool> MutePlayersToggled;
     public event Action<bool> EffectsToggled;
-    private CheckButton _hide, _mute, _effects;
+    public event Action<bool> FullQualityToggled;
+    private CheckButton _hide, _mute, _effects, _fullQuality;
 
     public override void _Ready()
     {
@@ -30,6 +31,11 @@ public partial class EventOptions : VBoxContainer
             on => MutePlayersToggled?.Invoke(on));
         _effects = Toggle("Disable effects", "Turn off pyro, lasers, crowd penlights and light sticks. The performer, stage lighting, screens and audio stay.",
             on => EffectsToggled?.Invoke(on));
+        _fullQuality = Toggle("Always full quality",
+            "Keep the stage screens and effects at full rate even when the frame rate drops. "
+            + "Without this the show reduces itself automatically — which on a GPU that cannot reach "
+            + "the recovery threshold means it stays reduced for the whole event.",
+            on => FullQualityToggled?.Invoke(on));
 
         // Without a rule these three sit flush against the quick menu's own header and read as
         // part of it rather than as a block belonging to the venue.
@@ -52,11 +58,12 @@ public partial class EventOptions : VBoxContainer
     }
 
     /// Reflect the owner's state without firing the change handlers back at it.
-    public void SetState(bool hidePlayers, bool mutePlayers, bool effectsDisabled)
+    public void SetState(bool hidePlayers, bool mutePlayers, bool effectsDisabled, bool fullQuality)
     {
         if (_hide == null) return;
         _hide.SetPressedNoSignal(hidePlayers);
         _mute.SetPressedNoSignal(mutePlayers);
         _effects.SetPressedNoSignal(effectsDisabled);
+        _fullQuality.SetPressedNoSignal(fullQuality);
     }
 }

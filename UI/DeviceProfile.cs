@@ -315,6 +315,12 @@ public static class DeviceProfile
         /// friction that makes people stop attending.
         public static bool EventEffects = true;
 
+        /// Pin live-event shows to full quality instead of letting the frame-rate watchdog
+        /// reduce them. Off by default: the watchdog is right for most machines. It is wrong for
+        /// one that can never reach the recovery threshold, which is exactly the machine whose
+        /// owner will want this.
+        public static bool EventFullQuality = false;
+
         /// Discord Social SDK rich presence. Off skips the Authorize popup entirely.
         public static bool DiscordPresence = true;
 
@@ -540,6 +546,7 @@ public static class DeviceProfile
             ProfilePictures = (bool)cfg.GetValue("ui", "pfp", ProfilePictures);
             StartThirdPerson = (bool)cfg.GetValue("controls", "third_person", StartThirdPerson);
             EventEffects = (bool)cfg.GetValue("events", "effects", EventEffects);
+            EventFullQuality = (bool)cfg.GetValue("events", "full_quality", EventFullQuality);
             DiscordPresence = (bool)cfg.GetValue("discord", "presence", DiscordPresence);
             DiscordConsent = (DiscordConsentKind)(int)cfg.GetValue("discord", "consent", (int)DiscordConsent);
 
@@ -616,6 +623,7 @@ public static class DeviceProfile
             cfg.SetValue("ui", "name_tags", NameTags);
             cfg.SetValue("ui", "pfp", ProfilePictures);
             cfg.SetValue("events", "effects", EventEffects);
+            cfg.SetValue("events", "full_quality", EventFullQuality);
             cfg.SetValue("discord", "presence", DiscordPresence);
             cfg.SetValue("discord", "consent", (int)DiscordConsent);
 

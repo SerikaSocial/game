@@ -33,6 +33,11 @@ public partial class Main
         _mainMenu.EventsBanner.JoinRequested += id => _ = JoinEvent(id);
         _quickMenu.EventOptions.HidePlayersToggled += on => { _eventHidePlayers = on; ApplyEventPlayerVisibility(); };
         _quickMenu.EventOptions.MutePlayersToggled += on => { _eventMutePlayers = on; if (_voice != null) _voice.MuteEveryone = on; };
+        _quickMenu.EventOptions.FullQualityToggled += on => {
+            UI.DeviceProfile.Settings.EventFullQuality = on;
+            UI.DeviceProfile.Settings.Save();
+            if (_eventShow != null && GodotObject.IsInstanceValid(_eventShow)) _eventShow.ForceFullQuality = on;
+        };
         _quickMenu.EventOptions.EffectsToggled += on => {
             UI.DeviceProfile.Settings.EventEffects = !on;
             UI.DeviceProfile.Settings.Save();
@@ -65,7 +70,8 @@ public partial class Main
         // Leaving the world clears the load-failure backoff: the next visit is a fresh start,
         // not a continuation of whatever went wrong last time.
         if (!_inWorld) { _eventShowRetryAt = 0; _eventShowAttempt = 0; }
-        if (inEvent) _quickMenu.EventOptions.SetState(_eventHidePlayers, _eventMutePlayers, !UI.DeviceProfile.Settings.EventEffects);
+        if (inEvent) _quickMenu.EventOptions.SetState(_eventHidePlayers, _eventMutePlayers,
+            !UI.DeviceProfile.Settings.EventEffects, UI.DeviceProfile.Settings.EventFullQuality);
     }
     private void OpenEventAdmin()
     {
@@ -110,9 +116,14 @@ public partial class Main
                     string worldId = _currentWorldId; var world = _worldRoot;
                     state = await api.GetEventAsync(state.Id);
                     if (_api != api || world != _worldRoot || worldId != _currentWorldId || !state.IsOpen) return;
-                    _eventShow = new EventShowPlayer { Name = "LiveEventShow", EffectsEnabled = UI.DeviceProfile.Settings.EventEffects };
+                    _eventShow = new EventShowPlayer { Name = "LiveEventShow",
+                        EffectsEnabled = UI.DeviceProfile.Settings.EventEffects,
+                        ForceFullQuality = UI.DeviceProfile.Settings.EventFullQuality };
                     _worldRoot.AddChild(_eventShow);
                     _eventShow.Failed += message => _inWorldHud?.Toast("Show could not load: " + message, 8);
+                    _eventShow.QualityChanged += high => _inWorldHud?.Toast(high
+                        ? "Frame rate recovered — full show effects restored."
+                        : "Reducing show effects to hold the frame rate (Quick menu → Disable effects to control this).", 6);
                     // Building the show is one long synchronous frame — the performer rig, the
                     // animation GLB, the stage rig and every one of its shaders. The first visit
                     // on a machine compiles those shaders and the window simply stops responding
@@ -125,7 +136,13 @@ public partial class Main
                     if (!GodotObject.IsInstanceValid(show) || show != _eventShow) return;
                     if (show.ReadyToPlay) {
                         _eventShowAttempt = 0;
-                        _inWorldHud?.Toast("The show is ready.", 4);
+                        // "Disable effects" persists between sessions, which is right for a
+                        // machine that needs it and a trap for anyone who ticked it once to see
+                        // what it did: every later event is quietly missing its pyro, lasers and
+                        // crowd lights with nothing on screen connecting the two. Say so.
+                        _inWorldHud?.Toast(UI.DeviceProfile.Settings.EventEffects
+                            ? "The show is ready."
+                            : "The show is ready — effects are OFF (Quick menu → Disable effects).", 6);
                     } else {
                         // A show that failed to build used to stay parented with ReadyToPlay
                         // false, and because the poll only rebuilds when `_eventShow` is null it
