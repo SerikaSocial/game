@@ -18,6 +18,8 @@ public interface ISerikaTransport
     event System.Action<uint, VoiceFrame> VoiceReceived;
     /// A world text-chat line from another peer: (senderPeerId, text).
     event System.Action<uint, string> ChatReceived;
+    /// A peer swapped avatar; the receiver re-reads their model from the API.
+    event System.Action<uint> AvatarChanged;
     /// A physics object sync from another peer: (senderPeerId, objId, x, y, z, qx, qy, qz, qw, lvx, lvy, lvz).
     event System.Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
     /// A physics grab event from another peer: (senderPeerId, grabType, boneOrObjId, x, y, z).
@@ -33,6 +35,7 @@ public interface ISerikaTransport
     void SendVoice(VoiceFrame frame);
     /// Send a world text-chat line to everyone in the instance.
     void SendChat(string text);
+    void SendAvatarChanged();
     /// Send a physics object sync update. Ownership is implicit: whoever last sent wins.
     void SendObjectSync(ushort objId, float x, float y, float z, float qx, float qy, float qz, float qw, float lvx, float lvy, float lvz);
     /// Send a physics grab event (grab_type: 0=start, 1=update, 2=release).

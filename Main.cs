@@ -1858,7 +1858,11 @@ public partial class Main : Node3D
             var avatar = AvatarLibrary.Instantiate(rel);
             if (avatar == null)
             {
-                _inWorldHud?.Toast("That avatar couldn't be loaded", 3);
+                // The cached file is unusable — most likely a truncated download from before
+                // downloads became atomic. Delete it, or `File.Exists` keeps short-circuiting
+                // the re-download and this avatar can never be worn again on this machine.
+                PurgeCachedAsset(abs);
+                _inWorldHud?.Toast("That avatar couldn't be loaded — clearing it, try again", 4);
                 return;
             }
 
@@ -1877,6 +1881,11 @@ public partial class Main : Node3D
                 GD.PrintErr($"avatar select persist failed: {e.Message}");
                 persisted = false;
             }
+
+            // Tell the room. Only meaningful once the choice is persisted, because peers resolve
+            // the new model from the API by user id — announcing an unsaved swap would just make
+            // everyone re-fetch the avatar we are already wearing in their eyes.
+            if (persisted) _transport?.SendAvatarChanged();
 
             _inWorldHud?.Toast(
                 persisted ? $"Now wearing {name}" : $"Now wearing {name} (save failed — won't persist)",
@@ -1991,6 +2000,31 @@ public partial class Main : Node3D
     /// no way for the user to clear it. That is exactly what kept the broken pre-fix PMX
     /// payload on disk after the server-side repair, and what froze peers at whichever avatar
     /// they happened to be wearing the first time you saw them.
+    /// Cheap sanity check on a cached `.ska`: the four-byte magic and a plausible length. It
+    /// catches the case that actually happens — a truncated or empty download, or an HTML error
+    /// page saved under a `.ska` name — without paying to build the avatar.
+    private static bool LooksLikeSka(string absPath)
+    {
+        try
+        {
+            var info = new System.IO.FileInfo(absPath);
+            if (!info.Exists || info.Length < 16) return false;
+            using var f = System.IO.File.OpenRead(absPath);
+            Span<byte> head = stackalloc byte[4];
+            return f.Read(head) == 4 && head[0] == (byte)'S' && head[1] == (byte)'K'
+                && head[2] == (byte)'A' && head[3] == (byte)'1';
+        }
+        catch { return false; }
+    }
+
+    /// Remove a cache entry that cannot be used, so the next attempt re-downloads it instead of
+    /// taking the `File.Exists` fast path forever.
+    private static void PurgeCachedAsset(string absPath)
+    {
+        try { if (System.IO.File.Exists(absPath)) System.IO.File.Delete(absPath); }
+        catch (Exception e) { GD.PrintErr($"could not purge cached asset {absPath}: {e.Message}"); }
+    }
+
     private static string CacheNameForUrl(string url)
     {
         int q = url.IndexOfAny(new[] { '?', '#' });
@@ -2314,6 +2348,7 @@ public partial class Main : Node3D
         udp.PeerLeft += id => { if (_transport == udp) OnPeerLeft(id); };
         udp.PoseReceived += (id, pose) => { if (_transport == udp) OnPoseReceived(id, pose); };
         udp.ChatReceived += (id, text) => { if (_transport == udp) OnChatReceived(id, text); };
+        udp.AvatarChanged += id => { if (_transport == udp) OnPeerAvatarChanged(id); };
         udp.VoiceReceived += (id, frame) => { if (_transport == udp) OnVoiceReceived(id, frame); };
         udp.ObjectSyncReceived += (id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz) =>
             { if (_transport == udp) OnObjectSyncReceived(id, obj, x, y, z, qx, qy, qz, qw, lx, ly, lz); };
@@ -2629,6 +2664,16 @@ public partial class Main : Node3D
             string rel = $"user://avatars/{CacheNameForUrl(url)}.ska";
             string abs = ProjectSettings.GlobalizePath(rel);
             if (!System.IO.File.Exists(abs) && !await _api.DownloadToAsync(url, abs)) return;
+            // A cached file that cannot be a .ska is a poisoned cache entry, and it is permanent
+            // because `File.Exists` skips the re-download. Checked by header rather than by
+            // instantiating: this runs for every peer in the instance, and building an avatar
+            // just to throw it away would cost a hitch per person in the room.
+            if (!LooksLikeSka(abs))
+            {
+                GD.PrintErr($"cached avatar {rel} is not a .ska — purging and re-downloading");
+                PurgeCachedAsset(abs);
+                if (!await _api.DownloadToAsync(url, abs)) return;
+            }
 
             CallDeferred(nameof(ApplyRemoteAvatar), peerId, rel);
             return;
@@ -2639,6 +2684,21 @@ public partial class Main : Node3D
             // Clear the spinner on the paths that don't reach ApplyRemoteAvatar.
             CallDeferred(nameof(ClearRemoteLoading), peerId);
         }
+    }
+
+    /// A peer told us they swapped avatar. Their model was previously resolved exactly once, at
+    /// join, so changing avatar was invisible to everyone already in the instance — the whole
+    /// room kept seeing whatever you happened to be wearing when they first saw you, until they
+    /// rejoined. Re-read it from the API; the message itself carries no url, so a peer cannot
+    /// aim our downloader anywhere.
+    private void OnPeerAvatarChanged(uint peerId)
+    {
+        if (!_remotes.ContainsKey(peerId)) return;
+        // A blocked peer stays a bean; re-fetching would load the model we refused to load.
+        if (_beanedPeers.Contains(peerId)) return;
+        if (!_peerUserIds.TryGetValue(peerId, out var userId) || string.IsNullOrEmpty(userId)) return;
+        _ = EquipRemoteAvatar(peerId, userId);
+        _ = FetchRemotePfp(peerId, userId);
     }
 
     private void ApplyRemoteAvatar(uint peerId, string path)

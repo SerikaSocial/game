@@ -27,6 +27,13 @@ public enum MsgType : byte
     /// grab_type: 0=start grab, 1=update grab position, 2=release grab
     /// Used for hair/PhysBone grabbing and physics prop grabbing on other players.
     PhysGrab = 0x0B,
+    /// client→server: no payload · server→client: `[peer_id:u32]`
+    /// "I changed avatar — go look it up." Deliberately carries NO url or id: the sender's new
+    /// avatar is read from the API by user id, which is already the source of truth, so a
+    /// malicious client cannot point everyone else's downloader at a url of its choosing.
+    /// Fanned out to the whole instance like Chat, ignoring AOI — a peer across the room still
+    /// has to stop wearing their old model.
+    AvatarChanged = 0x0C,
 }
 
 public static class RelayProtocol

@@ -36,6 +36,7 @@ public sealed class WebRtcTransport : ISerikaTransport
     public event Action<uint, PoseFrame> PoseReceived;
     public event Action<uint, VoiceFrame> VoiceReceived;
     public event Action<uint, string> ChatReceived;
+    public event Action<uint> AvatarChanged;
     public event Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     public event Action<string> Rejected;
@@ -133,6 +134,10 @@ public sealed class WebRtcTransport : ISerikaTransport
             case MsgType.Chat:
                 ChatReceived?.Invoke(peerId, Encoding.UTF8.GetString(payload));
                 break;
+            case MsgType.AvatarChanged:
+                // No payload on a direct channel either — the receiver looks the peer up.
+                AvatarChanged?.Invoke(peerId);
+                break;
             case MsgType.ObjectSync:
                 // The body starts at offset 0, not 5: `UdpTransport` skips a sender id the relay
                 // prepends, and there is no relay on a direct channel.
@@ -154,6 +159,8 @@ public sealed class WebRtcTransport : ISerikaTransport
 
     public void SendPose(PoseFrame frame) => Broadcast(RelayProtocol.WriteOutbound(MsgType.Pose, frame.Encode()));
     public void SendVoice(VoiceFrame frame) => Broadcast(RelayProtocol.WriteOutbound(MsgType.Voice, frame.Encode()));
+
+    public void SendAvatarChanged() => Broadcast(new[] { (byte)MsgType.AvatarChanged });
 
     public void SendChat(string text)
     {

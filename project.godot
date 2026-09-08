@@ -27,6 +27,16 @@ driver/enable_input=true
 
 DialogueManager="*res://addons/dialogue_manager/dialogue_manager.gd"
 
+[debug]
+
+; A shipped client could not say why anything failed. File logging is off by default, and an
+; exported Windows build is a GUI app with no console, so every GD.PrintErr went nowhere: three
+; rounds of "some worlds will not load" were debugged by guesswork before someone ran the exe
+; from a terminal and the answer turned out to be one line ("HTTP 400 from cdn-social"). Keep
+; this on. The cost is a rotating log directory; the benefit is that a user can send the error.
+debug/file_logging/enable_file_logging=true
+debug/file_logging/max_log_files=5
+
 [dialogue_manager]
 
 runtime/advanced/uses_dotnet=true

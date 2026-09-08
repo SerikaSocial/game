@@ -51,6 +51,8 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public event Action<uint, string> ChatReceived;
     public event Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
+    /// A peer swapped avatar. Carries only who — the new model is looked up from the API.
+    public event Action<uint> AvatarChanged;
     public event Action<string> Rejected;
     /// A welcomed session went quiet. Distinct from `Rejected`, which is the relay refusing us:
     /// this one is retryable against the SAME instance and must not drop the player to Home.
@@ -92,6 +94,13 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     {
         if (!_welcomed) return;
         Send(RelayProtocol.WriteOutbound(MsgType.Voice, frame.Encode()));
+    }
+
+    /// Announce that we changed avatar. No payload: peers re-read our avatar from the API.
+    public void SendAvatarChanged()
+    {
+        if (!_welcomed) return;
+        Send(new[] { (byte)MsgType.AvatarChanged });
     }
 
     public void SendChat(string text)
@@ -282,6 +291,12 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
                 uint sender = RelayProtocol.ReadU32(buf, 1);
                 string text = System.Text.Encoding.UTF8.GetString(buf, 5, n - 5);
                 ChatReceived?.Invoke(sender, text);
+                break;
+            }
+            case MsgType.AvatarChanged:
+            {
+                if (n < 5) break;
+                AvatarChanged?.Invoke(RelayProtocol.ReadU32(buf, 1));
                 break;
             }
             case MsgType.ObjectSync:

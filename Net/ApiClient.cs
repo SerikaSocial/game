@@ -138,11 +138,18 @@ public sealed partial class ApiClient
                 if (System.IO.File.Exists(src))
                     try { cachedUrl = (await System.IO.File.ReadAllTextAsync(src)).Trim(); } catch { }
 
-                if (cachedUrl == url)
+                // A cache hit is only a hit if the file is actually a bundle. Interrupted
+                // downloads used to leave a truncated file at this exact path with a matching
+                // `.src` sidecar beside it, so every later join took this fast path, handed the
+                // loader a broken zip, and failed — permanently, on that machine, for that
+                // world, with nothing that would ever re-fetch it.
+                if (cachedUrl == url && LooksLikeBundle(abs))
                 {
                     GD.Print($"world {worldId}: cache hit (unchanged)");
                     return abs;
                 }
+                if (cachedUrl == url)
+                    GD.PrintErr($"world {worldId}: cached bundle is corrupt, purging and re-downloading");
 
                 // Delete rather than overwrite. A failed or partial download over the top of a
                 // stale bundle leaves a file that looks valid and loads the wrong world; with
@@ -160,8 +167,10 @@ public sealed partial class ApiClient
             }
 
             // Download failed. An existing cached bundle is better than nothing, but it may be
-            // the wrong version, so say so rather than letting it look like a success.
-            if (System.IO.File.Exists(abs))
+            // the wrong version, so say so rather than letting it look like a success. A corrupt
+            // one is not better than nothing — it fails the join with a confusing error instead
+            // of an honest download failure.
+            if (System.IO.File.Exists(abs) && LooksLikeBundle(abs))
             {
                 GD.PrintErr($"world {worldId}: download failed, falling back to cached copy " +
                             "(may be out of date)");
@@ -325,6 +334,42 @@ public sealed partial class ApiClient
     }
 
     /// Download a .ska or .ogv to a local path (user://), returning true on success.
+    /// A `.serikaworld` is a ZIP, and a ZIP whose central directory is missing is not a bundle
+    /// however plausible its first two bytes are. Checks the End Of Central Directory signature
+    /// at the tail, which is precisely what a truncated download loses.
+    private static bool LooksLikeBundle(string absPath)
+    {
+        try
+        {
+            var info = new System.IO.FileInfo(absPath);
+            if (!info.Exists || info.Length < 22) return false;
+            using var f = System.IO.File.OpenRead(absPath);
+            Span<byte> head = stackalloc byte[2];
+            if (f.Read(head) != 2 || head[0] != (byte)'P' || head[1] != (byte)'K') return false;
+            // EOCD is at most 22 + 65535 bytes from the end (the comment field). Scan that tail.
+            int tail = (int)Math.Min(info.Length, 22 + 65535);
+            var buf = new byte[tail];
+            f.Seek(-tail, System.IO.SeekOrigin.End);
+            int read = f.Read(buf, 0, tail);
+            for (int i = read - 22; i >= 0; i--)
+                if (buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x05 && buf[i + 3] == 0x06)
+                    return true;
+            return false;
+        }
+        catch { return false; }
+    }
+
+    /// Is this URL our own API? Compared on scheme+host+port, never by string prefix: a prefix
+    /// test says yes to `https://api-social.ado.ink.evil.example/…`.
+    private bool IsApiOrigin(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var target)) return false;
+        if (!Uri.TryCreate(_baseUrl, UriKind.Absolute, out var api)) return false;
+        return target.Scheme == api.Scheme
+            && string.Equals(target.Host, api.Host, StringComparison.OrdinalIgnoreCase)
+            && target.Port == api.Port;
+    }
+
     public async Task<bool> DownloadToAsync(string url, string absPath)
     {
         LastDownloadError = null;
@@ -335,7 +380,11 @@ public sealed partial class ApiClient
                 System.IO.Directory.CreateDirectory(dir);
 
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            if (SessionToken != null)
+            // ONLY our own API gets the session token. This used to go out with every request,
+            // including CDN ones — handing the session JWT to Cloudflare and the bucket origin on
+            // every world and avatar fetch. Asset URLs are content-addressed and public; they
+            // need no credential, and a credential sent to a third party is a credential leaked.
+            if (SessionToken != null && IsApiOrigin(url))
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
 
             using var res = await _http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
@@ -345,10 +394,41 @@ public sealed partial class ApiClient
                 return false;
             }
 
-            await using var stream = await res.Content.ReadAsStreamAsync();
-            await using var fs = new System.IO.FileStream(absPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
-            await stream.CopyToAsync(fs);
-            return true;
+            // Download to a temp file and MOVE it into place. Writing straight to `absPath` left
+            // a truncated file there whenever the transfer was interrupted — a dropped
+            // connection, a full disk, a Windows antivirus scanner holding the handle — and
+            // every caller then takes the `File.Exists(abs)` fast path and never downloads it
+            // again. The result is a permanently broken avatar or world that no amount of
+            // retrying fixes, because nothing ever tries. `DownloadShowAssetAsync` already did
+            // this correctly; this path was the outlier.
+            string tmp = absPath + "." + Guid.NewGuid().ToString("N") + ".part";
+            try
+            {
+                await using (var stream = await res.Content.ReadAsStreamAsync())
+                await using (var fs = new System.IO.FileStream(tmp, System.IO.FileMode.Create,
+                                 System.IO.FileAccess.Write, System.IO.FileShare.None))
+                {
+                    await stream.CopyToAsync(fs);
+                }
+
+                // A zero-byte body is a failed download that reported success. Caching it is
+                // indistinguishable from caching a real asset, and just as permanent.
+                var written = new System.IO.FileInfo(tmp);
+                if (!written.Exists || written.Length == 0)
+                {
+                    LastDownloadError = "the server returned an empty file";
+                    GD.PrintErr($"Asset download failed: empty body from {new Uri(url).Host}");
+                    return false;
+                }
+
+                System.IO.File.Move(tmp, absPath, true);
+                return true;
+            }
+            finally
+            {
+                // Never leave a .part behind, on any exit path.
+                try { if (System.IO.File.Exists(tmp)) System.IO.File.Delete(tmp); } catch { }
+            }
         }
         catch (Exception error) {
             LastDownloadError = error.Message;
