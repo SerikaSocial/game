@@ -166,7 +166,7 @@ public partial class Main
             throw new InvalidOperationException("world_not_found");
         ShowLoading("Preparing world…");
         if (await _api.DownloadWorldAsync(du.GetString(), worldId) == null)
-            throw new System.Net.Http.HttpRequestException("World download failed");
+            throw new System.Net.Http.HttpRequestException("World download failed: " + (_api.LastDownloadError ?? "could not write the world cache"));
     }
 
     private void CompleteInstanceJoin(JsonElement joined, string worldId, int version)

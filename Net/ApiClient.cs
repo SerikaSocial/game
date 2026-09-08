@@ -18,6 +18,7 @@ public sealed partial class ApiClient
     public string BaseUrl => _baseUrl;
     public string SessionToken { get; private set; }
     public string AccountsToken { get; private set; }
+    public string LastDownloadError { get; private set; }
 
     public ApiClient(string baseUrl) => _baseUrl = baseUrl.TrimEnd('/');
 
@@ -326,6 +327,7 @@ public sealed partial class ApiClient
     /// Download a .ska or .ogv to a local path (user://), returning true on success.
     public async Task<bool> DownloadToAsync(string url, string absPath)
     {
+        LastDownloadError = null;
         try
         {
             var dir = System.IO.Path.GetDirectoryName(absPath);
@@ -337,14 +339,22 @@ public sealed partial class ApiClient
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
 
             using var res = await _http.SendAsync(req, System.Net.Http.HttpCompletionOption.ResponseHeadersRead);
-            if (!res.IsSuccessStatusCode) return false;
+            if (!res.IsSuccessStatusCode) {
+                LastDownloadError = $"HTTP {(int)res.StatusCode} ({res.ReasonPhrase})";
+                GD.PrintErr($"Asset download failed: HTTP {(int)res.StatusCode} from {new Uri(url).Host}{new Uri(url).AbsolutePath}");
+                return false;
+            }
 
             await using var stream = await res.Content.ReadAsStreamAsync();
             await using var fs = new System.IO.FileStream(absPath, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None);
             await stream.CopyToAsync(fs);
             return true;
         }
-        catch { return false; }
+        catch (Exception error) {
+            LastDownloadError = error.Message;
+            GD.PrintErr($"Asset download failed: {error.GetType().Name}: {error.Message}");
+            return false;
+        }
     }
 
     /// Create a brand-new instance of a world (used when you explicitly want a private/fresh one).
