@@ -1,5 +1,6 @@
 shader_type spatial;
 render_mode unshaded, cull_back, shadows_disabled;
+#include "concert_crowd_motion.gdshaderinc"
 
 // Original deterministic crowd penlight animation. The author stores a wrist pivot
 // in legal glTF vertex colors and a stable phase/brightness pair in UV2. Everything
@@ -83,7 +84,8 @@ void vertex() {
     local.xy = mat2(vec2(cz, sz), vec2(-sz, cz)) * local.xy;
     float cx = cos(tip), sx = sin(tip);
     local.yz = mat2(vec2(cx, sx), vec2(-sx, cx)) * local.yz;
-    VERTEX = pivot + local + vec3(0.0, pump, 0.0);
+    VERTEX = pivot + local + vec3(0.0, pump, 0.0)
+           + concert_body_motion(pivot.y - COLOR.a * 16.0, UV.x, crowd_time, hype, movement);
 
     // Quiet verse sits near 0.62 of the authored level; a chorus hit reaches 1.14. The
     // gap between the two is the point -- a flat field reads as scenery, not a crowd.

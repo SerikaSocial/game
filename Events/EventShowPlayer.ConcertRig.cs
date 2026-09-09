@@ -305,12 +305,12 @@ public partial class EventShowPlayer
         // the negative space the whole rig is built around is unchanged: a ballad still has the
         // audience in darkness, and the crowd wash is an event when it arrives.
         if(h.Crowd)return look switch {
-            "reveal"=>.85f,
-            "finale"=>.92f,
-            "drive"=>h.Index is 0 or 4 or 7 or 11?.70f:0,
-            "lift"=>h.Index is 2 or 4 or 7 or 9?.62f:0,
-            "sweep"=>h.Index is 0 or 2 or 9 or 11?.58f:0,
-            "anthem"=>h.Index is 0 or 4 or 7 or 11?.55f:0,
+            "reveal"=>1.0f,
+            "finale"=>1.25f,
+            "drive"=>1.05f,
+            "lift"=>.85f,
+            "sweep"=>.95f,
+            "anthem"=>.75f,
             _=>0
         };
         // Sparse, offset groups. Fixtures never converge on centre stage or sweep through screens.
@@ -318,24 +318,24 @@ public partial class EventShowPlayer
             "entrance"=>h.Index is 1 or 10?.30f:0,
             "intimate"=>h.Index is 1 or 7?.24f:0,
             "side"=>h.Index is 1 or 4 or 8?.50f:0,
-            "lift"=>h.Index is 1 or 3 or 7 or 10?.75f:0,
-            "sweep"=>h.Index is 1 or 4 or 7 or 10?.65f:0,
-            "anthem"=>h.Index is 1 or 8?.45f:0,
-            "reveal"=>h.Index is 1 or 3 or 5 or 8 or 10?.72f:0,
-            "drive"=>h.Index is 1 or 4 or 8?.56f:0,
-            "finale"=>h.Index is 0 or 1 or 3 or 5 or 8 or 10?.82f:0,
+            "lift"=>h.Index is 1 or 3 or 4 or 7 or 8 or 10?.85f:0,
+            "sweep"=>h.Index is 0 or 1 or 4 or 5 or 7 or 10?.85f:0,
+            "anthem"=>h.Index is 1 or 3 or 7 or 8?.65f:0,
+            "reveal"=>h.Index is 1 or 3 or 5 or 7 or 8 or 10?.95f:0,
+            "drive"=>h.Index is 0 or 1 or 3 or 4 or 7 or 8 or 10?1f:0,
+            "finale"=>h.Index is 0 or 1 or 3 or 4 or 5 or 7 or 8 or 10?1.1f:0,
             _=>0
         };
         if(h.Bank==2)return look switch {
             "entrance"=>h.Index is 2 or 9?.24f:0,
             "intimate"=>h.Index is 1 or 9?.28f:0,
             "side"=>h.Index is 0 or 3 or 7 or 10?.58f:0,
-            "lift"=>h.Index is 0 or 2 or 4 or 7 or 9?.78f:0,
-            "sweep"=>h.Index is 1 or 4 or 6 or 9?.65f:0,
-            "anthem"=>h.Index is 0 or 2 or 7 or 10?.58f:0,
-            "reveal"=>h.Index is 1 or 2 or 4 or 6 or 8 or 10?.9f:0,
-            "drive"=>h.Index is 0 or 3 or 7 or 10?.62f:0,
-            "finale"=>h.Index is 0 or 2 or 4 or 6 or 8 or 10?.95f:0,
+            "lift"=>h.Index is 0 or 1 or 2 or 4 or 7 or 9 or 10?.95f:0,
+            "sweep"=>h.Index is 1 or 3 or 4 or 6 or 8 or 9?.90f:0,
+            "anthem"=>h.Index is 0 or 2 or 4 or 7 or 10?.72f:0,
+            "reveal"=>h.Index is 1 or 2 or 4 or 6 or 8 or 10?1.05f:0,
+            "drive"=>h.Index is 0 or 2 or 3 or 4 or 7 or 8 or 10?1.05f:0,
+            "finale"=>h.Index is 0 or 1 or 2 or 4 or 6 or 7 or 8 or 9 or 10?1.2f:0,
             _=>0
         };
         return look switch {
@@ -344,7 +344,7 @@ public partial class EventShowPlayer
             "sweep"=>h.Index is 4 or 10?.40f:0,
             "anthem"=>h.Index is 4 or 10?.28f:0,
             "reveal"=>h.Index is 0 or 4 or 7 or 11?.54f:0,
-            "drive"=>h.Index is 2 or 7?.40f:0,
+            "drive"=>h.Index is 1 or 10?.65f:0,
             "finale"=>h.Index is 1 or 4 or 7 or 10?.64f:0,
             _=>0
         };
@@ -398,9 +398,9 @@ public partial class EventShowPlayer
             if (!enabled) intensity=0;
             // Deterministic hit-index groups survive seeks and peer sync. At most two heads
             // in each bank receive a hit; the rest hold the authored theatre look.
-            bool selected=rhythmic&&hit>=0&&(h.Index+h.Bank*2)%6==hit%6;
-            if(open&&selected)intensity=Mathf.Max(intensity,pulse*1.6f);
-            intensity*=reveal*(.90f+.10f*music);
+            bool selected=enabled&&intensity>.005f&&rhythmic&&hit>=0&&(h.Index+h.Bank*2)%6==hit%6;
+            if(open&&selected)intensity*=1f+pulse*.65f;
+            intensity*=reveal*(.90f+.10f*music)*Mathf.Clamp(Mathf.Lerp(_cueA.Energy,_cueB.Energy,_cueBlend),0,1.8f);
             if(!highQuality) intensity*=0.75f;
             // A crowd wash keeps most of the cue colour — the point of pointing a fixture at the
             // audience is that the room takes the show's colour. The stage-facing bank-1 heads

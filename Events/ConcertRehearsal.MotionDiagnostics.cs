@@ -28,7 +28,9 @@ public partial class ConcertRehearsal
             // without anything actually being wrong with the motion.
             Check(cues.Length>0&&ranges.Count(r=>r.Kind=="dance")==cues.Length,
                 $"every authored chorus excerpt is verified ({cues.Length} cues, {ranges.Count(r=>r.Kind=="dance")} probed)");
-            Check(cues.All(c=>choruses.Any(w=>c.GetProperty("start").GetDouble()>=w.Start && c.GetProperty("start").GetDouble()+c.GetProperty("duration").GetDouble()<=w.End+.0001)),"official choreography stays entirely inside verified chorus sections");
+            var official=cues.Where(c=>!c.TryGetProperty("clip",out var clip)||clip.GetString()=="official").ToArray();
+            Check(official.Length>0&&official.All(c=>choruses.Any(w=>c.GetProperty("start").GetDouble()>=w.Start && c.GetProperty("start").GetDouble()+c.GetProperty("duration").GetDouble()<=w.End+.0001)),"official choreography stays entirely inside verified chorus sections");
+            Check(cues.All(c=>_event.Config.Segments.Any(s=>s.Title is not "Entrance" and not "Thank you" && c.GetProperty("start").GetDouble()>=s.Start && c.GetProperty("start").GetDouble()+c.GetProperty("duration").GetDouble()<=s.Start+s.Duration+.0001)),"all verse and chorus dances stay inside the authored songs");
             Check(ranges.All(r=>r.Start>=0&&r.End>r.Start&&r.End<=_event.Config.Duration),"motion diagnostics ranges are valid for the authored duration");
         } else {
             ranges.AddRange(new[]{("entrance",2.7,13.3,"entrance"),("entrance turn",14.0,16.0,"turn"),("greeting",16.2,19.5,"standing"),("BIBBIDIBA choreography",67.0,84.0,"dance"),("BIBBIDIBA singing",25.0,60.0,"standing"),("KAIJU singing",270.0,500.0,"standing"),("Stellar singing",540.0,850.0,"standing")});

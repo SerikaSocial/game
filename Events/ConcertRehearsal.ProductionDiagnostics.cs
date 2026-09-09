@@ -65,6 +65,29 @@ public partial class ConcertRehearsal
         Check(_show.MicrophoneReady&&!_show.MicrophoneHeld,"microphone stays on the stand until the pickup beat");
         PlayAt(pickup+.25);_show.PreviewPlaying=false;await Wait();
         Check(_show.MicrophoneHeld,"performer lifts the microphone after arriving");
+        PlayAt(pickup+1.3);_show.PreviewPlaying=false;await Wait();
+        var artist=_show.Performer;var skeleton=artist.Skeleton;
+        var head=skeleton.GetBoneGlobalPose(artist.BoneOf("head")).Origin;
+        var hand=skeleton.GetBoneGlobalPose(artist.BoneOf("rightHand")).Origin;
+        var restHead=skeleton.GetBoneGlobalRest(artist.BoneOf("head")).Origin;
+        var restEye=skeleton.GetBoneGlobalRest(artist.BoneOf("rightEye")).Origin;
+        var forward=new Vector3(0,0,Math.Sign(restEye.Z-restHead.Z));
+        Check((hand-head).Dot(forward)>.07f && hand.DistanceTo(head)<.25f,"microphone hand is in front of the face, not behind the head");
+        Check(_show.MicrophoneFaceDistance<.18f,$"microphone capsule is beside the mouth ({_show.MicrophoneFaceDistance:F3}m)");
+        Check(_show.CrowdPersonCount>4000&&_show.CrowdBodyBatchCount==6,"spectator bodies and penlights share per-person jump and sway anchors");
+        foreach(var cue in _event.Config.Lights) foreach(double offset in new[]{.10,.35,(double)cue.Fade*.5,Math.Max(.1, (double)cue.Fade-.01)}) {
+            if(cue.Time+offset>=_event.Config.Duration)continue;
+            PlayAt(cue.Time+offset);_show.PreviewPlaying=false;await Wait(.035);
+            Check(_show.ActiveShaftCount<=24,$"shaft budget through {cue.Look} fade at {cue.Time+offset:F2}s ({_show.ActiveShaftCount})");
+        }
+        var ending=_event.Config.Segments.LastOrDefault(s=>s.Title=="Thank you");
+        if(ending!=null) {
+            Check(ending.Duration>=8 && ending.Start+ending.Duration<=_event.Config.Duration+.001,"thank-you hold is inside the timeline for at least eight seconds");
+            foreach(double time in new[]{ending.Start+.5,ending.Start+ending.Duration-.5}) {
+                PlayAt(time);_show.PreviewPlaying=false;await Wait();
+                Check(_show.ThankYouVisible&&_show.Performer.Visible&&_show.ActiveShaftCount>0,"thank-you card and performer remain visible throughout the readable end hold");
+            }
+        }
         _show.PreviewPlaying=false;await Wait();Check(!_show.StageAudioPlaying,"pause silences every stage feed");
         PlayAt(310);await Wait(.5);Check(Math.Abs(_show.AudioPosition-_show.PreviewPosition)<.20&&_show.StageAudioSpread<.025,"seeking restarts every channel at matching phase");
         var listenerBefore=_listener.GlobalTransform;_broadcastView=true;_camera.TopLevel=true;await Wait();

@@ -42,7 +42,7 @@ public partial class ConcertRehearsal : Node3D
             _camera=new Camera3D { Position=new Vector3(0,.7f,0),Current=true,Far=2500,Fov=72 };_body.AddChild(_camera);
             _listener=new AudioListener3D { Position=new Vector3(0,.7f,0) };_body.AddChild(_listener);_listener.MakeCurrent();
             BuildControls();
-            _show=new EventShowPlayer();world.AddChild(_show);_show.Failed+=e=>{_status.Text=e;GD.PrintErr(e);};
+            _show=new EventShowPlayer { ForceFullQuality=Arg("--verify")=="yes"||Arg("--production-only")=="yes"||Arg("--capture")=="yes"||Arg("--full-quality")=="yes" };world.AddChild(_show);_show.Failed+=e=>{_status.Text=e;GD.PrintErr(e);};
             await _show.PrepareFiles(_event,world,Task.FromResult(new[]{Path.Combine(_folder,"artist.ska"),Path.Combine(_folder,"show.glb"),Path.Combine(_folder,"show.ogg"),Arg("--no-intro")=="yes"?null:Path.Combine(_folder,"intro.ogv"),
                 _event.Config.StageAudio?Path.Combine(_folder,"stage-left.ogg"):null,
                 _event.Config.StageAudio?Path.Combine(_folder,"stage-right.ogg"):null,

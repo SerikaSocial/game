@@ -20,6 +20,7 @@ public partial class EventShowPlayer
 
     private void SetupConcertAudience(Node3D world)
     {
+        SetupCrowdMotion(world);
         var shader = GD.Load<Shader>("res://Shaders/concert_crowd_penlight.gdshader");
         foreach (Node node in world.FindChildren("SERIKA_EVENT_CROWD_STICKS_*", "MeshInstance3D", true, false)) {
             var mesh = (MeshInstance3D)node;
@@ -32,7 +33,7 @@ public partial class EventShowPlayer
             // cap the composite swing at .748 rad of sway over .785 rad of tip, and the
             // beat thrust adds .224 m of lift. Chord + lift = .6912 m of travel away from
             // the rest position, so anything under that pops sticks off the screen edge.
-            mesh.ExtraCullMargin = Math.Max(mesh.ExtraCullMargin, .70f);
+            mesh.ExtraCullMargin = Math.Max(mesh.ExtraCullMargin, 1.25f);
             string name = mesh.Name;
             int separator = name.LastIndexOf('_');
             if (separator >= 0 && int.TryParse(name[(separator + 1)..], out int count))
@@ -70,6 +71,11 @@ public partial class EventShowPlayer
         // Five scalars per batch per frame, and every one of them is the same for all six.
         // Per-stick variety is derived in the vertex shader from the authored wrist pivot
         // and phase — nothing here may ever grow with the 8,345 sticks.
+        foreach (var material in _crowdBodies) {
+            material.SetShaderParameter(CrowdTime, time);
+            material.SetShaderParameter(CrowdHype, hype);
+            material.SetShaderParameter(CrowdMovement, movement);
+        }
         foreach (var batch in _crowdPenlights) {
             batch.Animated.SetShaderParameter(CrowdTime, time);
             batch.Animated.SetShaderParameter(CrowdBrightness, level);
@@ -87,6 +93,7 @@ public partial class EventShowPlayer
             batch.Mesh.ExtraCullMargin = batch.CullMargin;
         }
         _crowdPenlights.Clear();
+        RestoreCrowdMotion();
         CrowdStickCount = 0;
     }
 }

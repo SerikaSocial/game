@@ -30,6 +30,15 @@ public partial class EventShowPlayer
 
     public bool MicrophoneHeld => _micHeld == true;
     public bool MicrophoneReady => IsInstanceValid(_micHandProp);
+    public float MicrophoneFaceDistance {
+        get {
+            if (!MicrophoneReady || _micHandProp.GetChildCount()==0) return float.PositiveInfinity;
+            var capsule = _micHandProp.GetChild<MeshInstance3D>(_micHandProp.GetChildCount()-1);
+            var head = _artist.Skeleton.GetBoneGlobalPose(_artist.BoneOf("head"));
+            var mouth = _artist.Skeleton.ToGlobal(head * new Vector3(0,.015f,-.065f));
+            return capsule.ToGlobal(capsule.GetAabb().GetCenter()).DistanceTo(mouth);
+        }
+    }
 
     /// Show time at which the microphone leaves the stand: the end of the authored entrance
     /// path, plus the pickup beat.
@@ -75,6 +84,12 @@ public partial class EventShowPlayer
         // this the microphone is in her hand AND on the stand for the whole preshow.
         _micHandProp = new Node3D { Name = "HandheldMic", Visible = false };
         _micHandAttachment.AddChild(_micHandProp);
+        var bounds = _micHeadOnStand[0].Mesh.Transform * _micHeadOnStand[0].Mesh.GetAabb();
+        foreach (var part in _micHeadOnStand) bounds = bounds.Merge(part.Mesh.Transform * part.Mesh.GetAabb());
+        var handle = bounds.GetCenter();
+        handle.Z = bounds.End.Z - .065f;
+        var rebase = new Transform3D(new Basis(Vector3.Right, Mathf.Pi / 2), Vector3.Zero)
+            * new Transform3D(Basis.Identity, -handle);
         foreach (var part in _micHeadOnStand) {
             var copy = (MeshInstance3D)part.Mesh.Duplicate();
             copy.Visible = true;
@@ -86,7 +101,7 @@ public partial class EventShowPlayer
             _micHandProp.AddChild(copy);
             // Re-origin the cluster on the microphone body so the grip lands on the handle
             // rather than on the stand's coordinate origin.
-            copy.Position = part.Mesh.Position - new Vector3(0, part.Mesh.Position.Y, 0);
+            copy.Transform = rebase * part.Mesh.Transform;
         }
         // Held upright with the capsule angled away from the mouth, which is how a vocal mic is
         // actually held; the grip basis puts the prop's +Y along the axis of a tube in the fist.
