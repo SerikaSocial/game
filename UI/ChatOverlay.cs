@@ -22,23 +22,33 @@ public partial class ChatOverlay : CanvasLayer
     public bool IsTyping { get; private set; }
 
     private readonly List<(Label label, double age)> _lines = new();
+    private ScrollContainer _scroll;
     private VBoxContainer _feed;
     private Panel _inputPanel;
     private LineEdit _input;
+    private bool _stickToBottom = true;
 
     public override void _Ready()
     {
         Layer = 60;
 
-        _feed = new VBoxContainer
+        _scroll = new ScrollContainer
         {
             AnchorLeft = 0, AnchorTop = 1, AnchorRight = 0, AnchorBottom = 1,
-            OffsetLeft = 16, OffsetTop = -320, OffsetRight = 640, OffsetBottom = -56,
-            Alignment = BoxContainer.AlignmentMode.End,
+            OffsetLeft = 16, OffsetTop = -360, OffsetRight = 640, OffsetBottom = -56,
+            HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+            VerticalScrollMode = ScrollContainer.ScrollMode.ShowNever,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        AddChild(_scroll);
+
+        _feed = new VBoxContainer
+        {
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
         _feed.AddThemeConstantOverride("separation", 2);
-        AddChild(_feed);
+        _scroll.AddChild(_feed);
 
         // Chat input bar (hidden until T).
         _inputPanel = new Panel
@@ -72,17 +82,25 @@ public partial class ChatOverlay : CanvasLayer
     {
         if (IsTyping) return;
         IsTyping = true;
+        _stickToBottom = true;
         _inputPanel.Visible = true;
+        _scroll.MouseFilter = Control.MouseFilterEnum.Stop;
+        _scroll.VerticalScrollMode = ScrollContainer.ScrollMode.Auto;
         _input.Text = "";
         _input.GrabFocus();
+        ScrollToBottom();
     }
 
     public void CloseInput()
     {
         if (!IsTyping) return;
         IsTyping = false;
+        _stickToBottom = true;
         _inputPanel.Visible = false;
+        _scroll.MouseFilter = Control.MouseFilterEnum.Ignore;
+        _scroll.VerticalScrollMode = ScrollContainer.ScrollMode.ShowNever;
         _input.ReleaseFocus();
+        ScrollToBottom();
         Closed?.Invoke();
     }
 
@@ -95,10 +113,30 @@ public partial class ChatOverlay : CanvasLayer
 
     public override void _Input(InputEvent @event)
     {
-        if (IsTyping && @event is InputEventKey { Pressed: true, Keycode: Key.Escape })
+        if (!IsTyping) return;
+        if (@event is InputEventKey { Pressed: true, Keycode: Key.Escape })
         {
             CloseInput();
             GetViewport().SetInputAsHandled();
+            return;
+        }
+        // Wheel anywhere while chat is open, like Minecraft — the log is a corner box, so
+        // requiring the cursor to sit on it made history look frozen.
+        if (@event is InputEventMouseButton { Pressed: true } mb)
+        {
+            int page = Math.Max(48, (int)(_scroll.Size.Y * 0.35f));
+            if (mb.ButtonIndex == MouseButton.WheelUp)
+            {
+                _stickToBottom = false;
+                _scroll.ScrollVertical = Math.Max(0, _scroll.ScrollVertical - page);
+                GetViewport().SetInputAsHandled();
+            }
+            else if (mb.ButtonIndex == MouseButton.WheelDown)
+            {
+                _scroll.ScrollVertical += page;
+                RememberIfAtBottom();
+                GetViewport().SetInputAsHandled();
+            }
         }
     }
 
@@ -130,6 +168,25 @@ public partial class ChatOverlay : CanvasLayer
             _lines[0].label.QueueFree();
             _lines.RemoveAt(0);
         }
+        if (_stickToBottom || !IsTyping) ScrollToBottom();
+    }
+
+    private void ScrollToBottom()
+    {
+        Callable.From(() =>
+        {
+            if (!GodotObject.IsInstanceValid(_scroll)) return;
+            var bar = _scroll.GetVScrollBar();
+            _scroll.ScrollVertical = (int)bar.MaxValue;
+            _stickToBottom = true;
+        }).CallDeferred();
+    }
+
+    private void RememberIfAtBottom()
+    {
+        if (!GodotObject.IsInstanceValid(_scroll)) return;
+        var bar = _scroll.GetVScrollBar();
+        _stickToBottom = bar.MaxValue - bar.Value - bar.Page < 32;
     }
 
     public override void _Process(double delta)
