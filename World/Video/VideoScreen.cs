@@ -1,6 +1,7 @@
 using System;
 using Godot;
 using SerikaSocial.Player;
+using SerikaSocial.UI;
 
 namespace SerikaSocial.World.Video;
 
@@ -45,10 +46,13 @@ public partial class VideoScreen : Node, IInteractable
     /// builds without the builders having to hand back a list.
     public const string Group = "serika_video_screen";
 
-    public string PromptText => "Video Queue";
+    /// Event watch-parties own the screen; the public queue and interact prompt stay off.
+    public static bool AllowPlayerControls = true;
+
+    public string PromptText => AllowPlayerControls ? "Video Queue" : "";
     public float Range => 10f;
     public Vector3 FocusPoint => _mesh?.GlobalPosition ?? Vector3.Zero;
-    public bool CanInteract => true;
+    public bool CanInteract => AllowPlayerControls;
 
     public void Interact(in InteractionContext ctx)
     {
@@ -70,12 +74,11 @@ public partial class VideoScreen : Node, IInteractable
         // Update mode starts Disabled and is only flipped to Always while a clip is actually
         // playing. Leaving it on Always costs a full re-render of this target every frame for
         // the entire life of the world, even though a screen is idle almost all of the time.
-        // Size matches the 720p transcode cap: a 1080p target upscaling 720p source is pure
-        // fill-rate waste, and this is a texture on a wall, not the player's viewport.
+        // Sized to the graphics-tier transcode: High 1080p, Medium 720p, Low 480p.
         _subViewport = new SubViewport
         {
             Name = "VideoViewport",
-            Size = new Vector2I(1280, 720),
+            Size = TargetSize,
             TransparentBg = false,
             RenderTargetUpdateMode = SubViewport.UpdateMode.Disabled,
             RenderTargetClearMode = SubViewport.ClearMode.Once,
@@ -214,9 +217,17 @@ public partial class VideoScreen : Node, IInteractable
     /// uses this to measure how far the encoder is ahead of playback and throttle accordingly.
     public int PlayingSegment => _segIndex;
 
+    private static Vector2I TargetSize => DeviceProfile.Current switch
+    {
+        DeviceProfile.Tier.High => new Vector2I(1920, 1080),
+        DeviceProfile.Tier.Medium => new Vector2I(1280, 720),
+        _ => new Vector2I(854, 480),
+    };
+
     public void BeginPlaylist(string url)
     {
         if (!Alive) return;
+        if (_subViewport != null) _subViewport.Size = TargetSize;
         _segments.Clear();
         _segIndex = -1;
         _playlistComplete = false;

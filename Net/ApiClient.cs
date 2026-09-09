@@ -294,11 +294,13 @@ public sealed partial class ApiClient
     ///
     /// Returns `{ id, segments, done, segmentSeconds, title, duration }`, where `segments` is how
     /// many are complete and therefore safe to fetch.
-    public async Task<JsonElement> StartVideoSessionAsync(string url, double startSeconds = 0)
+    public async Task<JsonElement> StartVideoSessionAsync(string url, double startSeconds = 0, int height = 0)
     {
         string q = $"{_baseUrl}/v1/video/session?url={Uri.EscapeDataString(url)}";
         if (startSeconds > 0.05)
             q += "&start=" + startSeconds.ToString(CultureInfo.InvariantCulture);
+        if (height >= 480)
+            q += "&height=" + height.ToString(CultureInfo.InvariantCulture);
         var req = new HttpRequestMessage(HttpMethod.Get, q);
         if (SessionToken != null)
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);

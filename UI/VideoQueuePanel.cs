@@ -172,7 +172,7 @@ public partial class VideoQueuePanel : CanvasLayer
 
     public void Open()
     {
-        if (_manager == null) return;
+        if (_manager == null || _manager.ControlsLocked || !VideoScreen.AllowPlayerControls) return;
         Visible = true; // the layer itself — see the note in Hud.HideAll
         _card.Visible = true;
         Redraw();

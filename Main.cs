@@ -362,7 +362,11 @@ public partial class Main : Node3D
         _quickMenu.OpenMainMenuAvatars += () => { OpenAvatarSelector(); SyncMenuHold(); };
         _quickMenu.OpenCameraMenu += OpenCameraMenu;
         _quickMenu.OpenRadialMenu += ToggleActionMenu;
-        _quickMenu.OpenVideoQueue += () => { if (_videoQueuePanel?.HasVideo ?? false) _videoQueuePanel.Open(); else _inWorldHud?.Toast("No video screen in this world", 2); };
+        _quickMenu.OpenVideoQueue += () => {
+            if (_videoManager?.ControlsLocked == true) return;
+            if (_videoQueuePanel?.HasVideo ?? false) _videoQueuePanel.Open();
+            else _inWorldHud?.Toast("No video screen in this world", 2);
+        };
         _quickMenu.OpenSettings += () => { CloseAllMenus(); _settingsMenu?.Open(); SyncMenuHold(); };
         _quickMenu.CopyInvitePressed += CopyInviteLink;
         _quickMenu.MicTogglePressed += () => { ToggleMic(); _quickMenu.SetMic(_micActive); };
@@ -480,6 +484,7 @@ public partial class Main : Node3D
         _videoQueuePanel.Closed += SyncMenuHold;
         SerikaSocial.World.Video.VideoScreen.InteractionRequested += () =>
         {
+            if (_videoManager?.ControlsLocked == true) return;
             if (_videoQueuePanel?.HasVideo ?? false)
             {
                 _videoQueuePanel.Open();
@@ -750,6 +755,8 @@ public partial class Main : Node3D
         _videoManager.Configure(_api, _worldName);
         _videoManager.BindNet(text => _transport?.SendChat(text));
         _videoManager.Toast += (msg, secs) => _inWorldHud?.Toast(msg, secs);
+        _videoManager.ControlsLockedChanged += () => _videoQueuePanel?.Hide();
+        SerikaSocial.World.Video.VideoScreen.AllowPlayerControls = true;
         // Skip screens belonging to the world we just left. QueueFree is deferred to the end of
         // the frame, so the outgoing world's nodes are still in the group when this runs;
         // registering one meant the manager held a screen that was about to be freed, and the
@@ -3023,6 +3030,7 @@ public partial class Main : Node3D
         // The video queue panel, but only in a world that actually has a screen.
         if (UI.KeyBindings.Matches("video_queue", kc))
         {
+            if (_videoManager?.ControlsLocked == true) { GetViewport().SetInputAsHandled(); return; }
             if (_videoQueuePanel?.HasVideo ?? false)
             {
                 if (_videoQueuePanel.IsOpen) _videoQueuePanel.Hide();

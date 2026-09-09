@@ -84,6 +84,7 @@ public sealed class ShowConfig
     public string VideoUrl { get; set; }
     public string PreshowVideoUrl { get; set; }
     public double PreshowStartSeconds { get; set; }
+    public double PreshowDuration { get; set; }
     public long ScheduledStart { get; set; }
     public bool IsVideoEvent => !string.IsNullOrEmpty(VideoUrl);
 }

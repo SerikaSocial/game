@@ -178,7 +178,12 @@ public partial class Main
     {
         _eventPreview = false;
         _eventVideoId = null;
-        _videoManager?.Clear(fromNet: true);
+        if (_videoManager != null)
+        {
+            _videoManager.Clear(fromNet: true);
+            _videoManager.ControlsLocked = false;
+        }
+        _videoQueuePanel?.Hide();
         if (GodotObject.IsInstanceValid(_eventShow)) { _eventShow.GetParent()?.RemoveChild(_eventShow); _eventShow.QueueFree(); }
         _eventShow = null;
     }
@@ -195,12 +200,20 @@ public partial class Main
             return;
         }
         bool live = EventVideoIsLive(state);
-        string url = live || string.IsNullOrEmpty(state.Config.PreshowVideoUrl)
+        if (live)
+        {
+            // Instantly kill the preshow encode so the Direct is not waiting on a VOD segment.
+            _videoManager.PlayExclusive(state.Config.VideoUrl, "event", 0, loop: false);
+            return;
+        }
+        string url = string.IsNullOrEmpty(state.Config.PreshowVideoUrl)
             ? state.Config.VideoUrl
             : state.Config.PreshowVideoUrl;
-        double start = live ? 0 : Math.Max(0, state.Config.PreshowStartSeconds);
-        bool loop = !live && !string.IsNullOrEmpty(state.Config.PreshowVideoUrl);
-        _videoManager.PlayExclusive(url, "event", start, loop);
+        double start = string.IsNullOrEmpty(state.Config.PreshowVideoUrl)
+            ? 0
+            : Math.Max(0, state.Config.PreshowStartSeconds);
+        bool loop = !string.IsNullOrEmpty(state.Config.PreshowVideoUrl);
+        _videoManager.PlayExclusive(url, "event", start, loop, state.Config.PreshowDuration);
     }
 
     private static bool EventVideoIsLive(LiveEvent state)

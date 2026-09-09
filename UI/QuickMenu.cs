@@ -12,11 +12,13 @@ public partial class QuickMenu : CanvasLayer
     public UI.EventOptions EventOptions { get; private set; }
     public event Action AdminEventsPressed;
     /// In the venue: swap the join banner for the controls that matter once you are inside.
+    private Button _videoTile;
     public void SetInEvent(bool inEvent)
     {
         if (EventOptions == null) return;
         EventOptions.Visible = inEvent;
         EventsBanner.Suppressed = inEvent;
+        if (_videoTile != null) _videoTile.Visible = !inEvent;
     }
     private Button _eventAdminButton;
     public void SetEventAdmin(bool enabled) { if (_eventAdminButton != null) _eventAdminButton.Visible = enabled; }
@@ -155,7 +157,8 @@ public partial class QuickMenu : CanvasLayer
         _socialPill = Tile(Icons.Kind.Users, "Social", "Friends & notifications", () => LeaveTo(OpenSocial));
         _actions.AddChild(_socialPill);
         _actions.AddChild(Tile(Icons.Kind.Camera, "Camera", "Take a photo", () => LeaveTo(OpenCameraMenu)));
-        _actions.AddChild(Tile(Icons.Kind.Screen, "Video", "Watch together", () => LeaveTo(OpenVideoQueue)));
+        _videoTile = Tile(Icons.Kind.Screen, "Video", "Watch together", () => LeaveTo(OpenVideoQueue));
+        _actions.AddChild(_videoTile);
         _actions.AddChild(Tile(Icons.Kind.Gear, "Settings", "Comfort & controls", () => LeaveTo(OpenSettings)));
         _actions.AddChild(Tile(Icons.Kind.Home, "Go Home", "Return to your space", () => LeaveTo(HomePressed)));
         _actions.AddChild(Tile(Icons.Kind.Refresh, "Respawn", "Back to the entrance", () => LeaveTo(RespawnPressed)));

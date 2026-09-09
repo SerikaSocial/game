@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
 using Serika.Net;
+using SerikaSocial.UI;
 
 namespace SerikaSocial.World.Video;
 
@@ -28,9 +29,13 @@ public partial class VideoManager : Node
         public string AddedBy;
         public string ThumbnailUrl;
         public double StartSeconds;
+        public double BaseStartSeconds;
+        public double SourceDurationSeconds;
         public bool Loop;
         /// Event director owns the screen; do not sync this item over VideoNet.
         public bool Exclusive;
+        /// Align ffmpeg `-ss` to a shared wall-clock so every client is on the same frame.
+        public bool WallClockSync;
     }
 
     private readonly List<VideoScreen> _screens = new();
@@ -46,6 +51,20 @@ public partial class VideoManager : Node
     private double _seekToSec = -1;
 
     public Item NowPlaying { get; private set; }
+
+    private bool _controlsLocked;
+    /// Event watch-party: the room screen is not a public queue.
+    public bool ControlsLocked
+    {
+        get => _controlsLocked;
+        set
+        {
+            _controlsLocked = value;
+            VideoScreen.AllowPlayerControls = !value;
+            if (value) ControlsLockedChanged?.Invoke();
+        }
+    }
+    public event Action ControlsLockedChanged;
 
     /// Raised whenever the queue or now-playing changes, so the queue panel can redraw.
     public event Action QueueChanged;
@@ -128,6 +147,7 @@ public partial class VideoManager : Node
 
     public void Enqueue(string url, string addedBy, bool fromNet)
     {
+        if (ControlsLocked) return;
         url = CanonicalMediaUrl((url ?? "").Trim());
         if (string.IsNullOrEmpty(url)) return;
         if (fromNet && AlreadyHas(url)) return;
@@ -140,19 +160,27 @@ public partial class VideoManager : Node
     /// Take over the room's screen: drop the queue and play this URL.
     /// `startSeconds` is an ffmpeg input seek (skip that much of the source), not a
     /// player-timeline seek — the encoded segments start at zero after the cut.
-    public void PlayExclusive(string url, string addedBy, double startSeconds = 0, bool loop = false)
+    public void PlayExclusive(string url, string addedBy, double startSeconds = 0, bool loop = false,
+        double sourceDurationSeconds = 0)
     {
         url = CanonicalMediaUrl((url ?? "").Trim());
         if (string.IsNullOrEmpty(url)) return;
+        ControlsLocked = true;
+        // Same exclusive clip: keep the running encode. Wall-clock offset is chosen at encode
+        // start, so comparing StartSeconds here would restart the transcode every poll.
         if (NowPlaying != null
             && string.Equals(NowPlaying.Url, url, StringComparison.Ordinal)
-            && Math.Abs(NowPlaying.StartSeconds - startSeconds) < .25
-            && NowPlaying.Loop == loop)
+            && NowPlaying.Loop == loop
+            && NowPlaying.Exclusive)
             return;
         Clear(fromNet: true);
+        ControlsLocked = true;
+        double skip = Math.Max(0, startSeconds);
         _queue.Add(new Item {
             Url = url, Title = ShortLabel(url), AddedBy = addedBy,
-            StartSeconds = Math.Max(0, startSeconds), Loop = loop, Exclusive = true
+            StartSeconds = skip, BaseStartSeconds = skip,
+            SourceDurationSeconds = Math.Max(0, sourceDurationSeconds),
+            Loop = loop, Exclusive = true, WallClockSync = loop
         });
         QueueChanged?.Invoke();
         if (NowPlaying == null && !_busy) _ = Advance();
@@ -205,9 +233,12 @@ public partial class VideoManager : Node
                 Title = looping.Title,
                 AddedBy = looping.AddedBy,
                 ThumbnailUrl = looping.ThumbnailUrl,
-                StartSeconds = looping.StartSeconds,
+                StartSeconds = looping.BaseStartSeconds,
+                BaseStartSeconds = looping.BaseStartSeconds,
+                SourceDurationSeconds = looping.SourceDurationSeconds,
                 Loop = true,
                 Exclusive = looping.Exclusive,
+                WallClockSync = looping.WallClockSync,
             });
             Skip(fromNet: true);
             return;
@@ -405,10 +436,13 @@ public partial class VideoManager : Node
     {
         if (_api == null) return false;
 
+        await ApplyWallClockOffsetAsync(item);
+        if (gen != _generation) return false;
+
         JsonElement session;
         try
         {
-            session = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds);
+            session = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, MaxHeight);
         }
         catch (Exception e)
         {
@@ -459,7 +493,7 @@ public partial class VideoManager : Node
                 bool jobDone;
                 try
                 {
-                    var s = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds);
+                    var s = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, MaxHeight);
                     available = s.TryGetProperty("segments", out var sg) && sg.TryGetInt32(out int v) ? v : 0;
                     jobDone = s.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.True;
                 }
@@ -570,16 +604,17 @@ public partial class VideoManager : Node
     /// it is deliberately short — long enough that the per-segment encoder startup cost stays
     /// amortised, short enough that the screen lights up almost immediately.
     private const int SegmentSeconds = 6;
-    /// Vertical cap for the transcode. Theora is a slow, single-threaded, dated encoder and this
-    /// is a texture on a wall viewed from across a room — 480p roughly halves the encode cost
-    /// versus 720p for detail nobody can see from a seat. Measured ~2.6x realtime at 480p vs
-    /// ~1.1x at 720p on this box, i.e. the difference between "builds a buffer" and "can't keep
-    /// up".
-    private const int MaxHeight = 480;
+    /// Vertical cap for the transcode, from the graphics tier: High 1080p, Medium 720p, Low 480p.
+    private static int MaxHeight => DeviceProfile.Current switch
+    {
+        DeviceProfile.Tier.High => 1080,
+        DeviceProfile.Tier.Medium => 720,
+        _ => 480,
+    };
     /// How many encoding threads ffmpeg may use. Capped so the encoder cannot claim every core
     /// and starve the game's render thread — the single most common cause of the "video makes
-    /// the game lag" reports.
-    private const int EncodeThreads = 2;
+    /// the game lag" reports. High gets more threads so 1080p Theora can still fill the buffer.
+    private static int EncodeThreads => DeviceProfile.Current == DeviceProfile.Tier.High ? 4 : 2;
     /// Flow-control buffer, in segments. The encoder is allowed to run this far ahead of
     /// playback and is then paused until the buffer drains to `LowWaterSegments`. This bounds
     /// CPU to "keep a few seconds of buffer" regardless of clip length, instead of transcoding
@@ -607,6 +642,9 @@ public partial class VideoManager : Node
         // the caller, which is the main thread.
         string ffmpegPath = await Task.Run(() => FindBinary("ffmpeg"));
         if (ffmpegPath == null) return false;
+
+        await ApplyWallClockOffsetAsync(item);
+        if (gen != _generation) return false;
 
         var (videoUrl, audioUrl) = await ResolveDirectStreamsAsync(item.Url);
         if (gen != _generation) return false;
@@ -809,6 +847,57 @@ public partial class VideoManager : Node
             }
             catch { /* a locked file will be retried next clip via the dir wipe on start */ }
         }
+    }
+
+    /// Shift an exclusive looping preshow so every client encodes the same wall-clock point
+    /// in the source. Quantised to segment length so joiners in the same few seconds share a job.
+    private async Task ApplyWallClockOffsetAsync(Item item)
+    {
+        if (item is not { WallClockSync: true }) return;
+        if (item.SourceDurationSeconds <= 1)
+            item.SourceDurationSeconds = await ProbeDurationAsync(item.Url);
+        double encoded = item.SourceDurationSeconds - item.BaseStartSeconds;
+        if (encoded < 5) return;
+        double now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        double into = Math.Floor(now % encoded / SegmentSeconds) * SegmentSeconds;
+        item.StartSeconds = item.BaseStartSeconds + into;
+        GD.Print($"[VideoManager] wall-clock sync -ss {item.StartSeconds:0.##} " +
+                 $"(base {item.BaseStartSeconds:0} + {into:0} of {encoded:0})");
+    }
+
+    private async Task<double> ProbeDurationAsync(string url)
+    {
+        string ytdlpPath = await Task.Run(() => FindBinary("yt-dlp"));
+        if (ytdlpPath == null) return 0;
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ytdlpPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (var a in new[] { "--no-warnings", "--no-playlist", "--print", "duration", url })
+                psi.ArgumentList.Add(a);
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) return 0;
+            var read = p.StandardOutput.ReadToEndAsync();
+            if (!await Task.Run(() => p.WaitForExit(20_000)))
+            {
+                try { p.Kill(); } catch { }
+                return 0;
+            }
+            string line = (await read).Trim().Split('\n')[0];
+            if (double.TryParse(line, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && d > 1)
+                return d;
+        }
+        catch (Exception ex)
+        {
+            GD.Print($"[VideoManager] duration probe failed: {ex.Message}");
+        }
+        return 0;
     }
 
     /// Ask yt-dlp for direct CDN URLs without downloading. Returns (video, audio); audio is null
