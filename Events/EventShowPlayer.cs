@@ -155,10 +155,37 @@ public partial class EventShowPlayer : Node3D
                 Failed?.Invoke(e.Message);
             } }
     }
-    public static AudioStream LoadAudio(string path) => Path.GetExtension(path).ToLowerInvariant() switch {
-        ".ogg" => AudioStreamOggVorbis.LoadFromFile(path), ".mp3" => new AudioStreamMP3 { Data = File.ReadAllBytes(path) },
-        ".wav" => AudioStreamWav.LoadFromFile(path), _ => null,
-    };
+    /// Every audio container Godot can actually decode, and nothing else. Godot 4 ships
+    /// exactly three: Ogg Vorbis (`.ogg`/`.oga`), MPEG audio (`.mp3`) and RIFF WAV. There is
+    /// no AudioStreamFlac and no Opus/AAC decoder in the engine, so a show carrying
+    /// `vocals.flac` or `show.m4a` must be converted before it is packaged — pretending
+    /// otherwise here would only move the failure to a null stream three lines later.
+    ///
+    /// A returning-null version of this cost real debugging time: an unsupported extension
+    /// and a truncated file both surfaced as the single message "Audio could not be
+    /// decoded.", which names neither the file nor the reason. It now throws, and the
+    /// message says which extension it was; every caller runs inside Prepare's try, so the
+    /// text reaches the player through `Failed`.
+    public static readonly string[] SupportedAudioExtensions = { ".ogg", ".oga", ".mp3", ".wav" };
+    public static AudioStream LoadAudio(string path)
+    {
+        string extension = Path.GetExtension(path ?? string.Empty).ToLowerInvariant();
+        string name = string.IsNullOrEmpty(path) ? "(no file)" : Path.GetFileName(path);
+        AudioStream stream = extension switch {
+            // .oga is the same Vorbis bitstream in the container name Xiph actually recommends.
+            ".ogg" or ".oga" => AudioStreamOggVorbis.LoadFromFile(path),
+            ".mp3" => File.Exists(path) ? new AudioStreamMP3 { Data = File.ReadAllBytes(path) } : null,
+            ".wav" => AudioStreamWav.LoadFromFile(path),
+            _ => throw new InvalidOperationException(
+                $"'{name}' has audio format '{(extension.Length > 0 ? extension : "(no extension)")}', which this client cannot decode. " +
+                $"Godot decodes only {string.Join(", ", SupportedAudioExtensions)} — convert it first, e.g. " +
+                $"ffmpeg -i \"{name}\" -c:a libvorbis -q:a 8 out.ogg"),
+        };
+        if (stream == null || stream.GetLength() <= 0)
+            throw new InvalidOperationException(
+                $"'{name}' is a {extension} file but could not be decoded — it is truncated, empty, or not really {extension} inside.");
+        return stream;
+    }
     private void BindScreens(Node node)
     {
         foreach (var screen in FindPortraitScreens(node)) {

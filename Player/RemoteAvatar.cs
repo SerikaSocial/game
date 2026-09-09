@@ -21,10 +21,19 @@ namespace SerikaSocial.Player;
 public partial class RemoteAvatar : Node3D
 {
     private bool _streamingBones;   // peer sends real bone rotations → don't animate locally
+    private bool _streamingFingers; // ...and that pose reached LOD0, so it carries the fingers
     private bool _hasRealAvatar;
 
     public uint PeerId { get; private set; }
     public AvatarInstance Avatar => _avatar;
+    /// True when this peer's own hands are arriving on the wire, so no local hand overlay
+    /// should write to them. `HumanoidBones.Full` puts the 30 finger bones above index 22, so
+    /// only a LOD0 frame carries them — a peer far enough out to be sending LOD1 leaves this
+    /// rig's fingers wherever they were, which is what lets a concert prop close them locally.
+    public bool StreamingFingers => _streamingBones && _streamingFingers;
+    /// `Animate` is skipped entirely while a peer streams its pose, so anything that normally
+    /// rides along with it has to be driven by whoever owns it instead.
+    public bool LocalAnimationRunning => !_streamingBones;
 
     private MeshInstance3D _capsule;
     private AvatarInstance _avatar;
@@ -251,6 +260,7 @@ public partial class RemoteAvatar : Node3D
         {
             s.BoneCount = 0;
         }
+        _streamingFingers = s.BoneCount > HumanoidBones.Lod1.Length;
         if (_streamingBones != hasBones)
         {
             _streamingBones = hasBones;

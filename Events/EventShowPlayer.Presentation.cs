@@ -119,6 +119,7 @@ void fragment() { ALBEDO=beam_color; ALPHA=.012*strength*pow(1.0-UV.y,1.5)*pow(a
             }
             if (node is Node3D mic && mic.Name == "SERIKA_EVENT_MIC_STAND") _microphones.Add((mic,mic.Visible));
         }
+        SetupShowMicrophone(world);
         SetupConcertRig(world);
         // Skipped outright when effects are off — building the pyro/laser/crowd rigs only to
         // never step them still swaps every one of those materials and costs the shader
@@ -225,6 +226,8 @@ ALBEDO=(p.y<0.0 || p.y>1.0) ? vec3(0.0) : texture(video_frame,p).rgb; }" } };
         }
         double entranceEnd = _state.Config.PerformerPath?.Count > 0 ? _state.Config.PerformerPath[^1].Time : 0;
         foreach(var mic in _microphones) mic.Node.Visible = mic.Visible && performance && seconds >= entranceEnd;
+        // The stand appears when she arrives; a beat later she lifts the microphone off it.
+        UpdateShowMicrophone(seconds, performance);
         foreach(var beam in _beams) beam.Mesh.Visible=false; // Legacy decorative beams are retired.
         UpdateConcertRig(seconds,performance,color,music,BeatStrength,highQuality);
         if(_effectsEnabled) {
@@ -244,6 +247,7 @@ ALBEDO=(p.y<0.0 || p.y>1.0) ? vec3(0.0) : texture(video_frame,p).rgb; }" } };
     private void RestorePresentation()
     {
         _introPlayer?.Stop();
+        RestoreShowMicrophone();
         RestoreShowEffects();
         RestoreShowLasers();
         RestoreConcertAudience();

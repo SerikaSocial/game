@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using SerikaSocial.Avatar;
@@ -13,6 +15,54 @@ public partial class EventShowPlayer
     public sealed record LightStickLifecycleResult(bool Passed, bool BeanGrip, bool AvatarSwap,
         bool PlayerLeave, bool FirstPersonVisibility, bool Teardown,
         bool PairedClock = false, bool BeatResponse = false);
+
+    /// The fingers must actually close around the stick, and open again when it is taken away.
+    ///
+    /// Everything else here measures the PROP — that it tracks the wrist, survives an avatar
+    /// swap, tears down. All of that passed for the entire time every peer was carrying a light
+    /// stick through a flat open palm, because the hand shape was a side effect of the cheer
+    /// animation and nothing tested it. This drives the real per-frame path a streamed peer
+    /// takes (`DriveStreamedPropGrip`) and measures the knuckle rotations it produces.
+    ///
+    /// Pass a rig that HAS fingers. The procedural bean used by the lifecycle test carries only
+    /// body roles, and a skipped finger check is not a passing one.
+    public bool RunLightStickFingerGripCheck(AvatarInstance avatar)
+    {
+        bool processed = IsProcessing();
+        // The show samples the baked clip every frame and would overwrite these joints.
+        SetProcess(false);
+        try { return CheckFingerGrip(avatar); }
+        finally { SetProcess(processed); }
+    }
+
+    private static bool CheckFingerGrip(AvatarInstance avatar)
+    {
+        var skeleton = avatar?.Skeleton;
+        if (skeleton == null) return false;
+        var knuckles = new List<int>();
+        foreach (string side in new[] { "left", "right" })
+            foreach (string finger in new[] { "Index", "Middle", "Ring", "Little" }) {
+                int bone = avatar.BoneOf($"{side}{finger}Proximal");
+                if (bone >= 0) knuckles.Add(bone);
+            }
+        // A rig with no finger bones cannot be checked; report that rather than passing silently.
+        if (knuckles.Count < 4) { GD.Print("CONCERT_STICK_FINGERS skipped=no_finger_bones"); return false; }
+
+        var rest = knuckles.Select(b => skeleton.GetBonePoseRotation(b)).ToArray();
+        avatar.SetConcertPropGrip(true);
+        // One second of frames at 60 Hz: long enough for the .28s ease to complete.
+        for (int i = 0; i < 60; i++) avatar.DriveStreamedPropGrip(1.0 / 60, streamingFingers: false);
+        float closed = knuckles.Select((b, i) => skeleton.GetBonePoseRotation(b).AngleTo(rest[i])).Max();
+
+        avatar.ReleaseConcertPropGrip();
+        float reopened = knuckles.Select((b, i) => skeleton.GetBonePoseRotation(b).AngleTo(rest[i])).Max();
+
+        // A real fist bends the knuckles well past 20 degrees; releasing must put them back.
+        bool passed = closed > Mathf.DegToRad(20) && reopened < Mathf.DegToRad(2);
+        GD.Print($"CONCERT_STICK_FINGERS pass={passed} closed={Mathf.RadToDeg(closed):F1}deg "
+            + $"released={Mathf.RadToDeg(reopened):F2}deg knuckles={knuckles.Count}");
+        return passed;
+    }
 
     /// Uses a separate accessory manager and off-stage test player, keeping live accessories
     /// and the caller's show configuration untouched. The player is the actual client class.
@@ -106,7 +156,8 @@ public partial class EventShowPlayer
         }
         bool passed = bean && swapped && left && visible && restored && pairedClock && beatResponse;
         GD.Print($"CONCERT_STICK_LIFECYCLE pass={passed} bean={bean} swap={swapped} leave={left} "
-            + $"fp_and_third_person={visible} teardown={restored} paired_clock={pairedClock} beat_response={beatResponse}");
+            + $"fp_and_third_person={visible} teardown={restored} paired_clock={pairedClock} "
+            + $"beat_response={beatResponse}");
         return new(passed,bean,swapped,left,visible,restored,pairedClock,beatResponse);
     }
 

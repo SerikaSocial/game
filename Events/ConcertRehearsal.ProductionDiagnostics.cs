@@ -46,15 +46,25 @@ public partial class ConcertRehearsal
             && !Blocked(new Vector3(-8,1,79),new Vector3(-8,1,91))
             && !Blocked(new Vector3(8,1,79),new Vector3(8,1,91)),
             "existing FOH approach and side clearances remain accessible");
+        Check(_show.CrowdWashCount==4,"four front-truss heads stay permanently audience-facing");
+        PlayAt(_event.Config.RevealTime*.50);_show.PreviewPlaying=false;await Wait();
+        Check(_show.ActiveSirenCount==12&&_show.SirenStrength>.2f,"blue rotating alarm beacons sweep the concealed entrance");
         PlayAt(_event.Config.RevealTime*.84);_show.PreviewPlaying=false;await Wait();
         Check(_show.EntranceConcealed&&_show.ActiveLaserRayCount>0&&_show.MinimumLaserHeight>10,"intro laser traces appear high above concealed performer and audience");
+        Check(_show.ActiveSirenCount==12&&_show.SirenStrength>.2f,"alarm beacons keep sweeping through the late entrance");
         string laserState=$"{_show.ActiveLaserRayCount}/{_show.LaserStrength:F6}/{_show.LaserPattern}";
         PlayAt(_event.Config.RevealTime+10);_show.PreviewPlaying=false;await Wait();
         PlayAt(_event.Config.RevealTime*.84);_show.PreviewPlaying=false;await Wait();
         Check(laserState==$"{_show.ActiveLaserRayCount}/{_show.LaserStrength:F6}/{_show.LaserPattern}","backward seek exactly reconstructs laser cue");
         PlayAt(_event.Config.RevealTime+.5);await Wait(.5);
         Check(_show.Performer.Visible&&_show.StageAudioPlaying&&!_show.IntroStageAudioPlaying,"first verse reveal swaps preshow to stage PA music");
+        Check(_show.ActiveSirenCount==0&&_show.SirenStrength==0,"alarm beacons cut the instant the stage takes over");
         Check(Math.Abs(_show.AudioPosition-_show.PreviewPosition)<.20&&_show.StageAudioSpread<.025,"all four speaker feeds follow timeline within one mix block");
+        double pickup=EventShowPlayer.MicPickupDelay+(_event.Config.PerformerPath.Count>0?_event.Config.PerformerPath[^1].Time:0);
+        PlayAt(pickup-.25);_show.PreviewPlaying=false;await Wait();
+        Check(_show.MicrophoneReady&&!_show.MicrophoneHeld,"microphone stays on the stand until the pickup beat");
+        PlayAt(pickup+.25);_show.PreviewPlaying=false;await Wait();
+        Check(_show.MicrophoneHeld,"performer lifts the microphone after arriving");
         _show.PreviewPlaying=false;await Wait();Check(!_show.StageAudioPlaying,"pause silences every stage feed");
         PlayAt(310);await Wait(.5);Check(Math.Abs(_show.AudioPosition-_show.PreviewPosition)<.20&&_show.StageAudioSpread<.025,"seeking restarts every channel at matching phase");
         var listenerBefore=_listener.GlobalTransform;_broadcastView=true;_camera.TopLevel=true;await Wait();
@@ -62,6 +72,9 @@ public partial class ConcertRehearsal
         _broadcastView=false;_camera.TopLevel=false;_camera.Position=new Vector3(0,.7f,0);_camera.Rotation=Vector3.Zero;
         await VerifyStagePanning();
         var grip=await _show.RunLightStickGripChecks(_show.Performer);Check(grip.Passed,"blue light stick follows the real wrist across eight left/right wrist poses");
+        // Against the real VRM, not the bean the lifecycle test uses: the bean has no finger
+        // bones, and a skipped finger check is not a passing one.
+        Check(_show.RunLightStickFingerGripCheck(_show.Performer),"holding a light stick closes the fingers around it and releasing reopens them");
         var life=await _show.RunLightStickLifecycleChecks();Check(life.Passed,"blue light sticks support bean avatars, swaps, leave, first person and teardown");
         _show.Preview=false;_event.Status="open";_event.Revision++;_show.ApplyState(_event);await Wait(.3);
         Check(!_show.StageAudioPlaying&&_show.ActiveLaserRayCount==0,"return to preshow stops stage music and lasers");

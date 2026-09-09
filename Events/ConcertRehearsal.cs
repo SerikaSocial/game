@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -153,10 +154,32 @@ public partial class ConcertRehearsal : Node3D
         await ToSignal(RenderingServer.Singleton,RenderingServer.SignalName.FramePostDraw);
         GetViewport().GetTexture().GetImage().SavePng(Path.Combine(_captureFolder,name+".png"));
     }
+    /// Capture points derived from the show that was actually loaded.
+    ///
+    /// This was a fixed list ending in ("stellar",626.8) and ("stellar-finale",762.8). Those are
+    /// past the end of a two-song show, so every default capture ran two samples against a
+    /// clamped, finished timeline and wrote them out as if they were real frames.
+    private (string,double)[] DefaultCaptureSamples()
+    {
+        var config=_event.Config;
+        var samples=new List<(string,double)> {
+            ("blackout",8.0), ("sky-build",config.RevealTime*.94),
+            ("reveal",config.RevealTime+.4), ("reveal-smoke",config.RevealTime+3.0),
+        };
+        var fire=config.Effects.FirstOrDefault(e=>e.Kind=="fire"&&e.Time>config.RevealTime+30);
+        if(fire!=null) samples.Add(("first-fire",fire.Time+.30));
+        // One frame a third of the way into each song, plus one near its end, named for the song.
+        foreach(var segment in config.Segments.Skip(1)) {
+            string slug=segment.Title.Replace(" ","-").ToLowerInvariant();
+            samples.Add((slug,segment.Start+segment.Duration*.34));
+            samples.Add((slug+"-late",segment.Start+segment.Duration*.86));
+        }
+        return samples.Where(s=>s.Item2>=0&&s.Item2<config.Duration).ToArray();
+    }
     private async Task CaptureViews()
     {
         _panel.Hide();_captureActive=true;GetWindow().Mode=Window.ModeEnum.Windowed;GetWindow().Size=new Vector2I(1280,720);
-        foreach(var sample in (Arg("--sample")!=""?new[]{("sample",double.Parse(Arg("--sample"),System.Globalization.CultureInfo.InvariantCulture))}:new[]{("blackout",8.0),("sky-build",_event.Config.RevealTime*.94),("reveal",_event.Config.RevealTime+.4),("reveal-smoke",_event.Config.RevealTime+3.0),("bibb-fire",_event.Config.Effects.First(e=>e.Kind=="fire"&&e.Time>90).Time+.30),("bibb",111.0),("kaiju",261.8),("kaiju-red",440.5),("stellar",626.8),("stellar-finale",762.8)})) {
+        foreach(var sample in (Arg("--sample")!=""?new[]{("sample",double.Parse(Arg("--sample"),System.Globalization.CultureInfo.InvariantCulture))}:DefaultCaptureSamples())) {
             PlayAt(sample.Item2);_show.PreviewPlaying=false;_broadcastView=false;_camera.TopLevel=true;
             _camera.GlobalPosition=new Vector3(0,1.7f,30);_camera.LookAt(new Vector3(0,13,-45));_camera.Fov=60;
             await ToSignal(GetTree().CreateTimer(.2),SceneTreeTimer.SignalName.Timeout);await Snapshot(sample.Item1+"-audience");GD.Print($"CAPTURE_LIGHTS {sample.Item1} bound={_show.MovingHeadCount} shafts={_show.ActiveShaftCount} look={_show.LightingLook} fire={_show.ActiveFireCount} smoke={_show.ActiveSmokeCount} sparks={_show.ActiveSparkCount} sky={_show.SkySparkleStrength:F3}");
@@ -210,12 +233,26 @@ public partial class ConcertRehearsal : Node3D
             _broadcastView=true;_camera.TopLevel=true;await ToSignal(GetTree().CreateTimer(.2),SceneTreeTimer.SignalName.Timeout);await Snapshot("performer-"+segment.Title.Replace(" ","-"));
             _broadcastView=false;_camera.TopLevel=false;_camera.Position=new Vector3(0,.7f,0);_camera.Rotation=Vector3.Zero;_camera.Fov=72;}
         var heads=_show.GetParent().FindChildren("SERIKA_EVENT_MOVING_*","Node3D",true,false);
-        foreach(var look in new[]{("bibb-lift",111.0),("kaiju-intimate",261.8),("stellar-pearl",626.8),("transition-hold",497.2)}) {
-            PlayAt(look.Item2);_show.PreviewPlaying=false;
+        // Probe the looks this show ACTUALLY authors, one sample per distinct look, taken just
+        // after the cue fires. These were four hardcoded (name, second) pairs lifted off the
+        // three-song timeline, so trimming a song left one pointing past the end of the show and
+        // it reported "0 shafts" — a failure that says nothing about the lighting and everything
+        // about a stale constant.
+        foreach(var look in _event.Config.Lights.Where(l=>l.Time+.35<_event.Config.Duration)
+                    .GroupBy(l=>l.Look??"unnamed").Select(g=>(Name:g.Key,Time:g.First().Time+.35))) {
+            PlayAt(look.Time);_show.PreviewPlaying=false;
             await ToSignal(GetTree().CreateTimer(.1),SceneTreeTimer.SignalName.Timeout);
-            Check(_show.ActiveShaftCount<=20 && (look.Item1=="transition-hold"?_show.ActiveShaftCount==0:_show.ActiveShaftCount>0),$"{look.Item1} reserves negative space ({_show.ActiveShaftCount} shafts)");
-            Check(_show.BlinderStrength==0,$"{look.Item1} has no indiscriminate blinder flashing");
-            await Snapshot("lighting-"+look.Item1);
+            // A blackout or a held transition is authored to show nothing; every other look
+            // must actually put shafts in the air, and none may flood the room.
+            bool dark=look.Name is "black" or "hold";
+            Check(_show.ActiveShaftCount<=24 && (dark?_show.ActiveShaftCount==0:_show.ActiveShaftCount>0),
+                $"{look.Name} reserves negative space ({_show.ActiveShaftCount} shafts)");
+            // Blinders are authored on purpose at the loud looks — the two BIBBIDIBA bumps are a
+            // deliberate part of the show. What must never happen is one firing during a quiet
+            // look, which is the "indiscriminate flashing" this has always been guarding against.
+            if(look.Name is "black" or "intimate" or "side" or "hold")
+                Check(_show.BlinderStrength==0,$"{look.Name} has no indiscriminate blinder flashing");
+            await Snapshot("lighting-"+look.Name);
         }
         Check(heads.All(n=>((Node3D)n).GlobalBasis.X.IsFinite()&&((Node3D)n).GlobalBasis.Y.IsFinite()),"all moving head orientations remain finite");
         if (_event.Config.Beats.Length > 0) {

@@ -8,7 +8,8 @@ namespace SerikaSocial.Avatar;
 public sealed partial class AvatarInstance
 {
     private bool _concertCheerRequested, _concertCheerAttempted;
-    private float _concertCheerBlend;
+    private bool _concertPropGripRequested;
+    private float _concertCheerBlend, _concertPropGripBlend;
     private double _concertCheerClock, _concertCheerLength;
     private int[] _concertCheerBones;
     private Quaternion[,] _concertCheerFrames;
@@ -244,7 +245,8 @@ public sealed partial class AvatarInstance
             && _emote == Emote.None && !_customClipActive;
         float target = eligible && CacheConcertCheer() ? 1 : 0;
         _concertCheerBlend = Mathf.MoveToward(_concertCheerBlend, target, Math.Max(0, dt) / .42f);
-        if (_concertCheerBlend <= 0 || !ConcertCheerReady) { ReleaseConcertCheerGrip(); return; }
+        StepConcertPropGrip(dt);
+        if (_concertCheerBlend <= 0 || !ConcertCheerReady) { DriveConcertGrip(_concertPropGripBlend); return; }
         double phase = _concertCheerClock % _concertCheerLength;
         double x = phase / _concertCheerLength * (_concertCheerFrames.GetLength(0) - 1);
         int a = (int)Math.Floor(x), b = Math.Min(a + 1, _concertCheerFrames.GetLength(0) - 1);
@@ -257,7 +259,9 @@ public sealed partial class AvatarInstance
             _concertArmLast[j]=_concertArmBase[j].Slerp(pose, blend);
             Skeleton.SetBonePoseRotation(bone, _concertArmLast[j]);
         }
-        ApplyConcertCheerGrip(blend);
+        // A hand holding a light stick stays closed whether or not the cheer is running, so the
+        // grip takes whichever driver wants it harder.
+        DriveConcertGrip(Math.Max(blend, _concertPropGripBlend));
     }
 
     private void RestoreConcertCheerArmBase()
@@ -271,6 +275,60 @@ public sealed partial class AvatarInstance
                 Skeleton.SetBonePoseRotation(bone,_concertArmBase[j]);
         }
         _concertArmBase=null;_concertArmLast=null;
+    }
+
+    /// Ask this rig to close its hands around a held concert prop.
+    ///
+    /// The grip used to be a side effect of the cheer animation, so only a local desktop player
+    /// who was actively cheering ever closed their fingers. Everyone else — every peer, every VR
+    /// player, and the local player the moment they stopped cheering — carried a light stick
+    /// through a flat open palm, which is what "the sticks aren't properly held" is. Holding a
+    /// prop is its own state and outlives the cheer.
+    ///
+    /// For the local player this reaches other people for free: `HumanoidBones.Full` carries all
+    /// 30 finger bones and `CaptureBonePose` samples the posed skeleton, so a near peer receiving
+    /// LOD0 replays the real closed hand. `StepConcertPropGrip` covers the rest — a peer far
+    /// enough out to be sending LOD1 has no finger data on the wire at all.
+    public void SetConcertPropGrip(bool holding) => _concertPropGripRequested = holding;
+    public bool ConcertPropGripEngaged => _concertPropGripBlend > 0;
+
+    /// Ease the prop grip toward its requested state. Separate from writing it, because the two
+    /// callers differ: `ApplyConcertCheer` steps then writes as part of `Animate`, while a peer
+    /// replaying streamed bones never runs `Animate` at all and needs `DriveStreamedPropGrip`.
+    private void StepConcertPropGrip(float dt)
+    {
+        float target = _concertPropGripRequested && !_customClipActive ? 1 : 0;
+        _concertPropGripBlend = Mathf.MoveToward(_concertPropGripBlend, target, Math.Max(0, dt) / .28f);
+    }
+
+    /// Step and write the grip for a rig whose `Animate` is not running.
+    ///
+    /// `RemoteAvatar` returns before `Animate` whenever the peer is streaming bones, so nothing
+    /// on that path would ever close the hand. Writing here is safe precisely because the wire
+    /// is not delivering fingers: the caller passes `streamingFingers` and we stand down when it
+    /// is true, rather than fighting `BlendBonePose` for the same joints every frame.
+    public void DriveStreamedPropGrip(double delta, bool streamingFingers)
+    {
+        if (Skeleton == null) return;
+        if (streamingFingers) { _concertPropGripBlend = 0; ReleaseConcertCheerGrip(); return; }
+        StepConcertPropGrip((float)delta);
+        DriveConcertGrip(_concertPropGripBlend);
+    }
+
+    /// Drop the prop grip now rather than easing it out. A peer replaying streamed bones has no
+    /// per-frame driver left once its stick is taken away, so an eased release would freeze the
+    /// hand half closed forever.
+    public void ReleaseConcertPropGrip()
+    {
+        _concertPropGripRequested = false;
+        _concertPropGripBlend = 0;
+        if (_concertCheerBlend <= 0) ReleaseConcertCheerGrip();
+    }
+
+    private void DriveConcertGrip(float weight)
+    {
+        if (weight <= 0) { ReleaseConcertCheerGrip(); return; }
+        ApplyConcertCheerGrip(weight);
     }
 
     private void ApplyConcertCheerGrip(float weight)

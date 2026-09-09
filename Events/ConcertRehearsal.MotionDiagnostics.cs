@@ -22,7 +22,12 @@ public partial class ConcertRehearsal
             boundaries.AddRange(root.GetProperty("diagnosticsBoundaries").EnumerateArray().Select(v=>v.GetDouble()));
             var choruses=root.GetProperty("chorusWindows").EnumerateArray().Select(v=>(Start:v.GetProperty("start").GetDouble(),End:v.GetProperty("end").GetDouble())).ToArray();
             var cues=root.GetProperty("danceCues").EnumerateArray().ToArray();
-            Check(cues.Length==3&&ranges.Count(r=>r.Kind=="dance")==3,"motion verification includes all three official chorus excerpts");
+            // Every authored dance cue must have a matching probe range. This used to demand
+            // exactly three, which silently made the choreography count part of the contract:
+            // adding a fourth dance, or dropping a song that carried one, failed the verifier
+            // without anything actually being wrong with the motion.
+            Check(cues.Length>0&&ranges.Count(r=>r.Kind=="dance")==cues.Length,
+                $"every authored chorus excerpt is verified ({cues.Length} cues, {ranges.Count(r=>r.Kind=="dance")} probed)");
             Check(cues.All(c=>choruses.Any(w=>c.GetProperty("start").GetDouble()>=w.Start && c.GetProperty("start").GetDouble()+c.GetProperty("duration").GetDouble()<=w.End+.0001)),"official choreography stays entirely inside verified chorus sections");
             Check(ranges.All(r=>r.Start>=0&&r.End>r.Start&&r.End<=_event.Config.Duration),"motion diagnostics ranges are valid for the authored duration");
         } else {

@@ -15,9 +15,15 @@ public partial class ConcertRehearsal
         }
         string State() => $"{_show.ActiveFireCount}/{_show.ActiveSmokeCount}/{_show.ActiveSparkCount}/{_show.ActiveFireLightCount}/{_show.SkySparkleStrength:F5}/{_show.ActiveShaftCount}";
         Check(_show.EffectNodeCount==19,"all 19 authored effect banks bind to the show");
+        // First presentation frame after load still has the avatar visible from setup.
+        await Seek(0);
         await Seek(8);
         Check(_show.EntranceConcealed&&!_show.Performer.Visible&&_show.RevealLevel==0,"entrance is concealed even under ambient avatar shading");
         Check(_show.ActiveShaftCount==0&&_show.BlinderStrength==0&&_show.ActiveFireLightCount==0,"all stage optics and pyro remain dark before reveal");
+        Check(_show.CrowdWashCount==4,"audience washes are bound without adding a new look name");
+        Check(_show.ActiveSirenCount==0,"alarm beacons stay dark through the opening blackout");
+        await Seek(_event.Config.RevealTime*.50);
+        Check(_show.ActiveSirenCount==12&&_show.SirenStrength>.2f&&_show.ActiveShaftCount==0,"entrance alarms are haze volumes, not stage lights");
         var lights=_show.GetParent().FindChildren("*","Light3D",true,false).OfType<Light3D>();
         Check(lights.All(l=>l.LightEnergy<=.0001f),"all venue light energies are zero during the concealed entrance");
         var art=_show.GetParent().FindChildren("*","Node3D",true,false).OfType<Node3D>().Where(n=>n.Name=="Artist English name"||n.Name=="Artist Japanese name"||n.Name.ToString().StartsWith("Comet screen graphic")).ToArray();

@@ -8,6 +8,16 @@ public partial class Main
     private bool _eventVenue;
     private double _eventRulesProbe;
     private Camera3D _eventFocusCamera;
+    /// Keeps the spatial mix on the player's own body while the tracked stage camera flies.
+    ///
+    /// Godot has no listener by default: the CURRENT Camera3D is the listener. So making the
+    /// focus camera current silently moved the ears onto a camera that cranes out over the
+    /// audience and swings to face the stage — the PA speakers panned and attenuated with the
+    /// shot, and a flyover across the crowd smeared the mix into nothing. Reported as "sound in
+    /// F5 flyover cam is not sticky to the stage". The player has not moved, so their mix must
+    /// not either; an explicit listener on the view camera outranks whichever camera is current.
+    /// The rehearsal scene never saw this because ConcertRehearsal plants its own body listener.
+    private AudioListener3D _eventFocusListener;
     private Label _eventControlsHint;
     private ColorRect _eventFocusFade;
     private void TickEventAudienceControls(double delta)
@@ -42,6 +52,9 @@ public partial class Main
         }
         if (!GodotObject.IsInstanceValid(_eventFocusCamera)) return;
         if (!_eventVenue || !GodotObject.IsInstanceValid(_eventShow) || !_eventShow.ReadyToPlay) { LeaveEventFocus(); return; }
+        // The view camera is rebuilt on respawn and on an avatar swap, which frees the listener
+        // with it and silently drops the mix back onto the flyover. Re-anchor while focused.
+        AnchorEventFocusListener();
         _eventFocusFade.Visible = true;
         _eventFocusFade.Color = new Color(0,0,0,_eventShow.BroadcastFadeOpacity);
         var source = _eventShow.BroadcastCamera;
@@ -61,10 +74,36 @@ public partial class Main
             CullMask = 0xfffff & ~LocalPlayer.NonFpCullLayers };
         _worldRoot.AddChild(_eventFocusCamera);
         TickEventAudienceControls(0);
+        // Pin the ears to the body BEFORE the camera goes current, so no frame is ever
+        // mixed from the flyover's position.
+        AnchorEventFocusListener();
         _eventFocusCamera.MakeCurrent();
+    }
+    /// Parent an explicit listener to whichever view camera the player is actually looking
+    /// through. It follows the head for free and, being explicit, keeps the mix even though a
+    /// different camera is current.
+    private void AnchorEventFocusListener()
+    {
+        var head = GodotObject.IsInstanceValid(_localVr) ? (Node3D)_localVr.HeadCamera
+            : GodotObject.IsInstanceValid(_localDesktop) ? _localDesktop.ViewCamera : null;
+        if (head == null) return;
+        if (!GodotObject.IsInstanceValid(_eventFocusListener)) {
+            _eventFocusListener = new AudioListener3D { Name = "EventFocusListener" };
+            head.AddChild(_eventFocusListener);
+        } else if (_eventFocusListener.GetParent() != head) {
+            _eventFocusListener.Reparent(head, false);
+            _eventFocusListener.Transform = Transform3D.Identity;
+        }
+        _eventFocusListener.MakeCurrent();
     }
     private void LeaveEventFocus()
     {
+        if (GodotObject.IsInstanceValid(_eventFocusListener)) {
+            // Hand the mix back to the current camera, which is the player's own again.
+            _eventFocusListener.ClearCurrent();
+            _eventFocusListener.QueueFree();
+        }
+        _eventFocusListener = null;
         if (GodotObject.IsInstanceValid(_eventFocusCamera)) {
             if (GodotObject.IsInstanceValid(_localDesktop)) _localDesktop.ViewCamera?.MakeCurrent();
             _eventFocusCamera.QueueFree();

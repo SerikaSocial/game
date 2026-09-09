@@ -11,6 +11,9 @@ public partial class EventShowPlayer
     private sealed class PlayerConcertStick
     {
         public AvatarInstance Avatar;
+        /// Set when this holder is a network peer. Kept because a peer streaming its pose never
+        /// runs `Animate`, so the hand grip has to be stepped from here instead.
+        public RemoteAvatar Remote;
         public readonly Dictionary<bool, HeldConcertStick> Hands = new();
         public bool ScanManaged;
     }
@@ -147,6 +150,7 @@ public partial class EventShowPlayer
     public void RemoveAvatarLightSticks(AvatarInstance avatar)
     {
         if(!IsInstanceValid(avatar) || !_playerConcertSticks.Remove(avatar.GetInstanceId(),out var owner))return;
+        avatar.ReleaseConcertPropGrip();
         foreach(var hand in owner.Hands.Values)
             if(IsInstanceValid(hand.Attachment))hand.Attachment.QueueFree();
     }
@@ -155,7 +159,7 @@ public partial class EventShowPlayer
     public void SamplePlayerLightStickPresentation(double seconds,bool performance=true)
         => UpdatePlayerLightSticks(seconds,performance,0);
 
-    private PlayerConcertStick EnsureAvatarLightSticks(AvatarInstance avatar, bool scanManaged)
+    private PlayerConcertStick EnsureAvatarLightSticks(AvatarInstance avatar, bool scanManaged, RemoteAvatar remote = null)
     {
         if (!IsInstanceValid(_lightStickTemplate) || !IsInstanceValid(avatar) || !IsInstanceValid(avatar.Skeleton)) return null;
         ulong id = avatar.GetInstanceId();
@@ -164,6 +168,10 @@ public partial class EventShowPlayer
             _playerConcertSticks[id]=owner;
         }
         owner.ScanManaged |= scanManaged;
+        if (remote != null) owner.Remote = remote;
+        // A hand carrying a stick is closed around it, cheer or no cheer. For a local player
+        // this also goes out on the wire, because LOD0 pose frames carry the finger bones.
+        avatar.SetConcertPropGrip(true);
         foreach(bool left in new[] {false,true}) {
             if(owner.Hands.TryGetValue(left,out var existing)) {
                 if(IsInstanceValid(existing.Prop))continue;
@@ -190,14 +198,15 @@ public partial class EventShowPlayer
     private void FindConcertPlayers(Node node, HashSet<ulong> present)
     {
         AvatarInstance avatar = null;
+        RemoteAvatar peer = null;
         if (node is LocalPlayer local) { avatar = local.Avatar; _lightStickLocalPlayer = local; }
         else if (node is VrPlayer vr) avatar = vr.Avatar;
-        else if (node is RemoteAvatar remote) avatar = remote.Avatar;
+        else if (node is RemoteAvatar remote) { avatar = remote.Avatar; peer = remote; }
         if (avatar != null && IsInstanceValid(avatar) && avatar != _artist) {
             present.Add(avatar.GetInstanceId());
             // Both local VR and remote users attach to the same solved avatar wrist, so
             // existing replicated hand poses produce the same prop pose for every viewer.
-            EnsureAvatarLightSticks(avatar, true);
+            EnsureAvatarLightSticks(avatar, true, peer);
             return;
         }
         // Players live outside the imported venue. Skip its geometry and all avatar/UI
@@ -220,8 +229,15 @@ public partial class EventShowPlayer
                 && _lightStickLocalPlayer.ControlsEnabled && GetViewport().GuiGetFocusOwner()==null
                 && _state?.Config?.LightSticks==true);
         }
-        foreach(var owner in _playerConcertSticks.Values)
+        foreach(var owner in _playerConcertSticks.Values) {
             foreach(var hand in owner.Hands.Values) AnimateConcertLightStick(hand,seconds,performance,beat);
+            if(!IsInstanceValid(owner.Avatar)) continue;
+            owner.Avatar.SetConcertPropGrip(true);
+            // A peer whose pose is arriving on the wire never reaches `Animate`, so its grip has
+            // no other driver. Stand down when that pose is LOD0 and already carries the fingers.
+            if(IsInstanceValid(owner.Remote) && !owner.Remote.LocalAnimationRunning)
+                owner.Avatar.DriveStreamedPropGrip(delta, owner.Remote.StreamingFingers);
+        }
         foreach(var hand in _demonstrationSticks) AnimateConcertLightStick(hand,seconds,performance,beat);
         _lightStickScanDelay -= Math.Max(0, delta);
         if (_lightStickScanDelay > 0) return;
@@ -262,6 +278,7 @@ public partial class EventShowPlayer
         foreach (var pair in _playerConcertSticks) {
             var held = pair.Value;
             if (!IsInstanceValid(held.Avatar) || held.ScanManaged && !present.Contains(pair.Key)) {
+                if (IsInstanceValid(held.Avatar)) held.Avatar.ReleaseConcertPropGrip();
                 foreach(var hand in held.Hands.Values)
                     if (IsInstanceValid(hand.Attachment)) hand.Attachment.QueueFree();
                 expired.Add(pair.Key);
@@ -294,9 +311,11 @@ public partial class EventShowPlayer
     private void RestorePlayerLightSticks()
     {
         SetConcertCheerAvatar(null);
-        foreach (var held in _playerConcertSticks.Values)
+        foreach (var held in _playerConcertSticks.Values) {
+            if (IsInstanceValid(held.Avatar)) held.Avatar.ReleaseConcertPropGrip();
             foreach(var hand in held.Hands.Values)
                 if (IsInstanceValid(hand.Attachment)) hand.Attachment.QueueFree();
+        }
         foreach (var hand in _demonstrationSticks)
             if (IsInstanceValid(hand.Prop)) hand.Prop.QueueFree();
         _playerConcertSticks.Clear();
