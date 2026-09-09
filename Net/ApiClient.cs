@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -293,10 +294,12 @@ public sealed partial class ApiClient
     ///
     /// Returns `{ id, segments, done, segmentSeconds, title, duration }`, where `segments` is how
     /// many are complete and therefore safe to fetch.
-    public async Task<JsonElement> StartVideoSessionAsync(string url)
+    public async Task<JsonElement> StartVideoSessionAsync(string url, double startSeconds = 0)
     {
-        var req = new HttpRequestMessage(HttpMethod.Get,
-            $"{_baseUrl}/v1/video/session?url={Uri.EscapeDataString(url)}");
+        string q = $"{_baseUrl}/v1/video/session?url={Uri.EscapeDataString(url)}";
+        if (startSeconds > 0.05)
+            q += "&start=" + startSeconds.ToString(CultureInfo.InvariantCulture);
+        var req = new HttpRequestMessage(HttpMethod.Get, q);
         if (SessionToken != null)
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
         var res = await _http.SendAsync(req);

@@ -81,6 +81,11 @@ public sealed class ShowConfig
     public float Yaw { get; set; } = 180;
     public float Scale { get; set; } = 1;
     public List<CameraKey> Cameras { get; set; } = new() { new CameraKey() };
+    public string VideoUrl { get; set; }
+    public string PreshowVideoUrl { get; set; }
+    public double PreshowStartSeconds { get; set; }
+    public long ScheduledStart { get; set; }
+    public bool IsVideoEvent => !string.IsNullOrEmpty(VideoUrl);
 }
 public sealed class LiveEvent
 {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Godot;
@@ -26,6 +27,10 @@ public partial class VideoManager : Node
         public string Title;
         public string AddedBy;
         public string ThumbnailUrl;
+        public double StartSeconds;
+        public bool Loop;
+        /// Event director owns the screen; do not sync this item over VideoNet.
+        public bool Exclusive;
     }
 
     private readonly List<VideoScreen> _screens = new();
@@ -68,6 +73,9 @@ public partial class VideoManager : Node
     public bool TryHandleNet(string text)
     {
         if (!VideoNet.TryParse(text, out var msg)) return false;
+        // An event watch-party drives the screen from show config on every client. A stray
+        // queue/skip/state from the cinema net channel must not steal the Direct.
+        if (NowPlaying is { Exclusive: true }) return true;
         _applyingNet = true;
         try
         {
@@ -129,6 +137,27 @@ public partial class VideoManager : Node
         if (NowPlaying == null && !_busy) _ = Advance();
     }
 
+    /// Take over the room's screen: drop the queue and play this URL.
+    /// `startSeconds` is an ffmpeg input seek (skip that much of the source), not a
+    /// player-timeline seek — the encoded segments start at zero after the cut.
+    public void PlayExclusive(string url, string addedBy, double startSeconds = 0, bool loop = false)
+    {
+        url = CanonicalMediaUrl((url ?? "").Trim());
+        if (string.IsNullOrEmpty(url)) return;
+        if (NowPlaying != null
+            && string.Equals(NowPlaying.Url, url, StringComparison.Ordinal)
+            && Math.Abs(NowPlaying.StartSeconds - startSeconds) < .25
+            && NowPlaying.Loop == loop)
+            return;
+        Clear(fromNet: true);
+        _queue.Add(new Item {
+            Url = url, Title = ShortLabel(url), AddedBy = addedBy,
+            StartSeconds = Math.Max(0, startSeconds), Loop = loop, Exclusive = true
+        });
+        QueueChanged?.Invoke();
+        if (NowPlaying == null && !_busy) _ = Advance();
+    }
+
     /// Skip the current clip and play the next.
     public void Skip() => Skip(fromNet: false);
 
@@ -166,7 +195,25 @@ public partial class VideoManager : Node
         if (!fromNet) Broadcast(VideoNet.Clear());
     }
 
-    private void OnFinished() => Skip(fromNet: false);
+    private void OnFinished()
+    {
+        if (NowPlaying is { Loop: true } looping)
+        {
+            _queue.Insert(0, new Item
+            {
+                Url = looping.Url,
+                Title = looping.Title,
+                AddedBy = looping.AddedBy,
+                ThumbnailUrl = looping.ThumbnailUrl,
+                StartSeconds = looping.StartSeconds,
+                Loop = true,
+                Exclusive = looping.Exclusive,
+            });
+            Skip(fromNet: true);
+            return;
+        }
+        Skip(fromNet: NowPlaying is { Exclusive: true });
+    }
 
     private void OnScreenFailed(string url, string reason, string detail)
     {
@@ -361,7 +408,7 @@ public partial class VideoManager : Node
         JsonElement session;
         try
         {
-            session = await _api.StartVideoSessionAsync(item.Url);
+            session = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds);
         }
         catch (Exception e)
         {
@@ -412,7 +459,7 @@ public partial class VideoManager : Node
                 bool jobDone;
                 try
                 {
-                    var s = await _api.StartVideoSessionAsync(item.Url);
+                    var s = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds);
                     available = s.TryGetProperty("segments", out var sg) && sg.TryGetInt32(out int v) ? v : 0;
                     jobDone = s.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.True;
                 }
@@ -594,9 +641,16 @@ public partial class VideoManager : Node
         // streams; with a single muxed input the second -i and the maps are simply omitted.
         // YouTube no longer offers progressive formats for most videos, so the two-input path
         // is the common one.
+        //
+        // `-ss` before `-i` is an input seek: ffmpeg discards that much of the source before
+        // encoding, so the written segments start at t=0. A room seek then stays valid, and a
+        // 37-minute preshow does not have to upload a trimmed Theora over the 128 MB cap.
+        string seek = item.StartSeconds > 0.05
+            ? $"-ss {item.StartSeconds.ToString(CultureInfo.InvariantCulture)} "
+            : "";
         string inputs = targets.Count > 1
-            ? $"-i \"{proxy.UrlFor(0)}\" -i \"{proxy.UrlFor(1)}\" -map 0:v:0 -map 1:a:0"
-            : $"-i \"{proxy.UrlFor(0)}\"";
+            ? $"{seek}-i \"{proxy.UrlFor(0)}\" {seek}-i \"{proxy.UrlFor(1)}\" -map 0:v:0 -map 1:a:0"
+            : $"{seek}-i \"{proxy.UrlFor(0)}\"";
         string pattern = System.IO.Path.Combine(absDir, "seg_%04d.ogv");
         string args =
             $"-y -loglevel error -threads {EncodeThreads} {inputs} " +
@@ -1087,6 +1141,7 @@ public partial class VideoManager : Node
         if (item == null) return;
         Toast?.Invoke($"▶ {item.Title}", 3);
         _startedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (item.Exclusive) return;
         Broadcast(VideoNet.Play(item.Url, _startedUnixMs));
         TrySeekPlaying();
     }
@@ -1122,6 +1177,7 @@ public partial class VideoManager : Node
 
     private void ReplyState()
     {
+        if (NowPlaying is { Exclusive: true }) return;
         if (NowPlaying == null && _queue.Count == 0) return;
         var upcoming = new string[_queue.Count];
         for (int i = 0; i < _queue.Count; i++) upcoming[i] = _queue[i].Url;
@@ -1130,7 +1186,7 @@ public partial class VideoManager : Node
 
     private void ApplySnapshot(VideoNet.Msg msg)
     {
-        if (msg == null) return;
+        if (msg == null || NowPlaying is { Exclusive: true }) return;
         if (!string.IsNullOrEmpty(msg.Url) && AlreadyHas(msg.Url) && NowPlaying != null)
         {
             RememberSeek(msg.Url, msg.StartedUnixMs);

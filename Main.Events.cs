@@ -11,6 +11,10 @@ public partial class Main
 {
     private EventAdminPanel _eventAdmin;
     private EventShowPlayer _eventShow;
+    /// Watch-party event currently driving the room's VideoManager. Concert shows still use
+    /// `_eventShow`; a video event must not spawn EventShowPlayer (it would toast-retry forever
+    /// looking for artist/animation/audio).
+    private string _eventVideoId;
     private LiveEvent[] _liveEvents = Array.Empty<LiveEvent>();
     private double _eventPoll, _eventListPoll;
     /// Backoff for rebuilding a show that failed to load. Cleared on a successful build and
@@ -59,7 +63,8 @@ public partial class Main
     /// "Disable effects" is the exception — it lives in settings and survives the trip.
     private void SyncEventPresence()
     {
-        bool inEvent = _inWorld && _eventShow != null && GodotObject.IsInstanceValid(_eventShow);
+        bool inEvent = _inWorld && ((_eventShow != null && GodotObject.IsInstanceValid(_eventShow))
+            || !string.IsNullOrEmpty(_eventVideoId));
         _quickMenu.SetInEvent(inEvent);
         _mainMenu.EventsBanner.Suppressed = inEvent;
         if (!inEvent && (_eventHidePlayers || _eventMutePlayers)) {
@@ -69,7 +74,7 @@ public partial class Main
         }
         // Leaving the world clears the load-failure backoff: the next visit is a fresh start,
         // not a continuation of whatever went wrong last time.
-        if (!_inWorld) { _eventShowRetryAt = 0; _eventShowAttempt = 0; }
+        if (!_inWorld) { _eventShowRetryAt = 0; _eventShowAttempt = 0; _eventVideoId = null; }
         if (inEvent) _quickMenu.EventOptions.SetState(_eventHidePlayers, _eventMutePlayers,
             !UI.DeviceProfile.Settings.EventEffects, UI.DeviceProfile.Settings.EventFullQuality);
     }
@@ -105,7 +110,14 @@ public partial class Main
             }
             if (_eventShow != null && (!GodotObject.IsInstanceValid(_eventShow) || !_eventShow.IsInsideTree())) _eventShow = null;
             if (_eventPreview) return;
-            if (_eventShow != null) {
+            if (!string.IsNullOrEmpty(_eventVideoId)) {
+                if (!_inWorld || _currentWorldId == null) { _eventVideoId = null; return; }
+                var videoState = await api.GetEventAsync(_eventVideoId);
+                if (_api != api) return;
+                if (videoState.WorldId != _currentWorldId) { _eventVideoId = null; return; }
+                if (!videoState.IsOpen) { StopEventPlayer(); _inWorldHud?.Toast("The event has ended.", 4); EnterHome(); return; }
+                DriveEventVideo(videoState);
+            } else if (_eventShow != null) {
                 var player = _eventShow; ulong before = Time.GetTicksMsec(); var state = await api.GetEventAsync(player.EventId);
                 if (player != _eventShow || !GodotObject.IsInstanceValid(player)) return;
                 _eventShow.ApplyState(state, Time.GetTicksMsec() - before);
@@ -116,6 +128,7 @@ public partial class Main
                     string worldId = _currentWorldId; var world = _worldRoot;
                     state = await api.GetEventAsync(state.Id);
                     if (_api != api || world != _worldRoot || worldId != _currentWorldId || !state.IsOpen) return;
+                    if (state.Config?.IsVideoEvent == true) { DriveEventVideo(state); return; }
                     _eventShow = new EventShowPlayer { Name = "LiveEventShow",
                         EffectsEnabled = UI.DeviceProfile.Settings.EventEffects,
                         ForceFullQuality = UI.DeviceProfile.Settings.EventFullQuality };
@@ -164,8 +177,39 @@ public partial class Main
     private void StopEventPlayer()
     {
         _eventPreview = false;
+        _eventVideoId = null;
+        _videoManager?.Clear(fromNet: true);
         if (GodotObject.IsInstanceValid(_eventShow)) { _eventShow.GetParent()?.RemoveChild(_eventShow); _eventShow.QueueFree(); }
         _eventShow = null;
+    }
+
+    /// Cinema watch-party: play the preshow (looped, optionally input-seeked) until the
+    /// scheduled wall clock or an admin `play`, then exclusive-play the live URL.
+    private void DriveEventVideo(LiveEvent state)
+    {
+        if (state?.Config == null || !state.Config.IsVideoEvent) return;
+        _eventVideoId = state.Id;
+        if (_videoManager == null || !_videoManager.HasScreens)
+        {
+            _inWorldHud?.Toast("This venue has no video screen.", 6);
+            return;
+        }
+        bool live = EventVideoIsLive(state);
+        string url = live || string.IsNullOrEmpty(state.Config.PreshowVideoUrl)
+            ? state.Config.VideoUrl
+            : state.Config.PreshowVideoUrl;
+        double start = live ? 0 : Math.Max(0, state.Config.PreshowStartSeconds);
+        bool loop = !live && !string.IsNullOrEmpty(state.Config.PreshowVideoUrl);
+        _videoManager.PlayExclusive(url, "event", start, loop);
+    }
+
+    private static bool EventVideoIsLive(LiveEvent state)
+    {
+        if (string.Equals(state.Status, "live", StringComparison.OrdinalIgnoreCase)) return true;
+        long scheduled = state.Config?.ScheduledStart ?? 0;
+        if (scheduled <= 0) return false;
+        long now = state.ServerTime > 0 ? state.ServerTime : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return now >= scheduled;
     }
     private async Task JoinEvent(string id)
     {
@@ -185,6 +229,12 @@ public partial class Main
         if (state == null) { StopEventPlayer(); return; }
         if (_currentWorldId != state.WorldId || !_inWorld) { _eventAdmin.Status("Visit this event venue first."); return; }
         StopEventPlayer(); _eventPreview = true;
+        if (state.Config?.IsVideoEvent == true)
+        {
+            DriveEventVideo(state);
+            _eventAdmin.Status("Video event preview: the room screen is playing the scheduled feed.");
+            return;
+        }
         _eventShow = new EventShowPlayer { Name = "StaffShowPreview", Preview = true, PreviewPlaying = true, PreviewPosition = seconds }; _worldRoot.AddChild(_eventShow);
         _eventShow.Failed += _eventAdmin.Status;
         await _eventShow.Prepare(_api, state, _worldRoot);
