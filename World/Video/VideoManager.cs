@@ -51,6 +51,14 @@ public partial class VideoManager : Node
     private double _seekToSec = -1;
 
     public Item NowPlaying { get; private set; }
+    private string _exclusiveFailedUrl;
+    private ulong _exclusiveRetryAt;
+    private int _encodeHeight;
+    private bool _encodeLive;
+    private int _slowSegs;
+    private int _okSegs;
+    private ulong _lastSegAt;
+    private bool _adapting;
 
     private bool _controlsLocked;
     /// Event watch-party: the room screen is not a public queue.
@@ -173,8 +181,14 @@ public partial class VideoManager : Node
             && NowPlaying.Loop == loop
             && NowPlaying.Exclusive)
             return;
+        // Event poll used to re-Clear and retry every 2 s after a failed live resolve, which
+        // toasted "failed to load" in a loop and pinned the server transcode slot at 503.
+        if (string.Equals(_exclusiveFailedUrl, url, StringComparison.Ordinal)
+            && Time.GetTicksMsec() < _exclusiveRetryAt)
+            return;
         Clear(fromNet: true);
         ControlsLocked = true;
+        ResetAdapt(live: !loop);
         double skip = Math.Max(0, startSeconds);
         _queue.Add(new Item {
             Url = url, Title = ShortLabel(url), AddedBy = addedBy,
@@ -256,13 +270,20 @@ public partial class VideoManager : Node
         // evidence was a toast the player had already dismissed. logcat is the one channel that
         // works on every platform, so failures go there too.
         GD.PrintErr($"[VideoManager] FAILED {url}: {reason} — {detail}");
-        // Exactly the message the design asked for, shown in the corner.
-        Toast?.Invoke("Video failed to load, loading next", 3);
+        bool exclusive = NowPlaying is { Exclusive: true };
+        if (exclusive)
+        {
+            _exclusiveFailedUrl = url;
+            _exclusiveRetryAt = Time.GetTicksMsec() + 8000;
+            Toast?.Invoke("Waiting for the broadcast…", 4);
+        }
+        else
+            Toast?.Invoke("Video failed to load, loading next", 3);
         // Guard against a double-advance if several screens fail on the same item.
         if (NowPlaying != null && NowPlaying.Url == url)
         {
             NowPlaying = null;
-            _ = Advance();
+            if (!exclusive) _ = Advance();
         }
     }
 
@@ -442,7 +463,7 @@ public partial class VideoManager : Node
         JsonElement session;
         try
         {
-            session = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, MaxHeight);
+            session = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, EncodeHeight);
         }
         catch (Exception e)
         {
@@ -493,7 +514,7 @@ public partial class VideoManager : Node
                 bool jobDone;
                 try
                 {
-                    var s = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, MaxHeight);
+                    var s = await _api.StartVideoSessionAsync(item.Url, item.StartSeconds, EncodeHeight);
                     available = s.TryGetProperty("segments", out var sg) && sg.TryGetInt32(out int v) ? v : 0;
                     jobDone = s.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.True;
                 }
@@ -604,13 +625,92 @@ public partial class VideoManager : Node
     /// it is deliberately short — long enough that the per-segment encoder startup cost stays
     /// amortised, short enough that the screen lights up almost immediately.
     private const int SegmentSeconds = 6;
-    /// Vertical cap for the transcode, from the graphics tier: High 1080p, Medium 720p, Low 480p.
+    /// Graphics-tier ceiling. Adaptive encode starts at or below this and drops if Theora
+    /// cannot hold realtime — live 720p60 on a mid-range GPU is how the picture stuttered.
     private static int MaxHeight => DeviceProfile.Current switch
     {
         DeviceProfile.Tier.High => 1080,
         DeviceProfile.Tier.Medium => 720,
         _ => 480,
     };
+    private int EncodeHeight => _encodeHeight > 0 ? Math.Min(_encodeHeight, MaxHeight) : MaxHeight;
+
+    private void ResetAdapt(bool live)
+    {
+        _encodeLive = live;
+        _encodeHeight = live ? Math.Min(480, MaxHeight) : MaxHeight;
+        _slowSegs = _okSegs = 0;
+        _lastSegAt = 0;
+        _adapting = false;
+    }
+
+    private void NoteSegmentTiming()
+    {
+        ulong now = Time.GetTicksMsec();
+        if (_lastSegAt == 0) { _lastSegAt = now; return; }
+        double dt = (now - _lastSegAt) / 1000.0;
+        _lastSegAt = now;
+        if (dt > SegmentSeconds + 2.5) { _slowSegs++; _okSegs = 0; }
+        else { _okSegs++; _slowSegs = 0; }
+        if (_slowSegs >= 2) RequestDrop();
+        else if (!_encodeLive && _okSegs >= 12) RequestClimb();
+    }
+
+    private static int StepBelow(int height)
+    {
+        if (height > 720) return 720;
+        if (height > 480) return 480;
+        if (height > 360) return 360;
+        return 0;
+    }
+
+    private static int StepAbove(int height)
+    {
+        if (height < 480) return 480;
+        if (height < 720) return 720;
+        if (height < 1080) return 1080;
+        return height;
+    }
+
+    private void RequestDrop()
+    {
+        int next = StepBelow(EncodeHeight);
+        if (next < 360 || _adapting) return;
+        GD.Print($"[VideoManager] encoder behind, {EncodeHeight}p → {next}p");
+        Toast?.Invoke($"Lowering video to {next}p to keep it smooth", 3);
+        RestartExclusiveAt(next);
+    }
+
+    private void RequestClimb()
+    {
+        int next = Math.Min(StepAbove(EncodeHeight), MaxHeight);
+        if (next <= EncodeHeight || _adapting) return;
+        _okSegs = 0;
+        GD.Print($"[VideoManager] encoder keeping up, {EncodeHeight}p → {next}p");
+        RestartExclusiveAt(next);
+    }
+
+    private void RestartExclusiveAt(int height)
+    {
+        if (NowPlaying is not { Exclusive: true } cur) { _encodeHeight = height; return; }
+        _adapting = true;
+        var item = new Item
+        {
+            Url = cur.Url, Title = cur.Title, AddedBy = cur.AddedBy,
+            ThumbnailUrl = cur.ThumbnailUrl,
+            StartSeconds = cur.BaseStartSeconds, BaseStartSeconds = cur.BaseStartSeconds,
+            SourceDurationSeconds = cur.SourceDurationSeconds,
+            Loop = cur.Loop, Exclusive = true, WallClockSync = cur.WallClockSync,
+        };
+        _encodeHeight = height;
+        _slowSegs = _okSegs = 0;
+        _lastSegAt = 0;
+        Clear(fromNet: true);
+        ControlsLocked = true;
+        _queue.Add(item);
+        _adapting = false;
+        if (!_busy) _ = Advance();
+    }
     /// How many encoding threads ffmpeg may use. Capped so the encoder cannot claim every core
     /// and starve the game's render thread — the single most common cause of the "video makes
     /// the game lag" reports. High gets more threads so 1080p Theora can still fill the buffer.
@@ -623,6 +723,7 @@ public partial class VideoManager : Node
     private const int LowWaterSegments = 2;
 
     private System.Diagnostics.Process _transcode;
+    private System.Diagnostics.Process _ytdlp;
     private LoopbackMediaProxy _proxy;
 
     /// Transcode locally with ffmpeg, emitting short .ogv segments and starting playback on the
@@ -649,6 +750,12 @@ public partial class VideoManager : Node
         var (videoUrl, audioUrl) = await ResolveDirectStreamsAsync(item.Url);
         if (gen != _generation) return false;
         if (string.IsNullOrEmpty(videoUrl)) return false;
+
+        // Live YouTube is HLS. The loopback proxy only fetches one URL; ffmpeg then tries to
+        // follow googlevideo hostnames itself and the static build SIGSEGVs, which is "ffmpeg
+        // produced no segments" with an empty stderr. Pipe yt-dlp (or a system ffmpeg) instead.
+        if (IsHlsUrl(videoUrl) || IsHlsUrl(audioUrl))
+            return await TryHlsTranscodeAsync(item, gen, videoUrl);
 
         // ffmpeg is static-linked and segfaults on any hostname (see LoopbackMediaProxy), so
         // it is only ever pointed at 127.0.0.1 and this relay fetches the real thing.
@@ -694,7 +801,8 @@ public partial class VideoManager : Node
             $"-y -loglevel error -threads {EncodeThreads} {inputs} " +
             // Even dimensions are required by yuv420p; the min() keeps portrait/short sources
             // from being upscaled.
-            $"-vf \"scale=-2:min({MaxHeight}\\,ih)\" -pix_fmt yuv420p " +
+            $"{((_encodeLive || EncodeHeight <= 480) ? "-r 30 " : "")}" +
+            $"-vf \"scale=-2:min({EncodeHeight}\\,ih)\" -pix_fmt yuv420p " +
             $"-c:v libtheora -q:v 5 -threads {EncodeThreads} -c:a libvorbis -q:a 4 " +
             $"-f segment -segment_time {SegmentSeconds} -segment_format ogg -reset_timestamps 1 " +
             $"\"{pattern}\"";
@@ -791,6 +899,8 @@ public partial class VideoManager : Node
                         .CallDeferred();
                 startedAny = true;
                 next++;
+                if (next > 1) Callable.From(NoteSegmentTiming).CallDeferred();
+                else _lastSegAt = Time.GetTicksMsec();
                 // Playback has begun — release the caller so the queue stops being blocked.
                 if (next == 1)
                 {
@@ -900,6 +1010,130 @@ public partial class VideoManager : Node
         return 0;
     }
 
+    private static bool IsHlsUrl(string url) =>
+        !string.IsNullOrEmpty(url) &&
+        (url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
+         || url.Contains("/manifest/hls", StringComparison.OrdinalIgnoreCase));
+
+    private static string FindSystemFfmpeg()
+    {
+        if (OS.GetName() == "Windows") return null;
+        foreach (var c in new[] { "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg" })
+            try { if (System.IO.File.Exists(c)) return c; } catch { }
+        return null;
+    }
+
+    /// Live HLS cannot go through LoopbackMediaProxy: ffmpeg has to fetch the playlist's
+    /// googlevideo hosts itself, and the bundled static build segfaults on any hostname.
+    /// Prefer a dynamically-linked system ffmpeg; otherwise pipe yt-dlp stdout into it.
+    private async Task<bool> TryHlsTranscodeAsync(Item item, int gen, string hlsUrl)
+    {
+        string absDir;
+        try
+        {
+            DirAccess.MakeDirRecursiveAbsolute("user://video-cache/segments");
+            absDir = ProjectSettings.GlobalizePath("user://video-cache/segments");
+            foreach (var f in System.IO.Directory.GetFiles(absDir, "seg_*.ogv"))
+                try { System.IO.File.Delete(f); } catch { }
+            _cleanupCursor = 0;
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] HLS segment dir prep failed: {ex.Message}");
+            return false;
+        }
+
+        string pattern = System.IO.Path.Combine(absDir, "seg_%04d.ogv");
+        int h = EncodeHeight;
+        string scale = $"{((_encodeLive || h <= 480) ? "-r 30 " : "")}" +
+                       $"-vf \"scale=-2:min({h}\\,ih)\" -pix_fmt yuv420p " +
+                       $"-c:v libtheora -q:v 5 -threads {EncodeThreads} -c:a libvorbis -q:a 4 " +
+                       $"-f segment -segment_time {SegmentSeconds} -segment_format ogg -reset_timestamps 1 " +
+                       $"\"{pattern}\"";
+
+        KillTranscode();
+        string systemFfmpeg = FindSystemFfmpeg();
+        try
+        {
+            if (systemFfmpeg != null)
+            {
+                GD.Print($"[VideoManager] HLS via system ffmpeg ({EncodeHeight}p)");
+                _transcode = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = systemFfmpeg,
+                    Arguments = $"-y -loglevel error -threads {EncodeThreads} " +
+                                "-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 " +
+                                $"-i \"{hlsUrl}\" {scale}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                });
+            }
+            else
+            {
+                string ytdlpPath = await Task.Run(() => FindBinary("yt-dlp"));
+                string bundled = await Task.Run(() => FindBinary("ffmpeg"));
+                if (ytdlpPath == null || bundled == null) return false;
+                GD.Print($"[VideoManager] HLS via yt-dlp pipe ({EncodeHeight}p)");
+                var ytdlpPsi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ytdlpPath,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                foreach (var a in new[]
+                {
+                    "--no-warnings", "--no-playlist",
+                    "--extractor-args", "youtube:player_client=android,ios,tv_embedded,web",
+                    "-f", $"301/300/94/93/best[height<={EncodeHeight}]/best",
+                    "-o", "-", item.Url,
+                }) ytdlpPsi.ArgumentList.Add(a);
+                _ytdlp = System.Diagnostics.Process.Start(ytdlpPsi);
+                if (_ytdlp == null) return false;
+                _transcode = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = bundled,
+                    Arguments = $"-y -loglevel error -threads {EncodeThreads} -i pipe:0 {scale}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardError = true,
+                });
+                if (_transcode == null) { KillTranscode(); return false; }
+                var ytdlp = _ytdlp;
+                var ff = _transcode;
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        ytdlp.StandardOutput.BaseStream.CopyTo(ff.StandardInput.BaseStream);
+                        ff.StandardInput.Close();
+                    }
+                    catch { }
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.PrintErr($"[VideoManager] HLS ffmpeg start failed: {ex.Message}");
+            KillTranscode();
+            return false;
+        }
+        if (_transcode == null) { KillTranscode(); return false; }
+        try { _transcode.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; }
+        catch { }
+
+        PruneScreens();
+        foreach (var s in _screens) { s.BeginPlaylist(item.Url); s.ShowPreparing(); }
+        Toast?.Invoke($"Preparing {item.Title}…", 3);
+        var firstSegment = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = PumpSegmentsAsync(absDir, gen, item, firstSegment);
+        return await firstSegment.Task;
+    }
+
     /// Ask yt-dlp for direct CDN URLs without downloading. Returns (video, audio); audio is null
     /// when the chosen format is already muxed. A URL that is plainly a media file is passed
     /// straight through, so yt-dlp is not needed at all for direct links.
@@ -950,6 +1184,13 @@ public partial class VideoManager : Node
         {
             try { if (!p.HasExited) p.Kill(true); } catch { }
             try { p.Dispose(); } catch { }
+        }
+        var y = _ytdlp;
+        _ytdlp = null;
+        if (y != null)
+        {
+            try { if (!y.HasExited) y.Kill(true); } catch { }
+            try { y.Dispose(); } catch { }
         }
 
         var proxy = _proxy;
@@ -1230,6 +1471,7 @@ public partial class VideoManager : Node
         if (item == null) return;
         Toast?.Invoke($"▶ {item.Title}", 3);
         _startedUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        _exclusiveFailedUrl = null;
         if (item.Exclusive) return;
         Broadcast(VideoNet.Play(item.Url, _startedUnixMs));
         TrySeekPlaying();
