@@ -15,6 +15,9 @@ public partial class ChatOverlay : CanvasLayer
     private const int MaxLines = 60;
     private const double FadeAfterSeconds = 8.0;
     private const double FadeDuration = 1.0;
+    private const float MaxFeedHeight = 304f;
+    private const float FeedBottom = 56f;
+    private const float FeedWidth = 624f;
 
     public event Action<string> MessageSubmitted;
     /// Fired whenever the input closes (submit or Escape), so the caller can restore mouse/controls.
@@ -35,16 +38,18 @@ public partial class ChatOverlay : CanvasLayer
         _scroll = new ScrollContainer
         {
             AnchorLeft = 0, AnchorTop = 1, AnchorRight = 0, AnchorBottom = 1,
-            OffsetLeft = 16, OffsetTop = -360, OffsetRight = 640, OffsetBottom = -56,
+            OffsetLeft = 16, OffsetTop = -FeedBottom, OffsetRight = 16 + FeedWidth, OffsetBottom = -FeedBottom,
             HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
             VerticalScrollMode = ScrollContainer.ScrollMode.ShowNever,
             MouseFilter = Control.MouseFilterEnum.Ignore,
+            ClipContents = true,
         };
         AddChild(_scroll);
 
         _feed = new VBoxContainer
         {
-            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(FeedWidth, 0),
+            SizeFlagsHorizontal = Control.SizeFlags.Fill,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
         _feed.AddThemeConstantOverride("separation", 2);
@@ -70,7 +75,7 @@ public partial class ChatOverlay : CanvasLayer
         {
             AnchorLeft = 0, AnchorTop = 0, AnchorRight = 1, AnchorBottom = 1,
             OffsetLeft = 8, OffsetRight = -8,
-            PlaceholderText = "Say something…  (Enter to send, Esc to close)",
+            PlaceholderText = "Say something…  (/w user message for a DM)",
             MaxLength = 200,
         };
         _input.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 1f));
@@ -88,7 +93,7 @@ public partial class ChatOverlay : CanvasLayer
         _scroll.VerticalScrollMode = ScrollContainer.ScrollMode.Auto;
         _input.Text = "";
         _input.GrabFocus();
-        ScrollToBottom();
+        FitFeed();
     }
 
     public void CloseInput()
@@ -100,7 +105,7 @@ public partial class ChatOverlay : CanvasLayer
         _scroll.MouseFilter = Control.MouseFilterEnum.Ignore;
         _scroll.VerticalScrollMode = ScrollContainer.ScrollMode.ShowNever;
         _input.ReleaseFocus();
-        ScrollToBottom();
+        FitFeed();
         Closed?.Invoke();
     }
 
@@ -168,17 +173,31 @@ public partial class ChatOverlay : CanvasLayer
             _lines[0].label.QueueFree();
             _lines.RemoveAt(0);
         }
-        if (_stickToBottom || !IsTyping) ScrollToBottom();
+        if (_stickToBottom || !IsTyping) FitFeed();
+        else FitFeed(scrollToBottom: false);
     }
 
-    private void ScrollToBottom()
+    /// Hug the bottom-left. One join line is one line tall — a fixed 360px box was putting
+    /// the first message halfway up the screen.
+    private void FitFeed(bool scrollToBottom = true)
     {
         Callable.From(() =>
         {
-            if (!GodotObject.IsInstanceValid(_scroll)) return;
-            var bar = _scroll.GetVScrollBar();
-            _scroll.ScrollVertical = (int)bar.MaxValue;
-            _stickToBottom = true;
+            if (!GodotObject.IsInstanceValid(_scroll) || !GodotObject.IsInstanceValid(_feed)) return;
+            float content = _lines.Count == 0 ? 0 : _feed.GetCombinedMinimumSize().Y;
+            float h = Math.Min(content, MaxFeedHeight);
+            _scroll.OffsetTop = -FeedBottom - h;
+            _scroll.OffsetBottom = -FeedBottom;
+            bool overflow = content > MaxFeedHeight + 1;
+            _scroll.VerticalScrollMode = IsTyping && overflow
+                ? ScrollContainer.ScrollMode.Auto
+                : ScrollContainer.ScrollMode.ShowNever;
+            if (scrollToBottom)
+            {
+                var bar = _scroll.GetVScrollBar();
+                _scroll.ScrollVertical = (int)bar.MaxValue;
+                _stickToBottom = true;
+            }
         }).CallDeferred();
     }
 

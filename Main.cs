@@ -140,6 +140,17 @@ public partial class Main : Node3D
 
         SerikaSocial.World.WorldLoader.GameModeRequested += StartGameSession;
 
+        // Checkpoint pads (SERIKA_CHECK<n>) move the respawn point as the player advances, so
+        // both the engine void respawn and the manual Respawn action return to the last pad —
+        // the generic net under every user-made parkour or race world.
+        SerikaSocial.World.WorldLoader.CheckpointReached += pos =>
+        {
+            _spawnPos = pos;
+            _inWorldHud?.Toast("Checkpoint", 1.5);
+        };
+        SerikaSocial.World.WorldLoader.CheckpointRecovered += () =>
+            _inWorldHud?.Toast("Back to the last checkpoint", 1.5);
+
         // Detect the device tier and apply saved graphics settings before the first frame, so a
         // Quest never renders one frame at full desktop quality. Also seeds persisted control/
         // audio prefs used below.
@@ -623,10 +634,51 @@ public partial class Main : Node3D
 
     private void OnChatSubmitted(string text)
     {
+        if (TrySendDirectMessage(text)) return;
         // Echo locally, then send to the room (if connected).
         _chat.AddChat(_username, text);
         _transport?.SendChat(text);
     }
+
+    /// `/w user message` or `/dm user message` — a private thread stored on the API
+    /// (same rows the Hub Friends page reads). World chat is unchanged.
+    private bool TrySendDirectMessage(string text)
+    {
+        if (text.Length < 4 || _api == null) return false;
+        var lower = text.ToLowerInvariant();
+        if (!lower.StartsWith("/w ") && !lower.StartsWith("/dm ")) return false;
+        var rest = text.Substring(text.IndexOf(' ') + 1).Trim();
+        var space = rest.IndexOf(' ');
+        if (space <= 0) { _chat.AddSystem("Usage: /w username message"); return true; }
+        var who = rest.Substring(0, space);
+        var body = rest.Substring(space + 1).Trim();
+        if (body.Length == 0) { _chat.AddSystem("Usage: /w username message"); return true; }
+        _ = SendWhisperAsync(who, body);
+        return true;
+    }
+
+    private async System.Threading.Tasks.Task SendWhisperAsync(string username, string body)
+    {
+        try
+        {
+            var hits = await _api.SearchUsersAsync(username);
+            var target = hits.Find(u => string.Equals(u.Username, username, StringComparison.OrdinalIgnoreCase))
+                         ?? (hits.Count == 1 ? hits[0] : null);
+            if (target == null || string.IsNullOrEmpty(target.Id))
+            {
+                CallDeferred(nameof(WhisperStatus), $"No user named {username}.");
+                return;
+            }
+            await _api.SendDirectMessageAsync(target.Id, body);
+            CallDeferred(nameof(WhisperStatus), $"(to {target.Username}) {body}");
+        }
+        catch (Exception e)
+        {
+            CallDeferred(nameof(WhisperStatus), $"Couldn't send DM: {e.Message}");
+        }
+    }
+
+    private void WhisperStatus(string line) => _chat.AddSystem(line);
 
     /// Restore control/mouse after the chat box closes (whether via Enter or Escape).
     private void OnChatClosed() => UI.InputMode.Release(UI.InputMode.Chat);

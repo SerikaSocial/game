@@ -657,6 +657,12 @@ public sealed partial class ApiClient
 
     /// Invite a user to the instance we're in. Throws with the server's error string on refusal
     /// (`rate_limited`, `blocked`, `not_permitted`, …) so the caller can show a real reason.
+    public async Task SendDirectMessageAsync(string userId, string body)
+    {
+        var json = JsonSerializer.Serialize(new { body });
+        await PostAuthedAsync($"/v1/social/dms/{Uri.EscapeDataString(userId)}", json);
+    }
+
     public async Task InviteToInstanceAsync(string targetUserId, string instanceId)
     {
         var body = JsonSerializer.Serialize(new { targetUserId, instanceId });
