@@ -282,6 +282,11 @@ public partial class Main : Node3D
                 args.GetValueOrDefault("wait", "8"));
             return;
         }
+        if (args.ContainsKey("serika-updatetest"))
+        {
+            UpdateDiagnostic.Run();
+            return;
+        }
         if (args.ContainsKey("serika-smoke"))
         {
             _smoke = true;

@@ -31,8 +31,22 @@ namespace SerikaSocial;
 /// discarded — we are about to overwrite and execute this binary, so it is not optional.
 public partial class Updater : CanvasLayer
 {
-    private const string CDN_URL = "https://cdn-social.ado.ink";
-    private const string VersionPath = CDN_URL + "/version.txt";
+    private const string DefaultCdnUrl = "https://cdn-social.ado.ink";
+
+    /// Overridable so the update path can actually be exercised end to end against a local
+    /// server. Every other part of this class is testable in isolation; the one thing that
+    /// mattered — does a real build download, verify and swap itself — was not, which is how a
+    /// swap that could never succeed on Windows shipped. Unset in production.
+    private static string CDN_URL
+    {
+        get
+        {
+            string o = OS.GetEnvironment("SERIKA_CDN_URL");
+            return string.IsNullOrWhiteSpace(o) ? DefaultCdnUrl : o.TrimEnd('/');
+        }
+    }
+
+    private static string VersionPath => CDN_URL + "/version.txt";
 
     public string CurrentVersion { get; set; } = "0.0.0";
     public event Action<string> UpdateAvailable;
@@ -46,21 +60,25 @@ public partial class Updater : CanvasLayer
     private string _statusText = "";
     private string _errorText = "";
 
-    // UI, all owned by _card.
-    private Control _root;
-    private PanelContainer _card;
-    private Label _title;
-    private Label _body;
-    private ProgressBar _progress;
-    private Label _detail;
-    private HBoxContainer _actions;
+    // Presentation lives in UpdateScreen (a full screen at Layer 210). This class owns the
+    // check, download, verification and staging; it never builds a control itself.
+    //
+    // Main constructs the screen and assigns it here, so the screen goes through the same
+    // AddUi routing as every other layer — which is what puts it on the VR panel in VR.
+    public UpdateScreen Screen { get; set; }
+    private UpdateScreen _screen => Screen;
 
     private bool _busy;
     private float _sweep;
 
+    // Cancels an in-flight download. Without this, dismissing the screen mid-download let the
+    // task run to completion and then quit the game out from under the player.
+    private CancellationTokenSource _cts;
+
     public override void _Ready()
     {
-        Layer = 200;
+        // This node no longer draws anything — UpdateScreen owns the pixels. It stays a
+        // CanvasLayer purely so Main can keep treating it as one of the UI layers.
         Visible = false;
         SetProcess(false);
     }
@@ -174,34 +192,43 @@ public partial class Updater : CanvasLayer
     private void ShowUpdatePrompt(string latestVersion)
     {
         UpdateAvailable?.Invoke(latestVersion);
-        BuildCard();
+        _screen.Present();
 
-        _title.Text = "Update available";
-        _body.Text = $"Serika Social v{latestVersion} is ready to install.\n"
-                   + $"You're on v{CurrentVersion}.";
-        _progress.Visible = false;
-        _detail.Visible = false;
+        _screen.Title = "Update available";
+        string body = $"Serika Social v{latestVersion} is ready to install.\n"
+                    + $"You're on v{CurrentVersion}.";
+        _screen.ProgressVisible = false;
+        _screen.DetailVisible = false;
 
-        ClearActions();
+        _screen.ClearActions();
         if (CanSelfUpdate)
         {
+            _screen.Body = body;
+
             var later = Brand.Ghost_(new Button { Text = "Later" });
             later.Pressed += Dismiss;
-            _actions.AddChild(later);
+            _screen.AddAction(later);
 
             var now = Brand.Primary_(new Button { Text = "Update now" });
             now.Pressed += () => _ = DownloadAndInstall(latestVersion);
-            _actions.AddChild(now);
+            _screen.AddAction(now);
+
+            // E2E harness: SERIKA_AUTO_UPDATE=1 accepts the prompt without a click, so the
+            // download → verify → stage → swap → relaunch path can be driven unattended
+            // against a local CDN. Unset in production — a player always sees the choice.
+            if (OS.GetEnvironment("SERIKA_AUTO_UPDATE") == "1")
+                _ = DownloadAndInstall(latestVersion);
         }
         else
         {
-            _body.Text += IsAndroid
+            _screen.Body = body + (IsAndroid
                 ? "\n\nUpdates on this platform install from the download page."
                 : "\n\nThis install can't update itself (it's read-only or managed by your "
-                  + "system). Grab the new build from the download page.";
+                  + "system). Grab the new build from the download page.");
+
             var later = Brand.Ghost_(new Button { Text = "Later" });
             later.Pressed += Dismiss;
-            _actions.AddChild(later);
+            _screen.AddAction(later);
 
             var open = Brand.Primary_(new Button { Text = "Open download page" });
             open.Pressed += () =>
@@ -209,85 +236,18 @@ public partial class Updater : CanvasLayer
                 OS.ShellOpen("https://social.serika.dev/#download");
                 Dismiss();
             };
-            _actions.AddChild(open);
+            _screen.AddAction(open);
         }
-
-        Visible = true;
-    }
-
-    /// The whole update surface is one branded card over a dimmed backdrop — same panel
-    /// language as the rest of the client. Built once, reused across states.
-    private void BuildCard()
-    {
-        if (_root != null) return;
-
-        _root = new Control { MouseFilter = Control.MouseFilterEnum.Stop };
-        _root.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        AddChild(_root);
-
-        var dim = new ColorRect { Color = new Color(0, 0, 0, 0.62f) };
-        dim.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        _root.AddChild(dim);
-
-        _card = new PanelContainer();
-        _card.AddThemeStyleboxOverride("panel", Brand.Panel(Brand.Bg1, 18));
-        _card.SetAnchorsPreset(Control.LayoutPreset.Center);
-        _card.CustomMinimumSize = new Vector2(460, 0);
-        _root.AddChild(_card);
-
-        var pad = new MarginContainer();
-        foreach (var side in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" })
-            pad.AddThemeConstantOverride(side, 28);
-        _card.AddChild(pad);
-
-        var col = new VBoxContainer();
-        col.AddThemeConstantOverride("separation", 14);
-        pad.AddChild(col);
-
-        _title = new Label { Text = "Update" };
-        _title.AddThemeFontSizeOverride("font_size", Brand.Fs(22));
-        _title.AddThemeColorOverride("font_color", Brand.TextHi);
-        col.AddChild(_title);
-
-        _body = new Label { AutowrapMode = TextServer.AutowrapMode.WordSmart };
-        _body.AddThemeFontSizeOverride("font_size", Brand.Fs(14));
-        _body.AddThemeColorOverride("font_color", Brand.TextMid);
-        col.AddChild(_body);
-
-        _progress = new ProgressBar
-        {
-            CustomMinimumSize = new Vector2(0, 10),
-            MinValue = 0,
-            MaxValue = 100,
-            Value = 0,
-            ShowPercentage = false,
-        };
-        col.AddChild(_progress);
-
-        _detail = new Label();
-        _detail.AddThemeFontSizeOverride("font_size", Brand.Fs(12));
-        _detail.AddThemeColorOverride("font_color", Brand.TextDim);
-        col.AddChild(_detail);
-
-        _actions = new HBoxContainer { Alignment = BoxContainer.AlignmentMode.End };
-        _actions.AddThemeConstantOverride("separation", 10);
-        col.AddChild(_actions);
-    }
-
-    private void ClearActions()
-    {
-        foreach (var c in _actions.GetChildren())
-            c.QueueFree();
     }
 
     private void Dismiss()
     {
-        Visible = false;
+        // Abort any download in flight. Dismissing used to only hide the UI: the task kept
+        // going, installed, and quit the game some minutes later with no warning.
+        try { _cts?.Cancel(); } catch { /* already disposed */ }
+
         SetProcess(false);
-        _root?.QueueFree();
-        _root = null;
-        _card = null; _title = null; _body = null;
-        _progress = null; _detail = null; _actions = null;
+        _screen?.Close();
     }
 
     // ── Download ────────────────────────────────────────────────────────────────────
@@ -303,12 +263,19 @@ public partial class Updater : CanvasLayer
         if (_busy) return;
         _busy = true;
 
-        _title.Text = $"Updating to v{version}";
-        _body.Text = "Downloading…";
-        _progress.Visible = true;
-        _detail.Visible = true;
-        _detail.Text = "";
-        ClearActions();
+        _screen.Title = $"Updating to v{version}";
+        _screen.Body = "Downloading…";
+        _screen.ProgressVisible = true;
+        _screen.DetailVisible = true;
+        _screen.Detail = "";
+        _screen.ClearActions();
+
+        // Cancelling is only meaningful while bytes are moving; once the swap is scheduled
+        // there is nothing left to stop.
+        var cancel = Brand.Ghost_(new Button { Text = "Cancel" });
+        cancel.Pressed += Dismiss;
+        _screen.AddAction(cancel);
+
         SetPhase(Phase.Downloading, "Downloading");
         Interlocked.Exchange(ref _readBytes, 0);
         Interlocked.Exchange(ref _totalBytes, -1);
@@ -317,6 +284,10 @@ public partial class Updater : CanvasLayer
         string file = GetPlatformFile();
         string tmpDir = ProjectSettings.GlobalizePath("user://updates");
         string zipPath = Path.Combine(tmpDir, file);
+
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
 
         try
         {
@@ -327,7 +298,7 @@ public partial class Updater : CanvasLayer
             string expected = await FetchExpectedHash(version, file);
 
             string url = $"{CDN_URL}/releases/{version}/{file}";
-            string actual = await DownloadHashed(url, zipPath);
+            string actual = await DownloadHashed(url, zipPath, ct);
 
             if (!string.IsNullOrEmpty(expected) &&
                 !string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
@@ -337,10 +308,25 @@ public partial class Updater : CanvasLayer
                     $"expected {expected[..16]}…, got {actual[..16]}…");
             }
 
+            // Last chance to bail: past this point a restart is scheduled.
+            ct.ThrowIfCancellationRequested();
+
             SetPhase(Phase.Installing, "Installing");
-            await Task.Run(() => ApplyUpdate(zipPath, tmpDir));
+            await Task.Run(() => ApplyUpdate(zipPath, tmpDir, version), ct);
+
+            // The apply script consumes the staged TREE, not the zip — leaving the archive
+            // behind stranded ~300 MB in user://updates on every successful update.
+            TryDelete(zipPath);
 
             CallDeferred(nameof(QuitGame));
+        }
+        catch (OperationCanceledException)
+        {
+            // The player dismissed the screen. Leave no half-downloaded zip behind, and
+            // emphatically do not quit the game.
+            GD.Print("updater: cancelled by the player");
+            TryDelete(zipPath);
+            _busy = false;
         }
         catch (Exception e)
         {
@@ -380,10 +366,10 @@ public partial class Updater : CanvasLayer
     /// Stream the zip to disk, hashing as we go. Returns the lowercase hex SHA-256.
     /// Publishes progress into the fields _Process reads; the CDN usually omits
     /// Content-Length, in which case _totalBytes stays -1 and the bar goes indeterminate.
-    private async Task<string> DownloadHashed(string url, string zipPath)
+    private async Task<string> DownloadHashed(string url, string zipPath, CancellationToken ct)
     {
         using var http = NewClient(TimeSpan.FromMinutes(30));
-        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
         response.EnsureSuccessStatusCode();
 
         long total = response.Content.Headers.ContentLength ?? -1;
@@ -393,13 +379,13 @@ public partial class Updater : CanvasLayer
         byte[] buffer = new byte[1 << 20];
         long read = 0;
 
-        await using (var input = await response.Content.ReadAsStreamAsync())
+        await using (var input = await response.Content.ReadAsStreamAsync(ct))
         await using (var output = File.Create(zipPath))
         {
             int n;
-            while ((n = await input.ReadAsync(buffer)) > 0)
+            while ((n = await input.ReadAsync(buffer, ct)) > 0)
             {
-                await output.WriteAsync(buffer.AsMemory(0, n));
+                await output.WriteAsync(buffer.AsMemory(0, n), ct);
                 hasher.AppendData(buffer, 0, n);
                 read += n;
                 Interlocked.Exchange(ref _readBytes, read);
@@ -412,9 +398,19 @@ public partial class Updater : CanvasLayer
 
     // ── Install ─────────────────────────────────────────────────────────────────────
 
-    private void ApplyUpdate(string zipPath, string tmpDir)
+    /// Extract the verified zip into a staging directory and hand the swap to an external
+    /// script, which runs after we exit.
+    ///
+    /// **Nothing may be written into the install directory while the game is running.** The
+    /// previous version copied the whole archive over the live install and skipped only the
+    /// running executable. On Windows that cannot work: `SerikaSocial.pck` and the .NET runtime
+    /// DLLs are memory-mapped by this process, so `File.Copy` throws "used by another process"
+    /// partway through and leaves a **half-updated, unbootable install** — new pck, old DLLs.
+    /// Staging first means a failed swap leaves the old install completely intact.
+    private void ApplyUpdate(string zipPath, string tmpDir, string version)
     {
-        string extractDir = Path.Combine(tmpDir, "extracted");
+        string stageRoot = Path.Combine(tmpDir, "staged");
+        string extractDir = Path.Combine(stageRoot, version);
         if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true);
         Directory.CreateDirectory(extractDir);
         System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, extractDir, true);
@@ -428,23 +424,54 @@ public partial class Updater : CanvasLayer
             return;
         }
 
-        // Copy everything except the running executable, which the launcher swaps once
-        // we've exited (you can't overwrite a mapped binary in place on Windows).
-        foreach (var f in Directory.GetFiles(extractDir, "*", SearchOption.AllDirectories))
-        {
-            string rel = Path.GetRelativePath(extractDir, f);
-            string dest = Path.Combine(exeDir, rel);
-            if (Path.GetFullPath(dest) == Path.GetFullPath(exePath)) continue;
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            File.Copy(f, dest, true);
-        }
+        // A release zip may wrap everything in a single top-level folder. Copying that folder
+        // verbatim would nest the whole game one level deep inside the install.
+        string payload = ResolvePayloadRoot(extractDir, exePath);
 
-        string newExe = FindNewExecutable(extractDir, exePath);
-        string launcher = IsWindows
-            ? WriteWindowsLauncher(tmpDir, newExe, exePath)
-            : WriteUnixLauncher(tmpDir, newExe, exePath);
+        // Confirm the payload really is a build before we schedule a swap over the install.
+        FindNewExecutable(payload, exePath);
 
-        Process.Start(new ProcessStartInfo { FileName = launcher, UseShellExecute = true });
+        string script = IsWindows
+            ? WriteWindowsApplyScript(tmpDir, payload, exeDir, exePath)
+            : WriteUnixApplyScript(tmpDir, payload, exeDir, exePath);
+
+        StartDetached(script);
+    }
+
+    /// Zips are published two ways in the wild: files at the root, or wrapped in one folder.
+    /// If the archive root holds exactly one directory and no executable, descend into it.
+    internal static string ResolvePayloadRoot(string extractDir, string exePath)
+    {
+        string wanted = Path.GetFileName(exePath);
+        if (File.Exists(Path.Combine(extractDir, wanted))) return extractDir;
+
+        var dirs = Directory.GetDirectories(extractDir);
+        var files = Directory.GetFiles(extractDir);
+        if (dirs.Length == 1 && files.Length == 0) return dirs[0];
+
+        return extractDir;
+    }
+
+    /// Launch the apply script without a console window and without a handle to us — it has to
+    /// outlive this process, since its whole job starts once we are gone.
+    private static void StartDetached(string script)
+    {
+        var psi = IsWindows
+            ? new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/c \"\"{script}\"\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            }
+            : new ProcessStartInfo
+            {
+                FileName = "/bin/sh",
+                Arguments = $"\"{script}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+        Process.Start(psi);
     }
 
     /// macOS ships a `.app` bundle — swapping the inner Mach-O leaves a bundle whose
@@ -504,28 +531,76 @@ public partial class Updater : CanvasLayer
             $"Update archive did not contain an executable matching '{wanted}'.");
     }
 
-    private static string WriteWindowsLauncher(string tmpDir, string newExe, string exePath)
+    /// Arguments worth carrying across a restart. `--vr` is a durable mode choice, so dropping
+    /// it would silently boot a headset user into the desktop client. Deep links are
+    /// deliberately NOT carried: by the time the update finishes, joining the world the player
+    /// clicked minutes ago is surprising, and the instance is very likely gone.
+    private static string RelaunchArgs()
+    {
+        foreach (var a in OS.GetCmdlineArgs())
+            if (a == "--vr") return " --vr";
+        foreach (var a in OS.GetCmdlineUserArgs())
+            if (a == "--vr") return " -- --vr";
+        return "";
+    }
+
+    /// robocopy, not `copy` — it retries locked files on its own (/R, /W), which is exactly the
+    /// race we are in: Windows can hold the pck and runtime DLLs for a moment after the process
+    /// exits. Exit codes below 8 are success (1 = files copied, 2 = extras, 3 = both).
+    internal static string WriteWindowsApplyScript(string tmpDir, string payload, string exeDir, string exePath)
     {
         string p = Path.Combine(tmpDir, "apply_update.bat");
         File.WriteAllText(p,
             "@echo off\r\n" +
-            "timeout /t 2 /nobreak >nul\r\n" +
-            $"copy /Y \"{newExe}\" \"{exePath}\" >nul\r\n" +
-            $"start \"\" \"{exePath}\"\r\n" +
+            "setlocal\r\n" +
+            $"set \"SRC={payload}\"\r\n" +
+            $"set \"DST={exeDir}\"\r\n" +
+            $"set \"GAME={exePath}\"\r\n" +
+            $"set PID={System.Environment.ProcessId}\r\n" +
+            "set /a TRIES=0\r\n" +
+            ":wait\r\n" +
+            "tasklist /FI \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul\r\n" +
+            "if errorlevel 1 goto gone\r\n" +
+            "set /a TRIES+=1\r\n" +
+            "if %TRIES% GEQ 60 goto gone\r\n" +
+            "ping -n 2 127.0.0.1 >nul\r\n" +
+            "goto wait\r\n" +
+            ":gone\r\n" +
+            // /E keeps subdirectories; deliberately NOT /MIR, which would purge anything in the
+            // install dir that the archive does not contain.
+            "robocopy \"%SRC%\" \"%DST%\" /E /IS /IT /R:10 /W:2 /NFL /NDL /NJH /NJS /NP >nul\r\n" +
+            "if errorlevel 8 (\r\n" +
+            "  echo Serika Social update failed: robocopy exit %ERRORLEVEL% > \"%DST%\\update-error.log\"\r\n" +
+            "  start \"\" \"%GAME%\"\r\n" +
+            "  exit /b 1\r\n" +
+            ")\r\n" +
+            $"start \"\" \"%GAME%\"{RelaunchArgs()}\r\n" +
+            "rmdir /s /q \"%SRC%\"\r\n" +
             "del \"%~f0\"\r\n");
         return p;
     }
 
-    private static string WriteUnixLauncher(string tmpDir, string newExe, string exePath)
+    internal static string WriteUnixApplyScript(string tmpDir, string payload, string exeDir, string exePath)
     {
         string p = Path.Combine(tmpDir, "apply_update.sh");
         File.WriteAllText(p,
             "#!/bin/sh\n" +
-            "sleep 1\n" +
-            $"cp \"{newExe}\" \"{exePath}\" || exit 1\n" +
-            $"chmod +x \"{exePath}\"\n" +
-            $"\"{exePath}\" &\n" +
-            "rm \"$0\"\n");
+            $"SRC='{payload}'\n" +
+            $"DST='{exeDir}'\n" +
+            $"GAME='{exePath}'\n" +
+            $"PID={System.Environment.ProcessId}\n" +
+            "i=0\n" +
+            "while [ $i -lt 60 ] && kill -0 \"$PID\" 2>/dev/null; do sleep 1; i=$((i+1)); done\n" +
+            // `cp -a src/.` copies the CONTENTS of src, including dotfiles, preserving modes.
+            "if ! cp -a \"$SRC/.\" \"$DST/\"; then\n" +
+            "  echo 'Serika Social update failed: copy error' > \"$DST/update-error.log\"\n" +
+            "  \"$GAME\" &\n" +
+            "  exit 1\n" +
+            "fi\n" +
+            "chmod +x \"$GAME\" 2>/dev/null\n" +
+            $"\"$GAME\"{RelaunchArgs()} &\n" +
+            "rm -rf \"$SRC\"\n" +
+            "rm -- \"$0\"\n");
         MakeExecutable(p);
         return p;
     }
@@ -550,7 +625,7 @@ public partial class Updater : CanvasLayer
     /// the update straight into the frame budget.
     public override void _Process(double delta)
     {
-        if (_progress == null) return;
+        if (_screen == null || !_screen.IsBuilt) return;
 
         var phase = (Phase)Interlocked.CompareExchange(ref _phase, 0, 0);
 
@@ -565,9 +640,9 @@ public partial class Updater : CanvasLayer
 
         if (phase == Phase.Downloading && total > 0)
         {
-            _progress.Value = read * 100.0 / total;
-            _body.Text = $"Downloading… {read * 100 / total}%";
-            _detail.Text = $"{Mib(read)} of {Mib(total)}";
+            _screen.ProgressValue = read * 100.0 / total;
+            _screen.Body = $"Downloading… {read * 100 / total}%";
+            _screen.Detail = $"{Mib(read)} of {Mib(total)}";
         }
         else if (phase == Phase.Downloading)
         {
@@ -575,40 +650,40 @@ public partial class Updater : CanvasLayer
             // instead of "stuck at zero", and show the real byte count underneath.
             _sweep = (_sweep + (float)delta * 0.55f) % 1f;
             float t = _sweep < 0.5f ? _sweep * 2f : (1f - _sweep) * 2f;
-            _progress.Value = 15 + t * 70;
-            _body.Text = "Downloading…";
-            _detail.Text = $"{Mib(read)} downloaded";
+            _screen.ProgressValue = 15 + t * 70;
+            _screen.Body = "Downloading…";
+            _screen.Detail = $"{Mib(read)} downloaded";
         }
         else
         {
-            _progress.Value = 100;
-            _body.Text = phase switch
+            _screen.ProgressValue = 100;
+            _screen.Body = phase switch
             {
                 Phase.Verifying => "Verifying download…",
                 Phase.Installing => "Installing… the game will restart.",
                 _ => _statusText,
             };
-            _detail.Text = phase == Phase.Verifying ? $"{Mib(read)} · checking signature" : "";
+            _screen.Detail = phase == Phase.Verifying ? $"{Mib(read)} · checking signature" : "";
         }
     }
 
     private void ShowFailure()
     {
         SetProcess(false);
-        _title.Text = "Update failed";
-        _body.Text = $"Could not install the update.\n\n{_errorText}";
-        _progress.Visible = false;
-        _detail.Visible = true;
-        _detail.Text = "You can keep playing on this version, or download the latest build manually.";
+        _screen.Title = "Update failed";
+        _screen.Body = $"Could not install the update.\n\n{_errorText}";
+        _screen.ProgressVisible = false;
+        _screen.DetailVisible = true;
+        _screen.Detail = "You can keep playing on this version, or download the latest build manually.";
 
-        ClearActions();
+        _screen.ClearActions();
         var close = Brand.Ghost_(new Button { Text = "Keep playing" });
         close.Pressed += Dismiss;
-        _actions.AddChild(close);
+        _screen.AddAction(close);
 
         var site = Brand.Primary_(new Button { Text = "Open download page" });
         site.Pressed += () => { OS.ShellOpen("https://social.serika.dev/#download"); Dismiss(); };
-        _actions.AddChild(site);
+        _screen.AddAction(site);
     }
 
     private static string Mib(long bytes) =>
