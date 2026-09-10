@@ -352,9 +352,9 @@ internal static unsafe class DiscordNative
         {
             // The Android SDK ships as an AAR with Java glue — a plain dlopen story doesn't
             // exist there yet, so the feature is desktop-only for now.
-            if (OS.HasFeature("android"))
+            if (OS.HasFeature("mobile") || OS.HasFeature("android") || OS.HasFeature("ios"))
             {
-                _loadFailure = "android builds don't bundle the desktop SDK library";
+                _loadFailure = "mobile builds don't bundle the desktop SDK library";
                 return false;
             }
 

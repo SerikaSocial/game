@@ -149,6 +149,7 @@ public partial class Updater : CanvasLayer
     private static bool IsWindows => OS.HasFeature("windows") || OS.GetName().ToLower().Contains("windows");
     private static bool IsMacOS => OS.HasFeature("macos") || OS.GetName().ToLower().Contains("macos");
     private static bool IsAndroid => OS.HasFeature("android") || OS.GetName().ToLower().Contains("android");
+    private static bool IsIos => OS.HasFeature("ios") || OS.GetName().ToLower().Contains("ios");
 
     private static string GetPlatformFile()
     {
@@ -165,8 +166,11 @@ public partial class Updater : CanvasLayer
     /// (`/opt/...`, an AppImage mount, a `.deb`-owned tree) can't be written by the running
     /// user — attempting the copy there fails halfway with "access denied". In both cases we
     /// send the player to the download page instead of pretending to self-update.
+    /// iOS is excluded for a different reason than Android: not "we haven't built it" but
+    /// "the platform forbids it". An app cannot replace its own bundle, so offering a self-update
+    /// there is offering something that can never succeed.
     private static bool CanSelfUpdate =>
-        !IsAndroid && !OS.HasFeature("editor") && InstallDirWritable();
+        !IsAndroid && !IsIos && !OS.HasFeature("editor") && InstallDirWritable();
 
     /// Probe whether the directory holding the executable is writable by this process,
     /// by creating and deleting a temp file next to it. Cheap and definitive — cheaper than

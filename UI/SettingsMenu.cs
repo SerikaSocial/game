@@ -467,8 +467,8 @@ public partial class SettingsMenu : CanvasLayer
         _pfp.Toggled += on => { DeviceProfile.Settings.ProfilePictures = on; SettingChanged?.Invoke("pfp"); DeviceProfile.Settings.Save(); };
         v.AddChild(Row("Show profile pictures on tags", _pfp));
 
-        // Desktop only — the Social SDK is not wired on Android (AAR + Java glue).
-        if (!OS.HasFeature("android"))
+        // Desktop only — the Social SDK is not wired on either mobile platform.
+        if (!OS.HasFeature("android") && !OS.HasFeature("ios"))
         {
             _discordPresence = new CheckButton();
             _discordPresence.Toggled += on => Discord.DiscordRichPresence.SetEnabled(on);

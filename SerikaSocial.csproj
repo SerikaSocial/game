@@ -8,6 +8,17 @@
     -->
     <TargetFramework>net8.0</TargetFramework>
     <TargetFramework Condition=" '$(GodotTargetPlatform)' == 'android' ">net9.0</TargetFramework>
+    <!--
+      iOS stays on net8.0 (the desktop default) but must be AOT-compiled: Apple forbids JIT, so
+      a normal Godot mono build cannot run there at all. `GodotTargetPlatform=ios` is what Godot
+      sets during an iOS export, and these two properties are what turn the build into an
+      AOT/static one the export template can link.
+
+      NOT VERIFIED ON DEVICE — no iOS export has been run. Treat this block as the starting
+      point for the first real build, not as a working configuration.
+    -->
+    <PublishAot Condition=" '$(GodotTargetPlatform)' == 'ios' ">true</PublishAot>
+    <RuntimeIdentifier Condition=" '$(GodotTargetPlatform)' == 'ios' ">ios-arm64</RuntimeIdentifier>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RootNamespace>SerikaSocial</RootNamespace>
     <Nullable>disable</Nullable>

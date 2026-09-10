@@ -57,7 +57,14 @@ public static class DeviceProfile
     public static bool AvatarOutline = true;
 
     /// True on the Quest / any Android build — the tightest budget.
+    ///
+    /// NOTE this is an Android test, not a "mobile" test, and iOS must not fall into it: an
+    /// iPhone is not a standalone headset and the whole Quest lighting/LOD path would be wrong
+    /// for it.
     public static bool IsStandaloneXr => _forceStandaloneXr ?? OS.HasFeature("android");
+
+    /// True on iPhone/iPad builds.
+    public static bool IsIos => OS.HasFeature("ios");
 
     private static bool? _forceStandaloneXr;
 
@@ -111,6 +118,30 @@ public static class DeviceProfile
             // Lower physics tick rate on standalone to save CPU. The default 60 Hz is overkill
             // for a social app where collision precision doesn't matter much.
             Engine.PhysicsTicksPerSecond = isQuest3 ? 50 : 45;
+        }
+        else if (IsIos)
+        {
+            // iOS gets its own branch rather than sharing the generic touchscreen one, because
+            // the hardware assumptions are different in both directions. Apple's GPUs are strong
+            // relative to the Android median so the render scale can stay at 1.0, but the devices
+            // are aggressively thermally limited and a sustained 60 fps at full resolution is
+            // what makes a phone hot and then slow. Capping at 60 with vsync is the honest
+            // setting: the ceiling is the display anyway, and the headroom goes to staying cool.
+            //
+            // iPads report a touchscreen and are considerably faster than phones, but Godot does
+            // not expose a reliable model tier, so this stays conservative and uniform. Revisit
+            // with a real device matrix rather than by guessing at model strings.
+            Current = Tier.Medium;
+            RenderScale = 1.0f;
+            Shadows = true;
+            MsaaLevel = 1;
+            MaxFps = 60;
+            VSync = true;
+            MirrorRange = 8f;
+            BloomEnabled = true;
+            // Mirrors are two extra scene renders each; one is plenty on a phone.
+            AvatarOutline = true;
+            Engine.PhysicsTicksPerSecond = 60;
         }
         else if (DisplayServer.IsTouchscreenAvailable())
         {

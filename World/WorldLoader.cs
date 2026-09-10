@@ -119,6 +119,7 @@ public static class WorldLoader
         string collision = "geometry";
         string shading = "default";
         float ropeLength = 0f; // 0 = no rope
+        int gameMode = -1;     // -1 = no game session for this world
         if (zip.FileExists("manifest.json"))
         {
             try
@@ -138,6 +139,9 @@ public static class WorldLoader
                     manifestSpawn = new Vector3((float)sp[0].GetDouble(), (float)sp[1].GetDouble(), (float)sp[2].GetDouble());
                 // Opt-in co-op rope. Absent means no rope — this must never be on by default, or
                 // every world would start tugging players toward each other.
+                // Opt-in game session. Worlds without this never poll the game API at all.
+                if (rootEl.TryGetProperty("gameMode", out var gm) && gm.ValueKind == JsonValueKind.String)
+                    gameMode = gm.GetString() switch { "imposter" => 0, "gauntlet" => 1, _ => -1 };
                 if (rootEl.TryGetProperty("rope", out var rp) && rp.ValueKind == JsonValueKind.Object)
                     ropeLength = rp.TryGetProperty("length", out var rl) && rl.ValueKind == JsonValueKind.Number
                         ? Mathf.Clamp((float)rl.GetDouble(), 1.5f, 30f)
@@ -165,7 +169,7 @@ public static class WorldLoader
         zip.Close();
 
         var node = LoadGltfFromBuffer(glb, Path.GetDirectoryName(path) ?? "");
-        return Attach(node, worldId, root, manifestSpawn, lighting, collision, shading, scriptBytes, ropeLength);
+        return Attach(node, worldId, root, manifestSpawn, lighting, collision, shading, scriptBytes, ropeLength, gameMode);
     }
 
     private static Node3D LoadGltfFromFile(string path)
@@ -195,7 +199,7 @@ public static class WorldLoader
     /// Parent the instantiated world under root, generate collision, and resolve the spawn.
     private static Vector3? Attach(Node instance, string worldId, Node3D root, Vector3? manifestSpawn, string lighting = "outdoor",
                                    string collision = "geometry", string shading = "default", byte[] scriptBytes = null,
-                                   float ropeLength = 0f)
+                                   float ropeLength = 0f, int gameMode = -1)
     {
         if (instance == null)
         {
@@ -239,6 +243,7 @@ public static class WorldLoader
 
         AttachScript(instance, worldId, scriptBytes, scriptNodes, scriptZones);
         AttachRope(instance, ropeLength);
+        if (gameMode >= 0) GameModeRequested?.Invoke(gameMode);
 
         // A theatre with a screen in it gets house lights: the room drops when a clip starts and
         // the picture becomes the only thing lighting it. Gated on the `dark` mode, so a video
@@ -523,6 +528,11 @@ public static class WorldLoader
     /// Raised when a world brings a script runtime online, BEFORE its on_ready runs, so a
     /// subscriber can attach the network bridge in time to carry on_ready's own emits.
     public static event Action<ScriptWorld> ScriptWorldCreated;
+
+    /// Raised when a loaded world declares a `gameMode` in its manifest (0 = imposter,
+    /// 1 = gauntlet). `Main` answers by standing up a GameSession; worlds that declare nothing
+    /// never poll the game API, so a plain social world costs zero requests.
+    public static event Action<int> GameModeRequested;
 
     /// Supplies the local body the rope may correct. Set by `Main`; null in diagnostics.
     public static Func<CharacterBody3D> LocalBody { get; set; }

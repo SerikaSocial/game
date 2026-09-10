@@ -65,6 +65,12 @@ public partial class Main : Node3D
 
     /// The current world's script runtime, if it has one. Null for every world without a script.
     private Serika.Script.ScriptWorld _scriptWorld;
+
+    /// The active game session, for worlds whose manifest declares a `gameMode`. Null everywhere
+    /// else — a plain social world must never poll the game API.
+    private SerikaSocial.Game.GameSession _gameSession;
+    private SerikaSocial.Game.GameHud _gameHud;
+
     private readonly HashSet<string> _blockedUserIds = new();
     /// Peers currently rendered as the anonymous bean (blocked). Mirrors the SpawnRemote
     /// decision so a later unblock knows which remotes to respawn with their real avatar.
@@ -131,6 +137,8 @@ public partial class Main : Node3D
             _scriptWorld = sw;
             sw.Emitted += (_, channel, payload) => _transport?.SendScriptEvent(channel, payload);
         };
+
+        SerikaSocial.World.WorldLoader.GameModeRequested += StartGameSession;
 
         // Detect the device tier and apply saved graphics settings before the first frame, so a
         // Quest never renders one frame at full desktop quality. Also seeds persisted control/
@@ -2788,6 +2796,51 @@ public partial class Main : Node3D
     /// room kept seeing whatever you happened to be wearing when they first saw you, until they
     /// rejoined. Re-read it from the API; the message itself carries no url, so a peer cannot
     /// aim our downloader anywhere.
+    /// Stand up a game session for a world that asked for one.
+    ///
+    /// Requires a real instance: the whole point is server-authoritative state keyed by instance
+    /// id, and Home is single-player with no instance to be authoritative about.
+    private void StartGameSession(int mode)
+    {
+        TearDownGameSession();
+        if (string.IsNullOrEmpty(_currentInstanceId) || _api == null) return;
+
+        _gameSession = SerikaSocial.Game.GameSession.Create(_api, _currentInstanceId);
+        AddChild(_gameSession);
+
+        _gameHud = SerikaSocial.Game.GameHud.Create(
+            _gameSession,
+            NameForUserId,
+            msg => _inWorldHud?.Toast(msg, 3.0));
+        var (readout, voting) = _gameHud.BuildLayers();
+        // The readout is a persistent status display, so in VR it belongs on the wrist. The
+        // voting panel is an interactive menu and must go to the VR panel instead.
+        AddUi(readout, chrome: true);
+        AddUi(voting);
+        AddChild(_gameHud);
+
+        GD.Print($"Main: game session online (mode {mode}) for instance {_currentInstanceId}");
+    }
+
+    private void TearDownGameSession()
+    {
+        _gameHud?.QueueFree();
+        _gameSession?.QueueFree();
+        _gameHud = null;
+        _gameSession = null;
+    }
+
+    /// Map a user id to something worth showing in the vote list. Falls back to a short id rather
+    /// than the full uuid, which is unreadable in a button.
+    private string NameForUserId(string userId)
+    {
+        if (string.IsNullOrEmpty(userId)) return "Someone";
+        if (_localUserId == userId) return "You";
+        foreach (var (peerId, uid) in _peerUserIds)
+            if (uid == userId && _peerNames.TryGetValue(peerId, out var n)) return n;
+        return userId.Length > 8 ? userId[..8] : userId;
+    }
+
     /// A peer's world script emitted. Delivered to our copy of the script as on_message.
     ///
     /// Deliberately not routed back out again: this is the receive side only, so two clients

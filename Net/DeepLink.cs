@@ -105,6 +105,13 @@ public static class DeepLink
                 else if (isLinux) RegisterLinux(exe);
                 // macOS registration is declared in the .app Info.plist (CFBundleURLTypes) at
                 // export time rather than at runtime.
+                //
+                // iOS and Android are the same story and there is nothing to do at runtime:
+                // the scheme is declared in the app manifest (CFBundleURLTypes on iOS, an
+                // intent-filter on Android) and the OS routes the launch. Attempting a
+                // registration there would be a no-op at best — a sandboxed app cannot edit the
+                // system URL table — so the absence of a branch here is deliberate, not an
+                // oversight. See the iOS preset's `serikasocial` URL type.
             }
             catch (Exception e)
             {
