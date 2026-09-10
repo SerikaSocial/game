@@ -24,6 +24,7 @@ internal sealed class FakeHost : IHostBridge
     public void NodePlayAnim(int nodeSlot, int animId) { }
     public void SoundPlay(int clipSlot) { }
     public void ScreenSetText(int screenSlot, string text) { }
+    public void ScreenSetNumber(int s, double v) { }
     public int PlayerCount() => 1;
     public (float X, float Y, float Z) PlayerPos(int playerIndex) => PlayerPosition;
     public readonly List<(int Player, int Node, int Point)> Attachments = new();

@@ -153,6 +153,17 @@ public sealed class ScriptHostBridge : IHostBridge
         if (n?.GetNodeOrNull<Label3D>("Label") is { } label) label.Text = text;
     }
 
+    /// Boards are how a dev-made minigame shows state (timers, scores, votes). Rendered as the
+    /// board's Label3D text with a stable format so integers read as integers, not "3.0000003".
+    public void ScreenSetNumber(int screenSlot, double value)
+    {
+        var n = NodeAt(screenSlot);
+        if (n?.GetNodeOrNull<Label3D>("Label") is not { } label) return;
+        label.Text = Math.Abs(value % 1) < 1e-9
+            ? ((long)Math.Round(value)).ToString()
+            : value.ToString("0.0");
+    }
+
     // ── players (read-only) ──
 
     public int PlayerCount() => _players?.Count ?? 0;

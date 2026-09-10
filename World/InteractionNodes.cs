@@ -185,6 +185,10 @@ public partial class InteractionPoint : Area3D, IInteractable
     /// interactive can turn it off.
     [Export] public bool ShowOrb { get; set; } = true;
 
+    /// Declared script slot when this point was resolved from a `SERIKA_BUTTON<n>` marker, so the
+    /// loader can tell the world script WHICH button was pressed (-1 for hand-placed points).
+    public int MarkerSlot { get; set; } = -1;
+
     [Signal] public delegate void InteractedEventHandler(Node3D interactor);
 
     public override void _Ready()

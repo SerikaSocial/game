@@ -180,6 +180,31 @@ public static class ScriptDiagnostic
         Check("runaway script is hard-killed, not left running", sw2.LiveScriptCount == 0);
         Check("the world survives the kill", GodotObject.IsInstanceValid(world) && world.IsInsideTree());
 
+        GD.Print("-- buttons --");
+        // The SERIKA_BUTTON path: a press must reach the script as on_interact for the presser's
+        // roster index AND as a local 1000+slot message identifying WHICH button. This is the
+        // same binding WorldLoader.AttachScript performs for a resolved button marker.
+        var sw3 = ScriptWorld.Create(world, roster);
+        world.AddChild(sw3);
+        Check("button-echo module loads", sw3.AddModule("buttonbox", CompileButtonEchoModule(), 8, nodes, Array.Empty<AudioStream>()));
+        sw3.Emitted += (l, c, p) => emits.Add((l, c, p));
+        sw3.Start();
+        var point = new SerikaSocial.World.InteractionPoint { MarkerSlot = 7 };
+        world.AddChild(point);
+        point.Interacted += body =>
+        {
+            sw3.InteractFromBody(body);
+            sw3.InteractButton(point.MarkerSlot, body);
+        };
+        emits.Clear();
+        point.Trigger(roster.Bodies[1]);
+        await host.ToSignal(host.GetTree(), SceneTree.SignalName.ProcessFrame);
+        Check("a button press fires on_interact with the presser's index",
+              emits.Exists(e => e.Channel == 900 && Math.Abs(e.Payload - 1) < 0.001),
+              $"emits: [{string.Join(", ", emits.ConvertAll(e => $"ch{e.Channel}={e.Payload:0.###}"))}]");
+        Check("a button press reports WHICH button as local message 1000+slot",
+              emits.Exists(e => e.Channel == 901 && Math.Abs(e.Payload - 1007) < 0.001));
+
         GD.Print(_failures == 0
             ? "=== script wiring OK ==="
             : $"=== script wiring FAILED: {_failures} check(s) ===");
@@ -207,5 +232,52 @@ public static class ScriptDiagnostic
         U32(code.Count);
         b.AddRange(code);
         return b.ToArray();
+    }
+
+    /// A hand-built module that echoes interactions onto the emit bus: on_interact(player)
+    /// becomes emit(900, player) and on_message(name, …) becomes emit(901, name). It is how the
+    /// button-wiring check can SEE what the script received.
+    private static byte[] CompileButtonEchoModule()
+    {
+        var code = new List<byte>();
+
+        // on_interact: emit(900, player)  — args[0] is the first-pushed value.
+        int interactOff = code.Count;
+        code.Add((byte)OpCode.PushI); code.AddRange(BitConverter.GetBytes(900));
+        code.Add((byte)OpCode.Load); code.Add(0);
+        EmitNetEmit(code);
+        code.Add((byte)OpCode.Halt);
+
+        // on_message: emit(901, name)
+        int messageOff = code.Count;
+        code.Add((byte)OpCode.PushI); code.AddRange(BitConverter.GetBytes(901));
+        code.Add((byte)OpCode.Load); code.Add(0);
+        EmitNetEmit(code);
+        code.Add((byte)OpCode.Halt);
+
+        var b = new List<byte> { 0x53, 0x53, 0x4B, 0x42, ScriptModule.Version, 0 };
+        void U16(int v) { b.Add((byte)(v & 0xFF)); b.Add((byte)((v >> 8) & 0xFF)); }
+        void U32(int v) { b.Add((byte)(v & 0xFF)); b.Add((byte)((v >> 8) & 0xFF)); b.Add((byte)((v >> 16) & 0xFF)); b.Add((byte)((v >> 24) & 0xFF)); }
+
+        U16(4000); // budgetTick
+        U16(64);   // budgetMem
+        U16(1); U16((int)HostCall.NetEmit);
+        U16(2);
+        b.Add((byte)HookId.OnInteract); U32(interactOff);
+        b.Add((byte)HookId.OnMessage); U32(messageOff);
+        U16(0);    // no strings
+        U32(code.Count);
+        b.AddRange(code);
+        return b.ToArray();
+    }
+
+    /// HOST_CALL NET_EMIT with argc 2 — the caller has already pushed channel then payload.
+    private static void EmitNetEmit(List<byte> code)
+    {
+        code.Add((byte)OpCode.HostCall);
+        code.Add((int)HostCall.NetEmit & 0xFF);
+        code.Add(((int)HostCall.NetEmit >> 8) & 0xFF);
+        code.Add(2);
+        code.Add((byte)OpCode.Pop); // drop the call's nil result
     }
 }

@@ -117,6 +117,28 @@ public partial class ScriptWorld : Node
     /// Fire on_interact for a player — call this from an interaction prompt.
     public void Interact(int playerIndex) => Dispatch(HookId.OnInteract, playerIndex);
 
+    /// Fire on_interact for whichever player a physics body belongs to. This is how a world
+    /// button (`SERIKA_BUTTON<n>`, resolved as an InteractionPoint) reaches the script: the
+    /// loader binds the button's Interacted signal here, and the body resolves to the local
+    /// machine's roster index for that player. Out-of-tree or unknown bodies are a no-op.
+    public void InteractFromBody(Node3D body)
+    {
+        int player = _players?.IndexOfBody(body) ?? -1;
+        if (player >= 0) Dispatch(HookId.OnInteract, player);
+    }
+
+    /// Tell the script WHICH button was pressed, as a LOCAL on_message at channel 1000+slot with
+    /// the presser's roster index as payload. The shared on_interact hook carries only who —
+    /// a script with six task consoles and a kill button needs to know which was used. This is
+    /// local-only (it never touches the wire), and scripts that emit their own channels simply
+    /// avoid 1000+ to stay clear of it.
+    public void InteractButton(int markerSlot, Node3D body)
+    {
+        if (markerSlot < 0) return;
+        int player = _players?.IndexOfBody(body) ?? -1;
+        if (player >= 0) Dispatch(HookId.OnMessage, 1000 + markerSlot, player);
+    }
+
     /// Deliver a message hook.
     public void Message(int nameId, double payload) => Dispatch(HookId.OnMessage, nameId, payload);
 

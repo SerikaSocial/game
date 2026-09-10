@@ -21,6 +21,11 @@ public interface IHostBridge
     void SoundPlay(int clipSlot);
     void ScreenSetText(int screenSlot, string text);
 
+    /// Set a declared board's Label3D text to a script-computed number — a timer, a score, a
+    /// vote count. Same scope rules as ScreenSetText: declared screens only, and purely a local
+    /// presentation change (node state is per-machine; only emit/on_message syncs).
+    void ScreenSetNumber(int screenSlot, double value);
+
     int PlayerCount();
     (float X, float Y, float Z) PlayerPos(int playerIndex);
 

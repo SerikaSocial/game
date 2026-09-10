@@ -238,10 +238,11 @@ public static class WorldLoader
             SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
 
         // Swap authoring markers for the live nodes they stand for (mirrors, seats, video).
-        var spawnMarker = ResolveMarkers(instance, out int videoScreens, out var scriptNodes, out var scriptZones);
+        var spawnMarker = ResolveMarkers(instance, out int videoScreens, out var scriptNodes,
+                                         out var scriptZones, out var scriptButtons);
         StartAmbientAnimations(instance);
 
-        AttachScript(instance, worldId, scriptBytes, scriptNodes, scriptZones);
+        AttachScript(instance, worldId, scriptBytes, scriptNodes, scriptZones, scriptButtons);
         AttachRope(instance, ropeLength);
         if (gameMode >= 0) GameModeRequested?.Invoke(gameMode);
 
@@ -518,6 +519,18 @@ public static class WorldLoader
     private const string MarkerScriptNode = "SERIKA_SNODE";
     private const string MarkerScriptZone = "SERIKA_ZONE";
 
+    //   SERIKA_BUTTON<n> a world button: an InteractionPoint whose press reaches the script's
+    //                    on_interact hook. Its slot n is ALSO a declared script node, so a script
+    //                    can move/hide its own buttons (role-gated UI in a hidden-role world).
+    //   SERIKA_CHECK<n>  a checkpoint: entering moves the local respawn point here; falls past
+    //                    the last checkpoint's recovery plane return to it (CheckpointMonitor)
+    //   SERIKA_WARP<n>   a teleport pad; same-group pads (n % 10) cycle on walk-on
+    //
+    // All three are generic creator building blocks with no game-mode coupling.
+    private const string MarkerButton = "SERIKA_BUTTON";
+    private const string MarkerCheck  = "SERIKA_CHECK";
+    private const string MarkerWarp   = "SERIKA_WARP";
+
     /// The compiled script inside a `.serikaworld`, if any.
     private const string ScriptFile = "script.sskb";
 
@@ -533,6 +546,15 @@ public static class WorldLoader
     /// 1 = gauntlet). `Main` answers by standing up a GameSession; worlds that declare nothing
     /// never poll the game API, so a plain social world costs zero requests.
     public static event Action<int> GameModeRequested;
+
+    /// Raised when the local player walks onto a `SERIKA_CHECK<n>` pad. `Main` answers by moving
+    /// the respawn point, which feeds BOTH the engine void respawn and the manual Respawn action.
+    public static event Action<Vector3> CheckpointReached;
+    public static void RaiseCheckpointReached(Vector3 pos) => CheckpointReached?.Invoke(pos);
+
+    /// Raised when the CheckpointMonitor puts a fallen player back on the last checkpoint.
+    public static event Action CheckpointRecovered;
+    public static void RaiseCheckpointRecovered() => CheckpointRecovered?.Invoke();
 
     /// Supplies the local body the rope may correct. Set by `Main`; null in diagnostics.
     public static Func<CharacterBody3D> LocalBody { get; set; }
@@ -554,7 +576,8 @@ public static class WorldLoader
     /// Build the script runtime for a world that ships one. Deliberately tolerant: any failure
     /// here leaves a world that is geometry-only, never a world that refuses to load.
     private static void AttachScript(Node instance, string worldId, byte[] scriptBytes,
-                                     List<Node3D> scriptNodes, List<ScriptZone> scriptZones)
+                                     List<Node3D> scriptNodes, List<ScriptZone> scriptZones,
+                                     List<InteractionPoint> scriptButtons)
     {
         if (scriptBytes == null || scriptBytes.Length == 0) return;
         if (instance is not Node3D worldRoot) return;
@@ -574,12 +597,21 @@ public static class WorldLoader
             }
 
             foreach (var zone in scriptZones) sw.BindZone(zone);
+            // A button press is on_interact: the whole point of SERIKA_BUTTON<n>, and the piece
+            // that was missing — the hook existed in the VM but nothing in a world could fire it.
+            // The second dispatch tells the script WHICH button, as a local 1000+slot message.
+            foreach (var button in scriptButtons)
+                button.Interacted += body =>
+                {
+                    sw.InteractFromBody(body);
+                    sw.InteractButton(button.MarkerSlot, body);
+                };
             // Announce before Start() so the network bridge is attached in time to carry the
             // emits on_ready itself makes.
             ScriptWorldCreated?.Invoke(sw);
             // on_ready last: after every module is loaded and every zone is bound.
             sw.Start();
-            GD.Print($"WorldLoader: {worldId} script online — {scriptNodes.Count} node(s), {scriptZones.Count} zone(s)");
+            GD.Print($"WorldLoader: {worldId} script online — {scriptNodes.Count} node(s), {scriptZones.Count} zone(s), {scriptButtons.Count} button(s)");
         }
         catch (Exception e)
         {
@@ -600,7 +632,8 @@ public static class WorldLoader
     /// the screens are not in the scene tree yet at this point, so the caller cannot count
     /// them by group.
     private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens,
-                                           out List<Node3D> scriptNodes, out List<ScriptZone> scriptZones)
+                                           out List<Node3D> scriptNodes, out List<ScriptZone> scriptZones,
+                                           out List<InteractionPoint> scriptButtons)
     {
         Vector3? spawn = null;
         int mirrors = 0, seats = 0, videos = 0, props = 0, portals = 0;
@@ -610,6 +643,9 @@ public static class WorldLoader
         // absent node rather than shifting every later slot by one.
         var nodesBySlot = new Dictionary<int, Node3D>();
         scriptZones = new List<ScriptZone>();
+        scriptButtons = new List<InteractionPoint>();
+        var checkpoints = new List<CheckpointNode>();
+        var warpGroups = new Dictionary<int, List<(int id, WarpPad pad)>>();
 
         // Snapshot first: we mutate the tree while walking it.
         var markers = new System.Collections.Generic.List<Node3D>();
@@ -734,6 +770,63 @@ public static class WorldLoader
                 zone.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
                 scriptZones.Add(zone);
             }
+            else if (name.StartsWith(MarkerButton, StringComparison.Ordinal))
+            {
+                // A button IS a declared script node (slot n) as well as an interactable, so a
+                // script can move or hide its own buttons — a hidden-role world shows the kill
+                // button on imposter machines and hides it on crew machines, from the same
+                // bytecode, because all node state is per-machine.
+                if (!TryParseMarkerIndex(name, MarkerButton, out int slot))
+                {
+                    GD.PrintErr($"WorldLoader: ignored button marker '{name}' (expected SERIKA_BUTTON<n>)");
+                    continue;
+                }
+                if (nodesBySlot.ContainsKey(slot))
+                {
+                    GD.PrintErr($"WorldLoader: duplicate script node slot {slot} ('{name}') — ignoring the later one");
+                    continue;
+                }
+                var button = new InteractionPoint
+                {
+                    Name = name.Replace(MarkerButton, "Button"),
+                    Prompt = "Press",
+                    InteractionRange = 2.4f,
+                    MarkerSlot = slot,
+                };
+                parent.AddChild(button);
+                button.GlobalPosition = pos;
+                button.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
+                nodesBySlot[slot] = button;
+                scriptButtons.Add(button);
+            }
+            else if (name.StartsWith(MarkerCheck, StringComparison.Ordinal))
+            {
+                if (!TryParseMarkerIndex(name, MarkerCheck, out int checkId))
+                {
+                    GD.PrintErr($"WorldLoader: ignored checkpoint marker '{name}' (expected SERIKA_CHECK<n>)");
+                    continue;
+                }
+                var pad = CheckpointNode.Create(checkId, pos + new Vector3(0, 0.2f, 0), scale);
+                parent.AddChild(pad);
+                pad.GlobalPosition = pos;
+                checkpoints.Add(pad);
+            }
+            else if (name.StartsWith(MarkerWarp, StringComparison.Ordinal))
+            {
+                if (!TryParseMarkerIndex(name, MarkerWarp, out int warpId))
+                {
+                    GD.PrintErr($"WorldLoader: ignored warp marker '{name}' (expected SERIKA_WARP<n>)");
+                    continue;
+                }
+                // Group by index modulo 10: SERIKA_WARP3 and SERIKA_WARP13 are a pair, so an
+                // author can add a second shortcut group without renumbering the first.
+                int group = warpId % 10;
+                if (!warpGroups.ContainsKey(group)) warpGroups[group] = new();
+                var pad = WarpPad.Create(group, warpId, null);
+                parent.AddChild(pad);
+                pad.GlobalPosition = pos;
+                warpGroups[group].Add((warpId, pad));
+            }
             else if (name.StartsWith(MarkerScriptNode, StringComparison.Ordinal))
             {
                 if (!TryParseMarkerIndex(name, MarkerScriptNode, out int slot))
@@ -750,6 +843,31 @@ public static class WorldLoader
                 // what the script moves, so it survives as an ordinary Node3D the author can
                 // parent geometry under. That also means it must not be freed below.
                 nodesBySlot[slot] = m;
+
+                // A *_BOARD marker also gets a Label3D child so the script can setText/setNumber
+                // it — scoreboards, timers, vote counts. The bridge addresses it as the "Label"
+                // child of the declared slot, exactly like every other screen. The width/wrap
+                // matter: a status line at the default size rendered ~0.9 m glyphs across the
+                // whole hub wall, which read as a defect from anywhere in the room.
+                if (name.Contains("_BOARD", StringComparison.Ordinal) && m is Node3D board)
+                {
+                    board.AddChild(new Label3D
+                    {
+                        Name = "Label",
+                        Text = "",
+                        FontSize = 96,
+                        OutlineSize = 20,
+                        PixelSize = 0.0028f,
+                        Width = 1150f,   // ≈ 3.2 m of text at this pixel size, then wraps
+                        AutowrapMode = TextServer.AutowrapMode.WordSmart,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Billboard = BaseMaterial3D.BillboardModeEnum.FixedY,
+                        DoubleSided = true,
+                        Modulate = new Color(0.92f, 0.88f, 1.0f),
+                        OutlineModulate = new Color(0.08f, 0.05f, 0.16f),
+                    });
+                }
                 continue;
             }
             else // SPAWN
@@ -767,9 +885,47 @@ public static class WorldLoader
         scriptNodes = new List<Node3D>(maxSlot + 1);
         for (int i = 0; i <= maxSlot; i++) scriptNodes.Add(nodesBySlot.GetValueOrDefault(i));
 
+        // Wire each warp pad to its group, ordered by marker id so the cycle direction is stable
+        // and every client pairs the pads identically.
+        foreach (var (group, pads) in warpGroups)
+        {
+            if (pads.Count < 2)
+            {
+                GD.PrintErr($"WorldLoader: SERIKA_WARP group {group} has one pad — needs a partner, ignoring");
+                continue;
+            }
+            pads.Sort((a, b) => a.id.CompareTo(b.id));
+            var shared = new WarpPad.Group();
+            for (int i = 0; i < pads.Count; i++)
+            {
+                pads[i].pad.GroupRef = shared;
+                pads[i].pad.SlotInGroup = i;
+                shared.Pads.Add(pads[i].pad);
+            }
+        }
+
+        // Checkpoints feed the respawn point (via the event Main subscribes to) and the fall
+        // monitor. No checkpoints, no monitor, no cost.
+        if (checkpoints.Count > 0)
+        {
+            var lowest = checkpoints[0];
+            foreach (var c in checkpoints)
+                if (c.RespawnPoint.Y < lowest.RespawnPoint.Y) lowest = c;
+            var monitor = new CheckpointMonitor(lowest, LocalBody);
+            (worldRoot as Node)?.AddChild(monitor);
+            foreach (var pad in checkpoints)
+            {
+                pad.Reached += monitor.NotifyReached;
+                pad.Reached += _ => RaiseCheckpointReached(pad.RespawnPoint);
+            }
+        }
+
         if (mirrors + seats + videos + props + portals > 0)
             GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), " +
                      $"{videos} video screen(s), {props} prop(s), {portals} portal(s)");
+        if (scriptButtons.Count + checkpoints.Count + warpGroups.Count > 0)
+            GD.Print($"WorldLoader: game markers — {scriptButtons.Count} button(s), " +
+                     $"{checkpoints.Count} checkpoint(s), {warpGroups.Count} warp group(s)");
 
         videoScreens = videos;
         return spawn;
@@ -787,6 +943,9 @@ public static class WorldLoader
                 name.StartsWith(MarkerPortal, StringComparison.Ordinal) ||
                 name.StartsWith(MarkerScriptNode, StringComparison.Ordinal) ||
                 name.StartsWith(MarkerScriptZone, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerButton, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerCheck, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerWarp, StringComparison.Ordinal) ||
                 name.Equals("SPAWN", StringComparison.OrdinalIgnoreCase))
                 into.Add(n3d);
         }

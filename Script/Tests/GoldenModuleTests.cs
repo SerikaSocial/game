@@ -46,6 +46,7 @@ public class GoldenModuleTests
         public void NodePlayAnim(int n, int a) { }
         public void SoundPlay(int c) { }
         public void ScreenSetText(int s, string t) { }
+        public void ScreenSetNumber(int s, double v) { }
         public int PlayerCount() => Players;
         public (float X, float Y, float Z) PlayerPos(int i) => (0, 0, 0);
         public bool PlayerAttach(int player, int node, int point)
@@ -77,7 +78,13 @@ public class GoldenModuleTests
         Assert.True(m.HasHook(HookId.OnTick));
         Assert.True(m.HasHook(HookId.OnEnterZone));
         Assert.False(m.HasHook(HookId.OnInteract));
-        Assert.Contains("summit reached", m.Strings.Get(1));
+        // Scan the whole pool: which index a literal lands on is an artifact of source order,
+        // not part of the contract. The old assertion pinned an index and broke the first time
+        // the script gained a board string.
+        bool hasSummit = false;
+        for (int i = 0; i < m.Strings.Count; i++)
+            if (m.Strings.Get(i).Contains("summit reached")) hasSummit = true;
+        Assert.True(hasSummit);
     }
 
     /// on_ready ties in exactly the players who are present — the unrolled guards must respect

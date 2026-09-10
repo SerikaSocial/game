@@ -66,6 +66,9 @@ public enum HostCall : ushort
     Log = 0x0001, Time = 0x0002, Random = 0x0003,
     NodeMove = 0x0100, NodeRotate = 0x0101, NodeSetVisible = 0x0102, NodePlayAnim = 0x0103,
     SoundPlay = 0x0200, ScreenSetText = 0x0201,
+    /// Set the declared board's Label3D text to a computed number (timer, score, votes).
+    /// Same scope rules as ScreenSetText: declared screens only, local presentation only.
+    ScreenSetNumber = 0x0202,
     PlayerCount = 0x0300, PlayerPos = 0x0301,
     VarGet = 0x0400, VarSet = 0x0401,
     NetEmit = 0x0500,

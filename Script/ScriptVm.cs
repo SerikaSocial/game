@@ -161,7 +161,10 @@ public sealed class ScriptVm
             case HostCall.NodeSetVisible: _host.NodeSetVisible((int)args[0], args[1] != 0); Push(0); break;
             case HostCall.NodePlayAnim: _host.NodePlayAnim((int)args[0], (int)args[1]); Push(0); break;
             case HostCall.SoundPlay: _host.SoundPlay((int)args[0]); Push(0); break;
-            case HostCall.ScreenSetText: _host.ScreenSetText((int)args[0], ((int)args[1]).ToString()); Push(0); break;
+            // The text arrives as a string-table index (the compiler interns string literals);
+            // resolving it is what makes setText show the words instead of the index.
+            case HostCall.ScreenSetText: _host.ScreenSetText((int)args[0], _module.Strings.Get((int)args[1])); Push(0); break;
+            case HostCall.ScreenSetNumber: _host.ScreenSetNumber((int)args[0], args[1]); Push(0); break;
             case HostCall.PlayerCount: Push(_host.PlayerCount()); break;
             // (playerIndex, axis) -> component. The single-value return convention means one
             // component per call; pushing only X (as this used to) makes a player's height
