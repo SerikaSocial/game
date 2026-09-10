@@ -199,6 +199,43 @@ public static class ToonShading
             Walk(child, outlineWidth, shader, ref count);
     }
 
+    /// Create a toon ShaderMaterial from a source BaseMaterial3D for an avatar surface.
+    public static ShaderMaterial CreateAvatarToonMaterial(Material sourceMat, float outlineWidth = 1.4f)
+    {
+        if (sourceMat is ShaderMaterial sm && sm.Shader == ToonAvatar) return sm;
+        if (sourceMat is not BaseMaterial3D src) return null;
+
+        var toon = new ShaderMaterial { Shader = ToonAvatar, ResourceName = src.ResourceName };
+
+        var tex = src.AlbedoTexture;
+        toon.SetShaderParameter("has_texture", tex != null);
+        if (tex != null) toon.SetShaderParameter("albedo_texture", tex);
+        var albedoColor = src.AlbedoColor;
+        if (tex != null && albedoColor.A <= 0.01f)
+            albedoColor = new Color(albedoColor.R, albedoColor.G, albedoColor.B, 1.0f);
+        toon.SetShaderParameter("albedo_color", albedoColor);
+
+        float scissor = 0f;
+        if (src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaScissor)
+            scissor = Mathf.Min(src.AlphaScissorThreshold, 0.45f);
+        else if (src.Transparency == BaseMaterial3D.TransparencyEnum.Alpha ||
+                 src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaDepthPrePass)
+            scissor = 0.4f;
+        toon.SetShaderParameter("alpha_scissor", scissor);
+
+        if (outlineWidth > 0f && UI.DeviceProfile.AvatarOutline)
+        {
+            var outline = new ShaderMaterial { Shader = Outline, ResourceName = src.ResourceName + "Outline" };
+            outline.SetShaderParameter("outline_width", outlineWidth);
+            outline.SetShaderParameter("has_texture", tex != null);
+            if (tex != null) outline.SetShaderParameter("albedo_texture", tex);
+            outline.SetShaderParameter("alpha_scissor", scissor);
+            toon.NextPass = outline;
+        }
+
+        return toon;
+    }
+
     private static int Restyle(MeshInstance3D mi, float outlineWidth, Shader shader)
     {
         int surfaces = mi.Mesh.GetSurfaceCount();
@@ -211,43 +248,47 @@ public static class ToonShading
             var src = mi.GetActiveMaterial(s) as BaseMaterial3D;
             if (src == null) continue;
 
-            var toon = new ShaderMaterial { Shader = shader };
+            var toon = shader == ToonAvatar
+                ? CreateAvatarToonMaterial(src, outlineWidth)
+                : BuildGenericToon(src, outlineWidth, shader);
 
-            var tex = src.AlbedoTexture;
-            toon.SetShaderParameter("has_texture", tex != null);
-            if (tex != null) toon.SetShaderParameter("albedo_texture", tex);
-            var albedoColor = src.AlbedoColor;
-            if (tex != null && albedoColor.A <= 0.01f)
-                albedoColor = new Color(albedoColor.R, albedoColor.G, albedoColor.B, 1.0f);
-            toon.SetShaderParameter("albedo_color", albedoColor);
-
-            // Carry transparency across. VRM/PMX hair and clothing arrive as alpha-scissor
-            // (cutout) or alpha-blend; either way we scissor, which sorts cleanly with the
-            // depth-prepass and avoids the sorting halos blend produces on layered hair.
-            // The 0.4 default (not 0.5) keeps wispy strand pixels casting: at 0.5 the
-            // semi-transparent fringe of a hair card drops out of the SHADOW map entirely and
-            // a full head of hair reads as a bald scalp in its own ground silhouette.
-            float scissor = 0f;
-            if (src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaScissor)
-                scissor = Mathf.Min(src.AlphaScissorThreshold, 0.45f);
-            else if (src.Transparency == BaseMaterial3D.TransparencyEnum.Alpha ||
-                     src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaDepthPrePass)
-                scissor = 0.4f;
-            toon.SetShaderParameter("alpha_scissor", scissor);
-
-            if (outlineWidth > 0f)
+            if (toon != null)
             {
-                var outline = new ShaderMaterial { Shader = Outline };
-                outline.SetShaderParameter("outline_width", outlineWidth);
-                outline.SetShaderParameter("has_texture", tex != null);
-                if (tex != null) outline.SetShaderParameter("albedo_texture", tex);
-                outline.SetShaderParameter("alpha_scissor", scissor);
-                toon.NextPass = outline;
+                mi.SetSurfaceOverrideMaterial(s, toon);
+                done++;
             }
-
-            mi.SetSurfaceOverrideMaterial(s, toon);
-            done++;
         }
         return done;
+    }
+
+    private static ShaderMaterial BuildGenericToon(BaseMaterial3D src, float outlineWidth, Shader shader)
+    {
+        var toon = new ShaderMaterial { Shader = shader, ResourceName = src.ResourceName };
+        var tex = src.AlbedoTexture;
+        toon.SetShaderParameter("has_texture", tex != null);
+        if (tex != null) toon.SetShaderParameter("albedo_texture", tex);
+        var albedoColor = src.AlbedoColor;
+        if (tex != null && albedoColor.A <= 0.01f)
+            albedoColor = new Color(albedoColor.R, albedoColor.G, albedoColor.B, 1.0f);
+        toon.SetShaderParameter("albedo_color", albedoColor);
+
+        float scissor = 0f;
+        if (src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaScissor)
+            scissor = Mathf.Min(src.AlphaScissorThreshold, 0.45f);
+        else if (src.Transparency == BaseMaterial3D.TransparencyEnum.Alpha ||
+                 src.Transparency == BaseMaterial3D.TransparencyEnum.AlphaDepthPrePass)
+            scissor = 0.4f;
+        toon.SetShaderParameter("alpha_scissor", scissor);
+
+        if (outlineWidth > 0f)
+        {
+            var outline = new ShaderMaterial { Shader = Outline, ResourceName = src.ResourceName + "Outline" };
+            outline.SetShaderParameter("outline_width", outlineWidth);
+            outline.SetShaderParameter("has_texture", tex != null);
+            if (tex != null) outline.SetShaderParameter("albedo_texture", tex);
+            outline.SetShaderParameter("alpha_scissor", scissor);
+            toon.NextPass = outline;
+        }
+        return toon;
     }
 }

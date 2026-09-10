@@ -133,7 +133,7 @@ public sealed class AvatarToggleSystem
         }
 
         // Surface-level: hide/show individual primitives within a mesh by setting their
-        // override material to Hidden or restoring the original active material.
+        // override material to Hidden or restoring the toon-shaded active material.
         if (_toggleSurfaces.TryGetValue(name, out var surfaces))
         {
             bool on = _states[name];
@@ -143,15 +143,35 @@ public sealed class AvatarToggleSystem
                 if (on)
                 {
                     if (_savedSurfaceMaterials.TryGetValue((mesh, surface), out var origMat) && origMat != null && origMat != Hidden)
+                    {
+                        if (origMat is BaseMaterial3D baseMat)
+                        {
+                            var toonMat = ToonShading.CreateAvatarToonMaterial(baseMat);
+                            if (toonMat != null) origMat = toonMat;
+                            _savedSurfaceMaterials[(mesh, surface)] = origMat;
+                        }
                         mesh.SetSurfaceOverrideMaterial(surface, origMat);
+                    }
                     else
-                        mesh.SetSurfaceOverrideMaterial(surface, null);
+                    {
+                        var baseMat = mesh.Mesh?.SurfaceGetMaterial(surface);
+                        var toonMat = baseMat != null ? ToonShading.CreateAvatarToonMaterial(baseMat) : null;
+                        if (toonMat != null) _savedSurfaceMaterials[(mesh, surface)] = toonMat;
+                        mesh.SetSurfaceOverrideMaterial(surface, toonMat ?? baseMat);
+                    }
                 }
                 else
                 {
                     var current = mesh.GetSurfaceOverrideMaterial(surface) ?? mesh.Mesh?.SurfaceGetMaterial(surface);
                     if (current != null && current != Hidden)
+                    {
+                        if (current is BaseMaterial3D baseMat)
+                        {
+                            var toonMat = ToonShading.CreateAvatarToonMaterial(baseMat);
+                            if (toonMat != null) current = toonMat;
+                        }
                         _savedSurfaceMaterials[(mesh, surface)] = current;
+                    }
 
                     mesh.SetSurfaceOverrideMaterial(surface, Hidden);
                 }
