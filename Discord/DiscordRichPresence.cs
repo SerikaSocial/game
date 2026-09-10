@@ -45,8 +45,18 @@ public static class DiscordRichPresence
 
     // Authorize retry: when Discord isn't running the authorize fails silently. We retry
     // periodically so the game picks up Discord if it starts after the game.
+    //
+    // BOUNDED, and that bound is load-bearing. The retry used to be infinite (backing off only
+    // to 60 s), so any authorize that reached Discord and failed was re-attempted for the whole
+    // session — and an authorize that reaches Discord opens a BROWSER TAB. A misconfigured
+    // redirect URI therefore produced a new "invalid redirect" tab every minute, forever.
+    private const int MaxAuthorizeAttempts = 3;
+    private static int _authorizeAttempts;
     private static double _authorizeRetryDelay = 10.0;
     private static double _authorizeRetryTimer;
+    // A portal-side misconfiguration cannot be fixed by trying again. Set once, checked
+    // everywhere that would otherwise re-prompt, cleared only by the Settings toggle.
+    private static bool _authorizeTerminal;
 
     // Last presence state — what to push on (re)connect and on roster changes.
     private static string _worldName = "Browsing the menus";
@@ -182,7 +192,11 @@ public static class DiscordRichPresence
             return;
         }
 
+        // The toggle is the one deliberate "try again" in the product, so it clears every
+        // give-up latch — including a portal misconfiguration the user has since fixed.
         _promptedThisProcess = false;
+        _authorizeTerminal = false;
+        _authorizeAttempts = 0;
         _authorizeRetryTimer = 0;
         _authorizeRetryDelay = 10.0;
         if (DeviceProfile.Settings.DiscordConsent == DeviceProfile.Settings.DiscordConsentKind.Declined)
@@ -200,8 +214,16 @@ public static class DiscordRichPresence
 
     private static void BeginAuthorizeFlow()
     {
-        if (_client == null || _promptedThisProcess) return;
+        if (_client == null || _promptedThisProcess || _authorizeTerminal) return;
+        if (_authorizeAttempts >= MaxAuthorizeAttempts)
+        {
+            GD.Print($"[Discord] giving up on authorize after {_authorizeAttempts} attempts this launch "
+                     + "— it will try again next launch (or Settings → Interface → Discord Rich Presence)");
+            _authorizeTerminal = true;
+            return;
+        }
         _promptedThisProcess = true;
+        _authorizeAttempts++;
         GD.Print("[Discord] requesting consent — check your Discord client for a one-time Authorize prompt");
         _client.BeginAuthorize((ok, error, code, redirectUri) =>
         {
@@ -209,7 +231,21 @@ public static class DiscordRichPresence
             if (!ok)
             {
                 UnavailableReason = $"authorization failed: {error}";
-                if (LooksLikeUserCancel(error))
+                if (LooksLikeOAuthMisconfiguration(error))
+                {
+                    // Terminal by construction: the redirect URI / client config lives in the
+                    // Discord Developer Portal, so every retry produces the identical error —
+                    // and each one opens another browser tab at Discord's error page. Say
+                    // exactly what to fix, once, and stop.
+                    _authorizeTerminal = true;
+                    UnavailableReason =
+                        $"Discord app is misconfigured ({error}). Add http://127.0.0.1/callback under "
+                        + "Developer Portal → OAuth2 → Redirects for application " + _appId
+                        + ", and enable Public Client.";
+                    GD.PrintErr($"[Discord] {UnavailableReason}");
+                    GD.PrintErr("[Discord] not retrying — retrying cannot fix a portal-side redirect URI.");
+                }
+                else if (LooksLikeUserCancel(error))
                 {
                     // Closing/cancelling the overlay is the long-lived "no" — Settings is
                     // how they get it back. Discord itself also remembers an Authorize.
@@ -217,14 +253,20 @@ public static class DiscordRichPresence
                     DeviceProfile.Settings.DiscordPresence = false;
                     SetConsent(DeviceProfile.Settings.DiscordConsentKind.Declined);
                 }
-                else
+                else if (_authorizeAttempts < MaxAuthorizeAttempts)
                 {
                     // Discord not running, overlay failed to attach, etc. Reset the prompt
                     // guard and schedule a retry so we pick up Discord if it starts later.
                     _promptedThisProcess = false;
                     _authorizeRetryTimer = _authorizeRetryDelay;
                     _authorizeRetryDelay = Math.Min(_authorizeRetryDelay * 2.0, 60.0);
-                    GD.Print($"[Discord] authorize failed ({error}) — will retry in {_authorizeRetryTimer:F0}s");
+                    GD.Print($"[Discord] authorize failed ({error}) — retry {_authorizeAttempts + 1}"
+                             + $"/{MaxAuthorizeAttempts} in {_authorizeRetryTimer:F0}s");
+                }
+                else
+                {
+                    _authorizeTerminal = true;
+                    GD.Print($"[Discord] authorize failed ({error}) — out of attempts for this launch");
                 }
                 return;
             }
@@ -433,6 +475,8 @@ public static class DiscordRichPresence
             _reconnectTimer = 0;
             _authorizeRetryTimer = 0;
             _authorizeRetryDelay = 10.0;
+            _authorizeAttempts = 0;
+            _authorizeTerminal = false;
             PushNow(); // a fresh session has no activity — restore ours
         }
         else if (status == DiscordNative.ClientStatus.Disconnected)
@@ -586,6 +630,21 @@ public static class DiscordRichPresence
         // pumping — that is not a player choice. Only an explicit cancel/deny is sticky.
         return e.Contains("cancel") || e.Contains("denied")
             || e.Contains("declin") || e.Contains("reject");
+    }
+
+    /// A portal-side OAuth configuration error: the app's registered redirect URIs, client type
+    /// or scopes are wrong. Distinguished from a transient failure because retrying is
+    /// *guaranteed* to reproduce it, and each attempt that reaches Discord opens a browser tab.
+    /// This is the difference between one error line and a tab every minute all session.
+    private static bool LooksLikeOAuthMisconfiguration(string error)
+    {
+        if (string.IsNullOrEmpty(error)) return false;
+        string e = error.ToLowerInvariant();
+        return e.Contains("redirect")            // "Invalid OAuth2 redirect_uri", missing redirect_uri
+            || e.Contains("invalid_request")
+            || e.Contains("invalid_client")
+            || e.Contains("invalid_scope")
+            || e.Contains("unauthorized_client");
     }
 
     private static bool LooksLikeInvalidGrant(string error)
