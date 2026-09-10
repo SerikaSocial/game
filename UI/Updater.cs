@@ -194,6 +194,33 @@ public partial class Updater : CanvasLayer
         UpdateAvailable?.Invoke(latestVersion);
         _screen.Present();
 
+        // A Hub install updates THROUGH the Hub — two self-updaters racing over one
+        // install directory is how the half-updated-install bug happens twice. Detect the
+        // Hub's registry file next to us and hand the player to it. Standalone installs
+        // keep the Phase 1 path below.
+        if (DetectHubInstall(out string hubPath))
+        {
+            _screen.Title = "Update available";
+            _screen.Body = $"Serika Social v{latestVersion} is ready.\n"
+                        + "This install is managed by the Serika Desktop Hub.";
+            _screen.ProgressVisible = false;
+            _screen.DetailVisible = false;
+            _screen.ClearActions();
+
+            var later = Brand.Ghost_(new Button { Text = "Later" });
+            later.Pressed += Dismiss;
+            _screen.AddAction(later);
+
+            var hub = Brand.Primary_(new Button { Text = "Open Serika Desktop Hub" });
+            hub.Pressed += () =>
+            {
+                OS.ShellOpen(hubPath);
+                Dismiss();
+            };
+            _screen.AddAction(hub);
+            return;
+        }
+
         _screen.Title = "Update available";
         string body = $"Serika Social v{latestVersion} is ready to install.\n"
                     + $"You're on v{CurrentVersion}.";
@@ -238,6 +265,40 @@ public partial class Updater : CanvasLayer
             };
             _screen.AddAction(open);
         }
+    }
+
+    /// The Hub's install registry lives in its AppLocalData dir. Windows: per-user
+    /// %LOCALAPPDATA%. Linux: XDG data home (the .deb installs the Hub system-wide but
+    /// its registry is still per-user). A cheap File.Exists probe — no parse needed to
+    /// know the Hub owns this machine's installs.
+    private static bool DetectHubInstall(out string hubPath)
+    {
+        hubPath = null;
+        if (IsAndroid) return false;
+
+        // Qt's AppLocalDataLocation is <LocalAppData|XDG_DATA_HOME>/Serika/"Serika Desktop Hub"
+        // (organization "Serika", application "Serika Desktop Hub" — keep in sync with the Hub's main.cpp).
+        string registry = System.IO.Path.Combine(
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            "Serika", "Serika Desktop Hub", "installed.json");
+        if (!System.IO.File.Exists(registry)) return false;
+
+        // Prefer the real exe when we can find one; serikahub:// works whenever the
+        // Hub's installer registered the protocol even if the exe moved.
+        if (IsWindows)
+        {
+            hubPath = System.IO.Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "Serika Desktop Hub", "SerikaHub.exe");
+            if (System.IO.File.Exists(hubPath)) return true;
+        }
+        else if (System.IO.File.Exists("/usr/bin/serika-hub"))
+        {
+            hubPath = "/usr/bin/serika-hub";
+            return true;
+        }
+        hubPath = "serikahub://library";
+        return true;
     }
 
     private void Dismiss()
