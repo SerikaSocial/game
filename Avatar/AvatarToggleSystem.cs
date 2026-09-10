@@ -21,6 +21,8 @@ public sealed class AvatarToggleSystem
     private readonly Dictionary<string, List<MeshInstance3D>> _toggleMeshes = new();
     // (mesh, surfaceIndex) pairs whose material name matches the toggle — hide/show one surface.
     private readonly Dictionary<string, List<(MeshInstance3D mesh, int surface)>> _toggleSurfaces = new();
+    // Preserved active materials for surface-level toggles so they can be restored when re-enabled.
+    private readonly Dictionary<(MeshInstance3D mesh, int surface), Material> _savedSurfaceMaterials = new();
 
     public IReadOnlyDictionary<string, bool> States => _states;
 
@@ -49,6 +51,13 @@ public sealed class AvatarToggleSystem
             var surfaces = new List<(MeshInstance3D, int)>();
             FindSurfacesByMaterialName(_avatar, toggle.Name, surfaces);
             _toggleSurfaces[toggle.Name] = surfaces;
+
+            foreach (var (mesh, surface) in surfaces)
+            {
+                var mat = mesh.GetSurfaceOverrideMaterial(surface) ?? mesh.Mesh?.SurfaceGetMaterial(surface);
+                if (mat != null && mat != Hidden)
+                    _savedSurfaceMaterials[(mesh, surface)] = mat;
+            }
         }
 
         ApplyAll();
@@ -124,9 +133,7 @@ public sealed class AvatarToggleSystem
         }
 
         // Surface-level: hide/show individual primitives within a mesh by setting their
-        // override material to null (hidden) or restoring the original (visible). We use
-        // a sentinel: when hiding, we set the override to a transparent material; when
-        // showing, we clear the override so the original material shows through.
+        // override material to Hidden or restoring the original active material.
         if (_toggleSurfaces.TryGetValue(name, out var surfaces))
         {
             bool on = _states[name];
@@ -134,9 +141,20 @@ public sealed class AvatarToggleSystem
             {
                 if (!GodotObject.IsInstanceValid(mesh)) continue;
                 if (on)
-                    mesh.SetSurfaceOverrideMaterial(surface, null);
+                {
+                    if (_savedSurfaceMaterials.TryGetValue((mesh, surface), out var origMat) && origMat != null && origMat != Hidden)
+                        mesh.SetSurfaceOverrideMaterial(surface, origMat);
+                    else
+                        mesh.SetSurfaceOverrideMaterial(surface, null);
+                }
                 else
+                {
+                    var current = mesh.GetSurfaceOverrideMaterial(surface) ?? mesh.Mesh?.SurfaceGetMaterial(surface);
+                    if (current != null && current != Hidden)
+                        _savedSurfaceMaterials[(mesh, surface)] = current;
+
                     mesh.SetSurfaceOverrideMaterial(surface, Hidden);
+                }
             }
         }
     }

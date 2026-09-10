@@ -216,7 +216,10 @@ public static class ToonShading
             var tex = src.AlbedoTexture;
             toon.SetShaderParameter("has_texture", tex != null);
             if (tex != null) toon.SetShaderParameter("albedo_texture", tex);
-            toon.SetShaderParameter("albedo_color", src.AlbedoColor);
+            var albedoColor = src.AlbedoColor;
+            if (tex != null && albedoColor.A <= 0.01f)
+                albedoColor = new Color(albedoColor.R, albedoColor.G, albedoColor.B, 1.0f);
+            toon.SetShaderParameter("albedo_color", albedoColor);
 
             // Carry transparency across. VRM/PMX hair and clothing arrive as alpha-scissor
             // (cutout) or alpha-blend; either way we scissor, which sorts cleanly with the

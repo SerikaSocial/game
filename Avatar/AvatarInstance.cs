@@ -69,10 +69,10 @@ public sealed partial class AvatarInstance : Node3D
         // The glTF state is passed through so the avatar's own VRM spring rig can be read out of
         // it — the author's chains and, crucially, their collider ladder.
         Stage(inst, "secondary physics", () => inst.SetupPhysBones(state));
-        Stage(inst, "toggles", () => inst.SetupToggles());
-        // Cel-shade the flat PBR the VRM/PMX imported as. Done last so it sees the final mesh,
-        // including any chest geometry BreastRig re-skinned.
+        // Cel-shade the flat PBR the VRM/PMX imported as. Done before toggle setup so toggles can
+        // capture and manage the final styled materials.
         Stage(inst, "toon shading", () => ToonShading.ApplyToAvatar(model));
+        Stage(inst, "toggles", () => inst.SetupToggles());
 
         return inst;
     }

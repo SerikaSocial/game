@@ -514,7 +514,7 @@ public partial class ActionMenu : CanvasLayer
         }
         _radialControl.DrawCircle(center, InnerRadius, Brand.Bg1);
         _radialControl.DrawArc(center, InnerRadius, 0, Mathf.Tau, 64, Brand.Border, 1.5f, true);
-        bool back = _openSub >= 0 || _inCustomSub;
+        bool back = _openSub >= 0 || _inCustomSub || _inToggleSub;
         string centerTitle = back ? "Back" : "Close";
         if (back)
         {
