@@ -30,3 +30,7 @@ Assets/Avatars/*.ska
 Launcher/bin/
 Net/Codec/Tests/bin/
 Net/Codec/Tests/obj/
+# Same for the SerikaScript sandbox test project. NOTE the `bin/*` rule near the top only
+# matches the repo-root bin/, so every nested test project needs its own entry.
+Script/Tests/bin/
+Script/Tests/obj/
