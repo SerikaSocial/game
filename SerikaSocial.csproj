@@ -45,12 +45,14 @@
   </PropertyGroup>
 
   <!--
-    The codec test project (Net/Codec/Tests) references xUnit and must NOT be part of the
-    Godot build. The codec sources themselves ARE compiled here — they're the same files the
-    tests exercise, so what ships is exactly what is verified.
+    The codec test project (Net/Codec/Tests) and the SerikaScript sandbox test project
+    (Script/Tests) reference xUnit and must NOT be part of the Godot build. The sources they
+    exercise ARE compiled here — they're the same files, so what ships is exactly what is
+    verified.
   -->
   <ItemGroup>
     <Compile Remove="Net/Codec/Tests/**/*.cs" />
+    <Compile Remove="Script/Tests/**/*.cs" />
     <Compile Remove="proto/**/*.cs" />
     <Compile Remove="Launcher/**/*.cs" />
   </ItemGroup>

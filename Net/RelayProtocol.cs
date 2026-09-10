@@ -34,6 +34,14 @@ public enum MsgType : byte
     /// Fanned out to the whole instance like Chat, ignoring AOI — a peer across the room still
     /// has to stop wearing their old model.
     AvatarChanged = 0x0C,
+    /// client→server: `[channel:u16][payload:f64]` · server→client: `[peer_id:u32][channel:u16][payload:f64]`
+    /// A world script's NET_EMIT. Fanned out to the whole instance like Chat, ignoring AOI — a
+    /// round timer or a score is not a local event.
+    ///
+    /// The body is a fixed 10 bytes because the VM's stack is doubles, so one f64 plus a channel
+    /// is the whole of what a script can emit. Fixed width means no length field to disagree
+    /// about. The relay rate-limits per peer and never interprets either value.
+    ScriptEvent = 0x0D,
 }
 
 public static class RelayProtocol

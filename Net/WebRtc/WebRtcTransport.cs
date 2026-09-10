@@ -37,6 +37,8 @@ public sealed class WebRtcTransport : ISerikaTransport
     public event Action<uint, VoiceFrame> VoiceReceived;
     public event Action<uint, string> ChatReceived;
     public event Action<uint> AvatarChanged;
+    /// (senderPeerId, channel, payload) — a peer's world script emitted a NET_EMIT.
+    public event Action<uint, int, double> ScriptEventReceived;
     public event Action<uint, ushort, float, float, float, float, float, float, float, float, float, float> ObjectSyncReceived;
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     public event Action<string> Rejected;
@@ -138,6 +140,12 @@ public sealed class WebRtcTransport : ISerikaTransport
                 // No payload on a direct channel either — the receiver looks the peer up.
                 AvatarChanged?.Invoke(peerId);
                 break;
+            case MsgType.ScriptEvent:
+                // Body starts at 0 on a direct channel: there is no relay to prepend a sender id.
+                if (payload.Length >= 10)
+                    ScriptEventReceived?.Invoke(peerId, payload[0] | (payload[1] << 8),
+                                                BitConverter.ToDouble(payload.Slice(2, 8)));
+                break;
             case MsgType.ObjectSync:
                 // The body starts at offset 0, not 5: `UdpTransport` skips a sender id the relay
                 // prepends, and there is no relay on a direct channel.
@@ -161,6 +169,18 @@ public sealed class WebRtcTransport : ISerikaTransport
     public void SendVoice(VoiceFrame frame) => Broadcast(RelayProtocol.WriteOutbound(MsgType.Voice, frame.Encode()));
 
     public void SendAvatarChanged() => Broadcast(new[] { (byte)MsgType.AvatarChanged });
+
+    /// `[channel:u16][payload:f64]` — same body the relay path uses, so a P2P host and a
+    /// dedicated relay stay one protocol rather than two.
+    public void SendScriptEvent(int channel, double payload)
+    {
+        var body = new byte[11];
+        body[0] = (byte)MsgType.ScriptEvent;
+        body[1] = (byte)(channel & 0xFF);
+        body[2] = (byte)((channel >> 8) & 0xFF);
+        BitConverter.GetBytes(payload).CopyTo(body, 3);
+        Broadcast(body);
+    }
 
     public void SendChat(string text)
     {

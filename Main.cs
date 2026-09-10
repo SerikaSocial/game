@@ -20,6 +20,11 @@ public interface IPlayer
     Transform3D PoseTransform();
     void SetUsername(string name);
     float MouseSensitivity { get; set; }
+
+    /// The equipped avatar, or null before one is loaded. Both LocalPlayer and VrPlayer already
+    /// expose this; declaring it here lets the script roster treat local and remote players
+    /// uniformly without a type test per call.
+    SerikaSocial.Avatar.AvatarInstance Avatar { get; }
 }
 
 /// Boots the client: builds the default world, logs in via PKCE, joins an instance, and
@@ -52,6 +57,14 @@ public partial class Main : Node3D
     private UI.VrUiSurface _vrUi;
     private UI.VrWristHud _vrWristHud;  // wrist-mounted chrome panel; built with the VR rig
     private readonly Dictionary<uint, RemoteAvatar> _remotes = new();
+
+    /// The roster world scripts see. Built once and handed to WorldLoader, so every world loaded
+    /// this session shares it; invalidated whenever the peer set changes so script player indices
+    /// stay stable and correct.
+    private SerikaSocial.Player.ScriptPlayerRoster _scriptPlayers;
+
+    /// The current world's script runtime, if it has one. Null for every world without a script.
+    private Serika.Script.ScriptWorld _scriptWorld;
     private readonly HashSet<string> _blockedUserIds = new();
     /// Peers currently rendered as the anonymous bean (blocked). Mirrors the SpawnRemote
     /// decision so a later unblock knows which remotes to respawn with their real avatar.
@@ -102,6 +115,22 @@ public partial class Main : Node3D
     {
         // Apply the purple brand theme to every Control in the client at once.
         GetTree().Root.Theme = Brand.Theme;
+
+        // Hand world scripts their view of the roster. Set before any world loads, because
+        // WorldLoader reads it at load time and a world that loads first would otherwise get a
+        // null roster and see zero players forever.
+        _scriptPlayers = new SerikaSocial.Player.ScriptPlayerRoster(() => _local, _remotes);
+        SerikaSocial.World.WorldLoader.ScriptPlayers = _scriptPlayers;
+        SerikaSocial.World.WorldLoader.LocalBody = () => _local as CharacterBody3D;
+
+        // Bridge a world script to the wire: its NET_EMIT goes out on the relay's script channel,
+        // and a peer's emit arrives as this world's on_message. The relay rate-limits per peer,
+        // and never interprets either value.
+        SerikaSocial.World.WorldLoader.ScriptWorldCreated += sw =>
+        {
+            _scriptWorld = sw;
+            sw.Emitted += (_, channel, payload) => _transport?.SendScriptEvent(channel, payload);
+        };
 
         // Detect the device tier and apply saved graphics settings before the first frame, so a
         // Quest never renders one frame at full desktop quality. Also seeds persisted control/
@@ -213,6 +242,11 @@ public partial class Main : Node3D
         if (args.ContainsKey("serika-keytest"))
         {
             Player.KeyBindDiagnostic.Run(this);
+            return;
+        }
+        if (args.ContainsKey("serika-scripttest"))
+        {
+            Serika.Script.ScriptDiagnostic.Run(this);
             return;
         }
         if (args.ContainsKey("serika-voicetest"))
@@ -2281,6 +2315,7 @@ public partial class Main : Node3D
             a.QueueFree();
         }
         _remotes.Clear();
+        _scriptPlayers?.Invalidate();
         _beanedPeers.Clear();
         _peerNames.Clear();
         _peerUserIds.Clear();
@@ -2394,6 +2429,10 @@ public partial class Main : Node3D
         udp.PoseReceived += (id, pose) => { if (_transport == udp) OnPoseReceived(id, pose); };
         udp.ChatReceived += (id, text) => { if (_transport == udp) OnChatReceived(id, text); };
         udp.AvatarChanged += id => { if (_transport == udp) OnPeerAvatarChanged(id); };
+        udp.ScriptEventReceived += (id, ch, payload) =>
+        {
+            if (_transport == udp) OnScriptEventReceived(ch, payload);
+        };
         // Loud, but not fatal. Spawning a remote avatar runs user-supplied content through the
         // importer; one peer whose model blows up must not take the whole client with it.
         udp.OnHandlerFault += e => GD.PrintErr($"transport handler faulted: {e}");
@@ -2578,6 +2617,7 @@ public partial class Main : Node3D
         {
             _voice?.ForgetSpeaker(a.GetNodeOrNull<AudioStreamPlayer3D>("VoicePlayer"));
             a.QueueFree();
+            _scriptPlayers?.Invalidate();
         }
         // Relay peer ids are per-session, so leaving stale voice state keyed by one would apply
         // a previous occupant's mute/gain to whoever inherits the id next.
@@ -2687,6 +2727,7 @@ public partial class Main : Node3D
         if (_remotes.ContainsKey(p.PeerId)) return;
         var a = RemoteAvatar.Create(p.PeerId, p.Name);
         _remotes[p.PeerId] = a;
+        _scriptPlayers?.Invalidate();
         AddChild(a);
         // Someone arriving after the player chose "hide all players" must arrive hidden too.
         if (_eventHidePlayers) a.Visible = false;
@@ -2747,6 +2788,17 @@ public partial class Main : Node3D
     /// room kept seeing whatever you happened to be wearing when they first saw you, until they
     /// rejoined. Re-read it from the API; the message itself carries no url, so a peer cannot
     /// aim our downloader anywhere.
+    /// A peer's world script emitted. Delivered to our copy of the script as on_message.
+    ///
+    /// Deliberately not routed back out again: this is the receive side only, so two clients
+    /// cannot ping-pong one event forever. A script that chooses to emit from on_message is
+    /// authoring that itself, and the relay's per-peer budget bounds it.
+    private void OnScriptEventReceived(int channel, double payload)
+    {
+        if (!GodotObject.IsInstanceValid(_scriptWorld)) { _scriptWorld = null; return; }
+        _scriptWorld?.Message(channel, payload);
+    }
+
     private void OnPeerAvatarChanged(uint peerId)
     {
         if (!_remotes.ContainsKey(peerId)) return;
@@ -2853,7 +2905,7 @@ public partial class Main : Node3D
         {
             string userId = _peerUserIds.GetValueOrDefault(peerId, "");
             string name = _peerNames.GetValueOrDefault(peerId, $"peer{peerId}");
-            if (_remotes.Remove(peerId, out var avatar)) avatar.QueueFree();
+            if (_remotes.Remove(peerId, out var avatar)) { avatar.QueueFree(); _scriptPlayers?.Invalidate(); }
             _beanedPeers.Remove(peerId);
             SpawnRemote(new PeerInfo(peerId, name, userId));
         }

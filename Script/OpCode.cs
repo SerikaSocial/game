@@ -27,6 +27,33 @@ public enum OpCode : byte
     Halt = 0x51,
 }
 
+/// Event hooks a module may define. The VM dispatches these individually — a script never "runs"
+/// as a whole. MUST stay in lockstep with HookId in server/api/src/serikascript.ts.
+///
+/// Arguments arrive in locals 0..arity-1, so a hook reads them with LOAD; there is no separate
+/// parameter mechanism and no call stack.
+public enum HookId : byte
+{
+    OnReady = 0x00,      // ()
+    OnTick = 0x01,       // (dt)
+    OnInteract = 0x02,   // (playerIndex)
+    OnEnterZone = 0x03,  // (playerIndex, zoneId)
+    OnExitZone = 0x04,   // (playerIndex, zoneId)
+    OnMessage = 0x05,    // (nameId, payload)
+}
+
+/// Argument counts per hook. Mirrors HOOK_ARITY in the server validator.
+public static class HookArity
+{
+    public static int Of(HookId hook) => hook switch
+    {
+        HookId.OnReady => 0,
+        HookId.OnTick or HookId.OnInteract => 1,
+        HookId.OnEnterZone or HookId.OnExitZone or HookId.OnMessage => 2,
+        _ => 0,
+    };
+}
+
 /// Host-call allowlist — the ONLY bridge from a script to the engine. Deny-by-default. MUST match
 /// HostCall in server/api/src/serikascript.ts.
 ///
@@ -42,6 +69,13 @@ public enum HostCall : ushort
     PlayerCount = 0x0300, PlayerPos = 0x0301,
     VarGet = 0x0400, VarSet = 0x0401,
     NetEmit = 0x0500,
+
+    // ── Tier 5 (Creator) — player attachments ──
+    /// Parent one of this script's DECLARED nodes to a player's bone. [Trust≥5]
+    /// Confers no control over player motion: the attachment rides the player, never the reverse.
+    PlayerAttach = 0x0302,
+    /// Return a declared node from a player back to the world root. [Trust≥5]
+    PlayerDetach = 0x0303,
 
     // ── Tier 5 (Creator) — custom material/shader params ──
     /// Set a shader uniform by name on a declared material node. [Trust≥5]
@@ -74,6 +108,7 @@ public static class HostCallTrust
     /// Minimum trust level required to use a HostCall. 0 = always available.
     public static int MinTrust(HostCall call) => call switch
     {
+        HostCall.PlayerAttach or HostCall.PlayerDetach => 5,
         HostCall.ShaderSetFloat or HostCall.ShaderSetColor or HostCall.ShaderSetVec4 => 5,
         HostCall.ParticleBurst or HostCall.ParticleSetRate or HostCall.SoundPlaySpatial => 6,
         HostCall.NetEmitString or HostCall.NetSyncGet or HostCall.NetSyncSet => 8,

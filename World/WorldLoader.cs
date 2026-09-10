@@ -1,7 +1,10 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using Serika.Script;
+using SerikaSocial.Player;
 
 namespace SerikaSocial.World;
 
@@ -115,6 +118,7 @@ public static class WorldLoader
         string lighting = "outdoor";
         string collision = "geometry";
         string shading = "default";
+        float ropeLength = 0f; // 0 = no rope
         if (zip.FileExists("manifest.json"))
         {
             try
@@ -132,6 +136,12 @@ public static class WorldLoader
                     shading = sh.GetString() ?? "default";
                 if (rootEl.TryGetProperty("spawn", out var sp) && sp.ValueKind == JsonValueKind.Array && sp.GetArrayLength() >= 3)
                     manifestSpawn = new Vector3((float)sp[0].GetDouble(), (float)sp[1].GetDouble(), (float)sp[2].GetDouble());
+                // Opt-in co-op rope. Absent means no rope — this must never be on by default, or
+                // every world would start tugging players toward each other.
+                if (rootEl.TryGetProperty("rope", out var rp) && rp.ValueKind == JsonValueKind.Object)
+                    ropeLength = rp.TryGetProperty("length", out var rl) && rl.ValueKind == JsonValueKind.Number
+                        ? Mathf.Clamp((float)rl.GetDouble(), 1.5f, 30f)
+                        : 6.0f;
             }
             catch (Exception e)
             {
@@ -147,10 +157,15 @@ public static class WorldLoader
         }
 
         byte[] glb = zip.ReadFile(modelFile);
+
+        // Optional behaviour. A world without a script.sskb never constructs a ScriptWorld and
+        // pays nothing; a world WITH one that fails to load still loads as geometry (see
+        // ScriptWorld.AddModule) — behaviour is additive, never a precondition for the world.
+        byte[] scriptBytes = zip.FileExists(ScriptFile) ? zip.ReadFile(ScriptFile) : null;
         zip.Close();
 
         var node = LoadGltfFromBuffer(glb, Path.GetDirectoryName(path) ?? "");
-        return Attach(node, worldId, root, manifestSpawn, lighting, collision, shading);
+        return Attach(node, worldId, root, manifestSpawn, lighting, collision, shading, scriptBytes, ropeLength);
     }
 
     private static Node3D LoadGltfFromFile(string path)
@@ -179,7 +194,8 @@ public static class WorldLoader
 
     /// Parent the instantiated world under root, generate collision, and resolve the spawn.
     private static Vector3? Attach(Node instance, string worldId, Node3D root, Vector3? manifestSpawn, string lighting = "outdoor",
-                                   string collision = "geometry", string shading = "default")
+                                   string collision = "geometry", string shading = "default", byte[] scriptBytes = null,
+                                   float ropeLength = 0f)
     {
         if (instance == null)
         {
@@ -218,8 +234,11 @@ public static class WorldLoader
             SerikaSocial.Avatar.ToonShading.ApplyToWorld(instance);
 
         // Swap authoring markers for the live nodes they stand for (mirrors, seats, video).
-        var spawnMarker = ResolveMarkers(instance, out int videoScreens);
+        var spawnMarker = ResolveMarkers(instance, out int videoScreens, out var scriptNodes, out var scriptZones);
         StartAmbientAnimations(instance);
+
+        AttachScript(instance, worldId, scriptBytes, scriptNodes, scriptZones);
+        AttachRope(instance, ropeLength);
 
         // A theatre with a screen in it gets house lights: the room drops when a clip starts and
         // the picture becomes the only thing lighting it. Gated on the `dark` mode, so a video
@@ -485,6 +504,79 @@ public static class WorldLoader
     private const string MarkerProp   = "SERIKA_PROP";
     private const string MarkerPortal = "SERIKA_PORTAL_";
 
+    //   SERIKA_SNODE<n>  a node the world's script may manipulate, as declared slot n
+    //   SERIKA_ZONE<n>   a trigger volume firing on_enter_zone/on_exit_zone with id n (scale = extents)
+    //
+    // These two are the entire surface a script has on the world. A script addresses them by
+    // integer slot and never by name or path, which is what makes "declared nodes only"
+    // enforceable rather than aspirational.
+    private const string MarkerScriptNode = "SERIKA_SNODE";
+    private const string MarkerScriptZone = "SERIKA_ZONE";
+
+    /// The compiled script inside a `.serikaworld`, if any.
+    private const string ScriptFile = "script.sskb";
+
+    /// Supplies the player roster to world scripts. Set once by `Main` at boot; left null in the
+    /// headless diagnostics, where scripts still load and tick but see an empty roster.
+    public static Serika.Script.IScriptPlayers ScriptPlayers { get; set; }
+
+    /// Raised when a world brings a script runtime online, BEFORE its on_ready runs, so a
+    /// subscriber can attach the network bridge in time to carry on_ready's own emits.
+    public static event Action<ScriptWorld> ScriptWorldCreated;
+
+    /// Supplies the local body the rope may correct. Set by `Main`; null in diagnostics.
+    public static Func<CharacterBody3D> LocalBody { get; set; }
+
+    /// Attach the co-op rope when the manifest asks for one. Opt-in only.
+    private static void AttachRope(Node instance, float ropeLength)
+    {
+        if (ropeLength <= 0f) return;
+        if (instance is not Node3D worldRoot) return;
+        if (ScriptPlayers == null || LocalBody == null)
+        {
+            GD.Print("WorldLoader: world requests a rope but no local player is available — skipping");
+            return;
+        }
+        worldRoot.AddChild(RopeTeam.Create(ScriptPlayers, LocalBody, ropeLength));
+        GD.Print($"WorldLoader: co-op rope online — {ropeLength:0.0} m");
+    }
+
+    /// Build the script runtime for a world that ships one. Deliberately tolerant: any failure
+    /// here leaves a world that is geometry-only, never a world that refuses to load.
+    private static void AttachScript(Node instance, string worldId, byte[] scriptBytes,
+                                     List<Node3D> scriptNodes, List<ScriptZone> scriptZones)
+    {
+        if (scriptBytes == null || scriptBytes.Length == 0) return;
+        if (instance is not Node3D worldRoot) return;
+
+        try
+        {
+            var sw = ScriptWorld.Create(worldRoot, ScriptPlayers);
+            worldRoot.AddChild(sw);
+
+            // Author rank is 8 here because a bundle that reached the client has already been
+            // through the server's validate-on-publish gate; the VM re-validates regardless, which
+            // is the check that actually matters on an untrusted machine.
+            if (!sw.AddModule(worldId, scriptBytes, authorRank: 8, scriptNodes, Array.Empty<AudioStream>()))
+            {
+                sw.QueueFree();
+                return;
+            }
+
+            foreach (var zone in scriptZones) sw.BindZone(zone);
+            // Announce before Start() so the network bridge is attached in time to carry the
+            // emits on_ready itself makes.
+            ScriptWorldCreated?.Invoke(sw);
+            // on_ready last: after every module is loaded and every zone is bound.
+            sw.Start();
+            GD.Print($"WorldLoader: {worldId} script online — {scriptNodes.Count} node(s), {scriptZones.Count} zone(s)");
+        }
+        catch (Exception e)
+        {
+            GD.PrintErr($"WorldLoader: script setup failed for {worldId}: {e.Message}");
+        }
+    }
+
     /// First network id handed to a marker-spawned prop.
     ///
     /// The prop id range is shared with the marker pens `Main` spawns at 100-104, so authored
@@ -497,10 +589,17 @@ public static class WorldLoader
     /// marker's position when the world declares one, and how many video screens it built —
     /// the screens are not in the scene tree yet at this point, so the caller cannot count
     /// them by group.
-    private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens)
+    private static Vector3? ResolveMarkers(Node worldRoot, out int videoScreens,
+                                           out List<Node3D> scriptNodes, out List<ScriptZone> scriptZones)
     {
         Vector3? spawn = null;
         int mirrors = 0, seats = 0, videos = 0, props = 0, portals = 0;
+
+        // Slot -> node, so a script's slot 3 is whatever the author named SERIKA_SNODE3. Built
+        // sparse-safe: a gap in the numbering leaves a null slot, which the bridge treats as an
+        // absent node rather than shifting every later slot by one.
+        var nodesBySlot = new Dictionary<int, Node3D>();
+        scriptZones = new List<ScriptZone>();
 
         // Snapshot first: we mutate the tree while walking it.
         var markers = new System.Collections.Generic.List<Node3D>();
@@ -608,6 +707,41 @@ public static class WorldLoader
                 prop.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
                 props++;
             }
+            else if (name.StartsWith(MarkerScriptZone, StringComparison.Ordinal))
+            {
+                if (!TryParseMarkerIndex(name, MarkerScriptZone, out int zoneId))
+                {
+                    GD.PrintErr($"WorldLoader: ignored zone marker '{name}' (expected SERIKA_ZONE<n>)");
+                    continue;
+                }
+                // Marker scale is the trigger's full extents; floored so a default-scaled marker
+                // is still a volume a player can actually enter.
+                var extents = new Vector3(Mathf.Max(0.2f, scale.X), Mathf.Max(0.2f, scale.Y),
+                                          Mathf.Max(0.2f, scale.Z));
+                var zone = ScriptZone.Create(zoneId, extents);
+                parent.AddChild(zone);
+                zone.GlobalPosition = pos;
+                zone.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
+                scriptZones.Add(zone);
+            }
+            else if (name.StartsWith(MarkerScriptNode, StringComparison.Ordinal))
+            {
+                if (!TryParseMarkerIndex(name, MarkerScriptNode, out int slot))
+                {
+                    GD.PrintErr($"WorldLoader: ignored script-node marker '{name}' (expected SERIKA_SNODE<n>)");
+                    continue;
+                }
+                if (nodesBySlot.ContainsKey(slot))
+                {
+                    GD.PrintErr($"WorldLoader: duplicate script node slot {slot} ('{name}') — ignoring the later one");
+                    continue;
+                }
+                // Unlike every other marker, this one is NOT replaced: the marker node itself is
+                // what the script moves, so it survives as an ordinary Node3D the author can
+                // parent geometry under. That also means it must not be freed below.
+                nodesBySlot[slot] = m;
+                continue;
+            }
             else // SPAWN
             {
                 spawn = pos;
@@ -615,6 +749,13 @@ public static class WorldLoader
 
             m.QueueFree();
         }
+
+        // Flatten sparse slots into a dense table; a missing slot stays null and reads as an
+        // absent node rather than silently becoming a different one.
+        int maxSlot = -1;
+        foreach (int slot in nodesBySlot.Keys) if (slot > maxSlot) maxSlot = slot;
+        scriptNodes = new List<Node3D>(maxSlot + 1);
+        for (int i = 0; i <= maxSlot; i++) scriptNodes.Add(nodesBySlot.GetValueOrDefault(i));
 
         if (mirrors + seats + videos + props + portals > 0)
             GD.Print($"WorldLoader: resolved markers — {mirrors} mirror(s), {seats} seat(s), " +
@@ -634,11 +775,35 @@ public static class WorldLoader
                 name.StartsWith(MarkerVideo, StringComparison.Ordinal) ||
                 name.StartsWith(MarkerProp, StringComparison.Ordinal) ||
                 name.StartsWith(MarkerPortal, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerScriptNode, StringComparison.Ordinal) ||
+                name.StartsWith(MarkerScriptZone, StringComparison.Ordinal) ||
                 name.Equals("SPAWN", StringComparison.OrdinalIgnoreCase))
                 into.Add(n3d);
         }
         foreach (Node child in node.GetChildren())
             Collect(child, into);
+    }
+
+    /// Parse the trailing integer of a `PREFIX<n>` marker name.
+    ///
+    /// Blender and glTF both append `.001`-style suffixes to duplicate names, so the digits are
+    /// taken from the front of the remainder and anything after them is ignored — without that a
+    /// duplicated zone marker silently stops being a zone.
+    internal static bool TryParseMarkerIndex(string name, string prefix, out int index)
+    {
+        index = -1;
+        if (!name.StartsWith(prefix, StringComparison.Ordinal)) return false;
+
+        string rest = name.Substring(prefix.Length);
+        int digits = 0;
+        while (digits < rest.Length && char.IsAsciiDigit(rest[digits])) digits++;
+        if (digits == 0) return false;
+
+        if (!int.TryParse(rest.AsSpan(0, digits), out index)) return false;
+        // A slot is an index into a table the loader allocates; an absurd one is an authoring
+        // mistake, and honouring it would allocate a huge sparse table.
+        if (index < 0 || index > 255) { index = -1; return false; }
+        return true;
     }
 
     /// Portal targets are data, never URLs or executable script. A UUID in the node name

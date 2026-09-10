@@ -24,6 +24,18 @@ public interface IHostBridge
     int PlayerCount();
     (float X, float Y, float Z) PlayerPos(int playerIndex);
 
+    /// Parent one of the script's DECLARED nodes to a player's bone. Returns true on success.
+    ///
+    /// This is the only call that touches a player at all, and it is deliberately one-directional:
+    /// the attachment rides the player. Nothing here can move, push, teleport or constrain a
+    /// player — that capability does not exist in the host API and must not be added here.
+    /// Implementations MUST cap the number of simultaneous attachments per script and reject
+    /// node slots the script did not declare.
+    bool PlayerAttach(int playerIndex, int nodeSlot, int attachPoint);
+
+    /// Return a declared node from a player to the world root. Returns true if it was attached.
+    bool PlayerDetach(int nodeSlot);
+
     /// Emit a message on the relay's rate-limited script channel. The bridge is responsible for
     /// applying the server-enforced rate budget; the VM never touches a socket.
     void NetEmit(int channel, double payload);

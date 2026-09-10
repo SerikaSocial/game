@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Standalone test project for the SerikaScript sandbox boundary. It compiles the VM sources
+    directly (pure C#, no Godot dependency) so `dotnet test` can run them without the engine —
+    the same arrangement Codec.Tests uses for the wire codec, and for the same reason: the Godot
+    project compiles these very files, so what ships is what is tested.
+
+    This suite exists to hold rollout gate 2 in docs/serikascript.md: "Server validator + C# VM
+    agree on allowlists (golden test + CI grep invariant)". That gate had no implementation, and
+    the two allowlists had already drifted by nine host calls before anyone noticed — which is
+    exactly threat T7. AllowlistAgreementTests reads the TypeScript validator as data and fails
+    the build on any divergence.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\OpCode.cs" />
+    <Compile Include="..\IHostBridge.cs" />
+    <Compile Include="..\ScriptModule.cs" />
+    <Compile Include="..\ScriptVm.cs" />
+    <Compile Include="..\StringPool.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+</Project>

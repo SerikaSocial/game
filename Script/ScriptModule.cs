@@ -17,12 +17,34 @@ public sealed class ScriptValidationException : Exception
 public sealed class ScriptModule
 {
     public const uint Magic = 0x5353_4B42; // "SSKB"
-    public const byte Version = 1;
+    public const byte Version = 2;
+
+    /// Table ceilings — mirrors MAX_* in the server validator. A container declaring 60k strings
+    /// is a resource attack before a single opcode runs.
+    public const int MaxStrings = 256;
+    public const int MaxStringBytes = 512;
+    public const int MaxEntries = 16;
 
     public int BudgetTick { get; private init; }
     public int BudgetMemKiB { get; private init; }
     public IReadOnlyList<ushort> HostCalls { get; private init; } = Array.Empty<ushort>();
     public byte[] Code { get; private init; } = Array.Empty<byte>();
+
+    /// This module's own string table, populated from the container's string section. Isolated
+    /// per module — see StringPool.
+    public StringPool Strings { get; } = new();
+
+    /// hookId -> offset into Code. Absent hooks simply aren't dispatched.
+    private readonly Dictionary<HookId, int> _entries = new();
+
+    /// Does this module handle the given hook?
+    public bool HasHook(HookId hook) => _entries.ContainsKey(hook);
+
+    /// Code offset for a hook. -1 when the module does not define it.
+    public int EntryPoint(HookId hook) => _entries.TryGetValue(hook, out int off) ? off : -1;
+
+    /// The hooks this module defines, for the host to know what to dispatch.
+    public IEnumerable<HookId> Hooks => _entries.Keys;
 
     private static readonly HashSet<byte> AllowedOpcodes = BuildOpcodeSet();
     private static readonly HashSet<ushort> AllowedHostCalls = BuildHostCallSet();
@@ -83,6 +105,42 @@ public sealed class ScriptModule
             hostCalls.Add(id);
         }
 
+        // ── entry-point table ──
+        if (p + 2 > buf.Length) throw new ScriptValidationException("truncated entry count");
+        int nEntries = buf[p] | (buf[p + 1] << 8); p += 2;
+        if (nEntries > MaxEntries)
+            throw new ScriptValidationException($"entry-point table has {nEntries} entries, max {MaxEntries}");
+        var entries = new List<(HookId Hook, long Offset)>(nEntries);
+        for (int i = 0; i < nEntries; i++)
+        {
+            if (p + 5 > buf.Length) throw new ScriptValidationException("truncated entry");
+            byte hookId = buf[p]; p += 1;
+            long offset = (uint)(buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16) | (buf[p + 3] << 24)); p += 4;
+            if (!Enum.IsDefined(typeof(HookId), hookId))
+                throw new ScriptValidationException($"unknown hook id 0x{hookId:x}");
+            // A duplicate hook makes dispatch ambiguous — reject rather than silently pick one.
+            if (entries.Exists(e => e.Hook == (HookId)hookId))
+                throw new ScriptValidationException($"duplicate entry for hook 0x{hookId:x}");
+            entries.Add(((HookId)hookId, offset));
+        }
+
+        // ── string table ──
+        if (p + 2 > buf.Length) throw new ScriptValidationException("truncated string count");
+        int nStrings = buf[p] | (buf[p + 1] << 8); p += 2;
+        if (nStrings > MaxStrings)
+            throw new ScriptValidationException($"string table has {nStrings} entries, max {MaxStrings}");
+        var strings = new List<string>(nStrings);
+        for (int i = 0; i < nStrings; i++)
+        {
+            if (p + 2 > buf.Length) throw new ScriptValidationException("truncated string length");
+            int len = buf[p] | (buf[p + 1] << 8); p += 2;
+            if (len > MaxStringBytes)
+                throw new ScriptValidationException($"string {i} is {len} bytes, max {MaxStringBytes}");
+            if (p + len > buf.Length) throw new ScriptValidationException("truncated string body");
+            strings.Add(System.Text.Encoding.UTF8.GetString(buf.Slice(p, len)));
+            p += len;
+        }
+
         if (p + 4 > buf.Length) throw new ScriptValidationException("truncated code length");
         long codeLen = (uint)(buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16) | (buf[p + 3] << 24)); p += 4;
         if (p + codeLen > buf.Length) throw new ScriptValidationException("truncated code section");
@@ -122,14 +180,26 @@ public sealed class ScriptModule
         }
         if (p != codeEnd) throw new ScriptValidationException("code section did not decode cleanly");
 
+        // Entry offsets index the code section and must land inside it — the same class of escape
+        // as an out-of-range jump (T9), so it gets the same treatment.
+        foreach (var (hook, offset) in entries)
+        {
+            if (offset < 0 || offset >= codeLen)
+                throw new ScriptValidationException(
+                    $"entry for hook 0x{(byte)hook:x} offset {offset} outside code section");
+        }
+
         var code = new byte[codeLen];
         buf.Slice(codeBase, (int)codeLen).CopyTo(code);
-        return new ScriptModule
+        var module = new ScriptModule
         {
             BudgetTick = budgetTick,
             BudgetMemKiB = budgetMem,
             HostCalls = hostCalls,
             Code = code,
         };
+        foreach (var s in strings) module.Strings.Append(s);
+        foreach (var (hook, offset) in entries) module._entries[hook] = (int)offset;
+        return module;
     }
 }

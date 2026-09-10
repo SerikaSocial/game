@@ -54,6 +54,9 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     public event Action<uint, byte, ushort, float, float, float> PhysGrabReceived;
     /// A peer swapped avatar. Carries only who — the new model is looked up from the API.
     public event Action<uint> AvatarChanged;
+
+    /// (senderPeerId, channel, payload) — a peer's world script emitted a NET_EMIT.
+    public event Action<uint, int, double> ScriptEventReceived;
     /// A message handler threw. Reported rather than rethrown so one bad datagram cannot take
     /// down the frame loop, but never swallowed silently — the owner logs it.
     public event Action<Exception> OnHandlerFault;
@@ -109,6 +112,18 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
     {
         if (!_welcomed) return;
         Send(new[] { (byte)MsgType.AvatarChanged });
+    }
+
+    /// Emit a world-script event. `[channel:u16][payload:f64]`, little-endian — a fixed 10-byte
+    /// body the relay validates by exact length.
+    public void SendScriptEvent(int channel, double payload)
+    {
+        if (!_welcomed) return;
+        var body = new byte[10];
+        body[0] = (byte)(channel & 0xFF);
+        body[1] = (byte)((channel >> 8) & 0xFF);
+        BitConverter.GetBytes(payload).CopyTo(body, 2);
+        Send(RelayProtocol.WriteOutbound(MsgType.ScriptEvent, body));
     }
 
     public void SendChat(string text)
@@ -322,6 +337,16 @@ public sealed class UdpTransport : ISerikaTransport, IDisposable
             {
                 if (n < 5) break;
                 AvatarChanged?.Invoke(RelayProtocol.ReadU32(buf, 1));
+                break;
+            }
+            case MsgType.ScriptEvent:
+            {
+                // [type][peer_id:u32][channel:u16][payload:f64] = 15 bytes exactly.
+                if (n < 15) break;
+                uint sender = RelayProtocol.ReadU32(buf, 1);
+                int channel = buf[5] | (buf[6] << 8);
+                double payload = BitConverter.ToDouble(buf, 7);
+                ScriptEventReceived?.Invoke(sender, channel, payload);
                 break;
             }
             case MsgType.ObjectSync:
