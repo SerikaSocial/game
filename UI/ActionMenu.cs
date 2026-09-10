@@ -20,11 +20,18 @@ public partial class ActionMenu : CanvasLayer
     public event Action<AvatarInstance.Emote> EmotePressed;
     /// A custom, avatar-authored clip was picked (empty string = stop / return to normal).
     public event Action<string> CustomEmotePressed;
+    /// An avatar toggle was flipped. (toggleName, newOnState)
+    public event Action<string, bool> TogglePressed;
 
     // The avatar's own dance/emote clips, shown in place of the default "Emotes" ring when the
     // equipped avatar ships any. Null/empty → the built-in ring is used (the fallback).
     private (string title, Icons.Kind icon, string clip)[] _customRing;
     private bool _inCustomSub;
+
+    // The avatar's toggle options (shield, sword, hat, etc.), shown in a "Props" submenu.
+    // Null/empty → the Props wedge is hidden.
+    private (string name, bool on)[] _toggleRing;
+    private bool _inToggleSub;
 
     /// Feed the equipped avatar's custom clip names. Trimmed to fit the ring; a "Stop" wedge is
     /// always appended so a custom dance can be cancelled from the same menu.
@@ -38,6 +45,35 @@ public partial class ActionMenu : CanvasLayer
         for (int i = 0; i < n; i++)
             _customRing[i] = (PrettyClip(names[i]), Icons.Kind.Music, names[i]);
         _customRing[n] = ("Stop", Icons.Kind.Close, "");
+    }
+
+    /// Feed the equipped avatar's toggle options (shield, sword, hat, etc.). Each entry is
+    /// (display name, current on/off state). When empty, the Props wedge is omitted from the
+    /// root ring.
+    public void SetToggles(System.Collections.Generic.IReadOnlyList<(string name, bool on)> toggles)
+    {
+        if (_inToggleSub) ResetToRoot();
+        if (toggles == null || toggles.Count == 0) { _toggleRing = null; RebuildRoot(); return; }
+
+        int n = Math.Min(toggles.Count, 7);
+        _toggleRing = new (string, bool)[n];
+        for (int i = 0; i < n; i++) _toggleRing[i] = (toggles[i].name, toggles[i].on);
+        RebuildRoot();
+    }
+
+    /// Update a toggle's displayed state without rebuilding the ring (for external sync).
+    public void UpdateToggleState(string name, bool on)
+    {
+        if (_toggleRing == null) return;
+        for (int i = 0; i < _toggleRing.Length; i++)
+        {
+            if (_toggleRing[i].name == name)
+            {
+                _toggleRing[i] = (name, on);
+                if (_inToggleSub) _radialControl?.QueueRedraw();
+                return;
+            }
+        }
     }
 
     /// Turn a raw clip name ("Dance_HipHop", "emote.wave 01") into a menu-friendly label.
@@ -55,7 +91,7 @@ public partial class ActionMenu : CanvasLayer
     private bool _stickEngaged;
     private bool _pointerInside;
     public int SelectedSlice => _hoveredSlice;
-    public string PageTitle => _inCustomSub ? "Avatar emotes" : _openSub >= 0 ? RootSlices[_openSub].title : "Actions";
+    public string PageTitle => _inCustomSub ? "Avatar emotes" : _inToggleSub ? "Props" : _openSub >= 0 ? RootSlices[_openSub].title : "Actions";
 
     /// The VR ring leaves room for its title and control hints inside the 1000×640 panel.
     private static float OuterRadius => VrUiSurface.Active ? 240f : 218f;
@@ -64,7 +100,8 @@ public partial class ActionMenu : CanvasLayer
     private int SliceCount => _slices.Length;
 
     /// Root ring. Emotes live here (and only here) — there are no emote key binds.
-    private static readonly (string title, Icons.Kind icon)[] RootSlices =
+    /// "Props" (avatar toggles) is appended dynamically when the equipped avatar has any.
+    private static readonly (string title, Icons.Kind icon)[] BaseRootSlices =
     {
         ("Emotes", Icons.Kind.Music),
         ("Poses", Icons.Kind.Sit),
@@ -73,6 +110,24 @@ public partial class ActionMenu : CanvasLayer
         ("Respawn", Icons.Kind.Refresh),
         ("Go Home", Icons.Kind.Home),
     };
+
+    /// The root ring, optionally with a "Props" wedge appended when the avatar has toggles.
+    private static (string title, Icons.Kind icon)[] RootSlices => _rootSlices;
+    private static (string title, Icons.Kind icon)[] _rootSlices = BaseRootSlices;
+
+    /// Rebuild the root ring with or without the Props wedge.
+    private void RebuildRoot()
+    {
+        if (_toggleRing != null && _toggleRing.Length > 0)
+        {
+            var list = new List<(string, Icons.Kind)>(BaseRootSlices) { ("Props", Icons.Kind.Shirt) };
+            _rootSlices = list.ToArray();
+        }
+        else
+            _rootSlices = BaseRootSlices;
+        if (_openSub < 0 && !_inCustomSub && !_inToggleSub)
+            _slices = _rootSlices;
+    }
 
     /// Submenus, each a ring of emotes. Cancel returns the avatar to normal.
     private static readonly Dictionary<int, (string title, Icons.Kind icon, AvatarInstance.Emote emote)[]> SubSlices = new()
@@ -143,6 +198,7 @@ public partial class ActionMenu : CanvasLayer
     {
         _openSub = -1;
         _inCustomSub = false;
+        _inToggleSub = false;
         _slices = RootSlices;
         _hoveredSlice = -1;
         _stickReady = false;
@@ -234,7 +290,7 @@ public partial class ActionMenu : CanvasLayer
     /// Step back out of a submenu. Returns false if already at the root (caller should close).
     public bool BackOut()
     {
-        if (_openSub < 0 && !_inCustomSub) return false;
+        if (_openSub < 0 && !_inCustomSub && !_inToggleSub) return false;
         ResetToRoot();
         return true;
     }
@@ -299,7 +355,7 @@ public partial class ActionMenu : CanvasLayer
         if (_hoveredSlice < 0)
         {
             // Centre: step back out of a submenu, or close from the root ring.
-            if (_openSub >= 0 || _inCustomSub) ResetToRoot();
+            if (_openSub >= 0 || _inCustomSub || _inToggleSub) ResetToRoot();
             else Hide();
             return;
         }
@@ -312,6 +368,20 @@ public partial class ActionMenu : CanvasLayer
                 var picked = _customRing[_hoveredSlice];
                 Hide();
                 CustomEmotePressed?.Invoke(picked.clip);
+            }
+            return;
+        }
+
+        // Inside the toggle ring: flip the selected toggle and stay on the page.
+        if (_inToggleSub)
+        {
+            if (_toggleRing != null && _hoveredSlice < _toggleRing.Length)
+            {
+                var (name, wasOn) = _toggleRing[_hoveredSlice];
+                bool nowOn = !wasOn;
+                _toggleRing[_hoveredSlice] = (name, nowOn);
+                TogglePressed?.Invoke(name, nowOn);
+                _radialControl.QueueRedraw();
             }
             return;
         }
@@ -350,6 +420,9 @@ public partial class ActionMenu : CanvasLayer
                 Hide();
                 HomePressed?.Invoke();
                 break;
+            case 6 when _toggleRing != null && _toggleRing.Length > 0:
+                OpenToggleSub();
+                break;
         }
     }
 
@@ -381,9 +454,32 @@ public partial class ActionMenu : CanvasLayer
         _radialControl.QueueRedraw();
     }
 
+    /// Open the avatar's toggle ring (Props submenu). Each wedge shows a toggle name with
+    /// an on/off indicator; clicking flips the toggle and stays on the page.
+    private void OpenToggleSub()
+    {
+        _inToggleSub = true;
+        _openSub = -1;
+        _inCustomSub = false;
+        var ring = new (string title, Icons.Kind icon)[_toggleRing.Length];
+        for (int i = 0; i < _toggleRing.Length; i++)
+            ring[i] = (_toggleRing[i].name, _toggleRing[i].on ? Icons.Kind.Check : Icons.Kind.Close);
+        _slices = ring;
+        _hoveredSlice = -1;
+        _stickReady = false;
+        _stickEngaged = false;
+        _radialControl.QueueRedraw();
+    }
+
     private void DrawRadialMenu()
     {
         if (!Visible) return;
+        // Refresh toggle icons in case state changed since the page was opened.
+        if (_inToggleSub && _toggleRing != null)
+        {
+            for (int i = 0; i < _slices.Length && i < _toggleRing.Length; i++)
+                _slices[i] = (_toggleRing[i].name, _toggleRing[i].on ? Icons.Kind.Check : Icons.Kind.Close);
+        }
         Vector2 center = _radialControl.Size * .5f;
         var font = ThemeDB.FallbackFont;
         float radius = OuterRadius;
@@ -431,7 +527,7 @@ public partial class ActionMenu : CanvasLayer
             HorizontalAlignment.Left, -1, 16, Brand.TextHi);
         DrawCentered(PageTitle, center + new Vector2(0, -radius - 30), 22, Brand.TextHi);
         DrawCentered(VrUiSurface.Active ? "Aim + trigger  ·  Stick + A  ·  B / Y to close"
-            : "Click to choose  ·  1–6 shortcuts  ·  Esc to go back",
+            : $"Click to choose  ·  1–{SliceCount} shortcuts  ·  Esc to go back",
             center + new Vector2(0, radius + 40), Brand.Fs(13), Brand.TextMid);
     }
 

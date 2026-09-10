@@ -94,6 +94,7 @@ public partial class Main : Node3D
     private VoiceManager _voice;
     private bool _micActive;
     private Updater _updater;
+    private UpdateScreen _updateScreen;
     private StrokeCanvas _strokeCanvas;
     private readonly List<HeldItemController> _heldItemControllers = new();
 
@@ -343,8 +344,15 @@ public partial class Main : Node3D
 
         // Auto-updater: check CDN for a newer version. Non-blocking — runs in the
         // background and shows a dialog only if an update is available.
+        // The update surface is a full screen (Layer 210), not a card over whatever happens to
+        // be on screen. It goes through AddUi like every other layer so it reaches the VR panel
+        // in VR; Updater itself draws nothing and only drives it.
+        _updateScreen = new UpdateScreen { Name = "UpdateScreen" };
+        AddUi(_updateScreen);
+
         _updater = new Updater { Name = "Updater" };
         AddUi(_updater);
+        _updater.Screen = _updateScreen;
         _updater.CurrentVersion = Hud.ClientVersion;
         if (!_uiShotMode) _updater.CheckForUpdates();
 
@@ -430,6 +438,11 @@ public partial class Main : Node3D
         _actionMenu.CameraPressed += OpenCameraMenu;
         _actionMenu.EmotePressed += e => { _localDesktop?.PlayEmote(e); _localVr?.PlayEmote(e); };
         _actionMenu.CustomEmotePressed += clip => { _localDesktop?.PlayCustomEmote(clip); _localVr?.PlayCustomEmote(clip); };
+        _actionMenu.TogglePressed += (name, on) =>
+        {
+            _localDesktop?.Avatar?.Toggles?.SetToggle(name, on);
+            _localVr?.Avatar?.Toggles?.SetToggle(name, on);
+        };
         _actionMenu.Closed += OnPauseClosed;
 
         // VRChat-style Camera & Photo Viewfinder Menu
@@ -859,6 +872,7 @@ public partial class Main : Node3D
         (string name, CanvasLayer layer)[] layers =
         {
             (nameof(_hud), _hud), (nameof(_loading), _loading), (nameof(_updater), _updater),
+            (nameof(_updateScreen), _updateScreen),
             (nameof(_quickMenu), _quickMenu), (nameof(_mainMenu), _mainMenu),
             (nameof(_actionMenu), _actionMenu), (nameof(_cameraMenu), _cameraMenu),
             (nameof(_avatarSelector), _avatarSelector), (nameof(_interactPrompt), _interactPrompt),
@@ -1110,6 +1124,7 @@ public partial class Main : Node3D
             vr.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
             vr.RespawnRequested += RespawnLocal;
             _actionMenu?.SetCustomEmotes(vr.Avatar?.CustomEmotes);
+            SyncAvatarToggles(vr.Avatar);
             // The headset has no Esc key, so the controller face buttons are the only way in.
             // Pressing menu ALWAYS re-anchors the panel in front of the player, not just on the
             // first open. There was previously no way at all to bring a drifted panel back: the
@@ -1155,6 +1170,7 @@ public partial class Main : Node3D
             desktop.SetAvatar(AvatarLibrary.InstantiateOrDefault(_localAvatarPath));
             desktop.RespawnRequested += RespawnLocal;
             _actionMenu?.SetCustomEmotes(desktop.Avatar?.CustomEmotes);
+            SyncAvatarToggles(desktop.Avatar);
             // Restore persisted camera mode across world switches.
             if (_persistThirdPerson) desktop.SetFirstPerson(false);
             SetupTouchControls(desktop);
@@ -1796,6 +1812,22 @@ public partial class Main : Node3D
         if (_localNode is Node3D n) n.GlobalPosition = pos;
     }
 
+    /// Feed the equipped avatar's toggle options (shield, sword, hat, etc.) to the action
+    /// menu's Props submenu. Called whenever an avatar is equipped.
+    private void SyncAvatarToggles(AvatarInstance avatar)
+    {
+        var toggles = avatar?.Toggles;
+        if (toggles == null || toggles.States.Count == 0)
+        {
+            _actionMenu?.SetToggles(null);
+            return;
+        }
+        var list = new System.Collections.Generic.List<(string, bool)>();
+        foreach (var kv in toggles.States)
+            list.Add((kv.Key, kv.Value));
+        _actionMenu?.SetToggles(list);
+    }
+
     /// Return the local player to the current world's spawn point and kill any momentum —
     /// the "unstick me" button for falling through geometry, getting wedged, or flung by
     /// physics. Works in Home and multiplayer alike (ownership means the relay just sees us
@@ -1879,6 +1911,7 @@ public partial class Main : Node3D
             _localDesktop?.SetAvatar(avatar);
             _localVr?.SetAvatar(avatar);
             _actionMenu?.SetCustomEmotes(avatar?.CustomEmotes);
+            SyncAvatarToggles(avatar);
 
             // Persist so it's worn on the next join and by remotes after they resync.
             bool persisted = true;
