@@ -90,53 +90,17 @@ jobs:
           done
           ls -la icons/
 
-      # ── Patch the preset: team id, sign identity, icon paths ────────────────────
-      - name: Patch export preset (signed)
-        if: github.event.inputs.sign != 'false'
+      # ── Patch the preset: icons + export_project_only ─────────────────────────
+      # Always export an Xcode project (export_project_only=true), then sign it
+      # ourselves. Godot's export_method setting doesn't reliably control
+      # CODE_SIGN_STYLE in the generated pbxproj, so we patch it post-export.
+      - name: Patch export preset
         run: |
           python3 - <<'PY'
           import re, pathlib
           p = pathlib.Path("export_presets.cfg")
           t = p.read_text()
           team = "${{ secrets.IOS_TEAM_ID }}"
-          ident = "Apple Distribution"
-          icons = {
-            "icons/iphone_120x120": "res://icons/iphone_120x120.png",
-            "icons/iphone_180x180": "res://icons/iphone_180x180.png",
-            "icons/ipad_76x76": "res://icons/ipad_76x76.png",
-            "icons/ipad_152x152": "res://icons/ipad_152x152.png",
-            "icons/ipad_167x167": "res://icons/ipad_167x167.png",
-            "icons/app_store_1024x1024": "res://icons/app_store_1024x1024.png",
-            "icons/spotlight_40x40": "res://icons/spotlight_40x40.png",
-            "icons/spotlight_80x80": "res://icons/spotlight_80x80.png",
-          }
-          # Integer fields (no quotes in Godot's cfg format — ="1" is a string, =1 is int).
-          int_repl = {
-            "application/export_method_release": "1",
-            "application/export_method_debug": "1",
-          }
-          for k, v in int_repl.items():
-              t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}={v}', t, flags=re.M)
-          # String fields (quoted in Godot's cfg format).
-          repl = {
-            "application/app_store_team_id": team,
-            "application/code_sign_identity_release": ident,
-            "application/code_sign_identity_debug": ident,
-            **icons,
-          }
-          for k, v in repl.items():
-              t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}="{v}"', t, flags=re.M)
-          p.write_text(t)
-          print("patched preset (signed)")
-          PY
-
-      - name: Patch export preset (unsigned — pipeline validation)
-        if: github.event.inputs.sign == 'false'
-        run: |
-          python3 - <<'PY'
-          import re, pathlib
-          p = pathlib.Path("export_presets.cfg")
-          t = p.read_text()
           icons = {
             "icons/iphone_120x120": "res://icons/iphone_120x120.png",
             "icons/iphone_180x180": "res://icons/iphone_180x180.png",
@@ -149,10 +113,12 @@ jobs:
           }
           for k, v in icons.items():
               t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}="{v}"', t, flags=re.M)
-          # Export an Xcode project instead of a signed IPA — no signing needed.
+          # Always export an Xcode project — we run xcodebuild ourselves.
           t = re.sub(r'^application/export_project_only=.*$', 'application/export_project_only=true', t, flags=re.M)
+          # Set the team id so Godot includes it in the project.
+          t = re.sub(r'^application/app_store_team_id=.*$', f'application/app_store_team_id="{team}"', t, flags=re.M)
           p.write_text(t)
-          print("patched preset (unsigned, export_project_only=true)")
+          print("patched preset (export_project_only=true)")
           PY
 
       # ── Import signing cert + install provisioning profile ─────────────────────
@@ -173,34 +139,98 @@ jobs:
 
       - name: Install provisioning profile
         if: github.event.inputs.sign != 'false'
+        id: provision
         run: |
           echo "${{ secrets.IOS_PROVISION_BASE64 }}" | base64 -d > profile.mobileprovision
-          # Godot/xcodebuild finds profiles in ~/Library/MobileDevice/Provisioning Profiles/,
-          # named by the profile's UUID.
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< \
             "$(security cms -D -i profile.mobileprovision)")
           cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${UUID}.mobileprovision"
           echo "installed profile $UUID"
+          echo "uuid=$UUID" >> "$GITHUB_OUTPUT"
 
       # ── Build C# (AOT for iOS) and export ───────────────────────────────────────
       - name: Build C# solution
         run: dotnet build
 
-      - name: Export iOS
+      - name: Export iOS (Xcode project)
         run: |
           mkdir -p ../dist/ios
-          if [ "${{ github.event.inputs.sign }}" = "false" ]; then
-            # Unsigned: Godot writes an Xcode project, not an IPA.
-            "$GODOT" --headless --export-release "iOS" "../dist/ios/SerikaSocial.xcodeproj"
-          else
-            "$GODOT" --headless --export-release "iOS" "../dist/ios/SerikaSocial.ipa"
-          fi
+          "$GODOT" --headless --export-release "iOS" "../dist/ios/SerikaSocial.xcodeproj"
+          ls -la ../dist/ios/
+
+      # ── Patch the generated Xcode project for manual signing, then archive ─────
+      - name: Sign and archive (signed)
+        if: github.event.inputs.sign != 'false'
+        run: |
+          PBXPROJ="../dist/ios/SerikaSocial.xcodeproj/project.pbxproj"
+          PROFILE_UUID="${{ steps.provision.outputs.uuid }}"
+          TEAM_ID="${{ secrets.IOS_TEAM_ID }}"
+
+          # Patch the pbxproj: switch to manual signing with our identity + profile.
+          python3 - <<PY
+          import re, pathlib
+          p = pathlib.Path("$PBXPROJ")
+          t = p.read_text()
+          # Force manual signing style.
+          t = re.sub(r'CODE_SIGN_STYLE\s*=\s*Automatic', 'CODE_SIGN_STYLE = Manual', t)
+          # Set the distribution identity.
+          t = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*.*', 'CODE_SIGN_IDENTITY = "Apple Distribution"', t)
+          # Set the provisioning profile UUID.
+          t = re.sub(r'PROVISIONING_PROFILE\s*=\s*.*', 'PROVISIONING_PROFILE = "$PROFILE_UUID"', t)
+          if 'PROVISIONING_PROFILE' not in t:
+              # Insert after DEVELOPMENT_TEAM if no existing PROVISIONING_PROFILE line.
+              t = re.sub(r'(DEVELOPMENT_TEAM\s*=\s*.*;)', r'\1\n\t\t\tPROVISIONING_PROFILE = "$PROFILE_UUID";', t)
+          # Set the team.
+          t = re.sub(r'DEVELOPMENT_TEAM\s*=\s*.*', 'DEVELOPMENT_TEAM = "$TEAM_ID"', t)
+          p.write_text(t)
+          print("patched pbxproj for manual signing")
+          PY
+
+          # Archive the project.
+          xcodebuild archive \
+            -project "$PBXPROJ" \
+            -scheme SerikaSocial \
+            -configuration Release \
+            -archivePath ../dist/ios/SerikaSocial.xcarchive \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE="$PROFILE_UUID" \
+            DEVELOPMENT_TEAM="$TEAM_ID"
+
+          # Export the archive to an IPA.
+          mkdir -p ../dist/ios/export
+          cat > ../dist/ios/export/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>teamID</key>
+            <string>$TEAM_ID</string>
+            <key>uploadBitcode</key>
+            <false/>
+            <key>uploadSymbols</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath ../dist/ios/SerikaSocial.xcarchive \
+            -exportOptionsPlist ../dist/ios/export/ExportOptions.plist \
+            -exportPath ../dist/ios/ipa
+          ls -la ../dist/ios/ipa/
 
       - name: Collect artifacts
         run: |
           mkdir -p artifacts
-          cp -r ../dist/ios/* artifacts/ 2>/dev/null || true
+          if [ "${{ github.event.inputs.sign }}" = "false" ]; then
+            cp -r ../dist/ios/SerikaSocial.xcodeproj artifacts/ 2>/dev/null || true
+          else
+            cp ../dist/ios/ipa/*.ipa artifacts/ 2>/dev/null || true
+          fi
           ls -la artifacts/
 
       - uses: actions/upload-artifact@v4
