@@ -115,6 +115,10 @@ jobs:
             "application/app_store_team_id": team,
             "application/code_sign_identity_release": ident,
             "application/code_sign_identity_debug": ident,
+            # 1 = manual signing (use the cert + profile we imported). The preset
+            # ships with 0 (automatic) which conflicts with a manual identity.
+            "application/export_method_release": "1",
+            "application/export_method_debug": "1",
             **icons,
           }
           for k, v in repl.items():
