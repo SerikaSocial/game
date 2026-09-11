@@ -171,13 +171,14 @@ jobs:
         run: |
           cat >> ../dist/ios/SerikaSocial/dummy.cpp <<'CPP'
 
-          // Stubs for symbols referenced by Godot's metal-cpp (pure C linkage, no ObjC headers needed):
+          // Stubs for symbols referenced by Godot's metal-cpp:
+          // volatile prevents the compiler from optimizing them away as unused const variables.
           extern "C" {
-            __attribute__((visibility("default"))) const void * const CADynamicRangeAutomatic = (const void *)"CADynamicRangeAutomatic";
-            __attribute__((visibility("default"))) const void * const CADynamicRangeStandard = (const void *)"CADynamicRangeStandard";
-            __attribute__((visibility("default"))) const void * const CADynamicRangeConstrainedHigh = (const void *)"CADynamicRangeConstrainedHigh";
-            __attribute__((visibility("default"))) const void * const CADynamicRangeHigh = (const void *)"CADynamicRangeHigh";
-            __attribute__((visibility("default"))) const void * const MTLTensorDomain = (const void *)"MTLTensorDomain";
+            __attribute__((visibility("default"))) void * volatile CADynamicRangeAutomatic = (void *)"CADynamicRangeAutomatic";
+            __attribute__((visibility("default"))) void * volatile CADynamicRangeStandard = (void *)"CADynamicRangeStandard";
+            __attribute__((visibility("default"))) void * volatile CADynamicRangeConstrainedHigh = (void *)"CADynamicRangeConstrainedHigh";
+            __attribute__((visibility("default"))) void * volatile CADynamicRangeHigh = (void *)"CADynamicRangeHigh";
+            __attribute__((visibility("default"))) void * volatile MTLTensorDomain = (void *)"MTLTensorDomain";
           }
           CPP
           echo "injected symbol stubs into dummy.cpp"
