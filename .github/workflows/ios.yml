@@ -160,6 +160,32 @@ jobs:
           ls -la ../dist/ios/
 
       # ── Patch the generated Xcode project for manual signing, then archive ─────
+      # ── Work around Godot 4.7.1 metal-cpp / iOS SDK symbol mismatches ────────
+      # Godot's bundled libgodot.a was built with a metal-cpp that references
+      # CADynamicRange* and MTLTensorDomain as external constants. On the iOS
+      # SDK used by Xcode 16.4, these are either weak-linked or unavailable,
+      # causing ld to fail with undefined symbols. Appending definitions to
+      # dummy.cpp (which is already compiled into the app target) provides the
+      # missing symbols.
+      - name: Inject missing metal-cpp symbol stubs
+        run: |
+          cat >> ../dist/ios/SerikaSocial/dummy.cpp <<'CPP'
+
+          #import <Foundation/Foundation.h>
+          #import <CoreGraphics/CoreGraphics.h>
+
+          // Stubs for symbols referenced by Godot's metal-cpp:
+          extern "C" {
+            __attribute__((visibility("default"))) NSString * const CADynamicRangeAutomatic = @"CADynamicRangeAutomatic";
+            __attribute__((visibility("default"))) NSString * const CADynamicRangeStandard = @"CADynamicRangeStandard";
+            __attribute__((visibility("default"))) NSString * const CADynamicRangeConstrainedHigh = @"CADynamicRangeConstrainedHigh";
+            __attribute__((visibility("default"))) NSString * const CADynamicRangeHigh = @"CADynamicRangeHigh";
+            __attribute__((visibility("default"))) NSErrorDomain const MTLTensorDomain = @"MTLTensorDomain";
+          }
+          CPP
+          echo "injected symbol stubs into dummy.cpp"
+          tail -20 ../dist/ios/SerikaSocial/dummy.cpp
+
       - name: Sign and archive (signed)
         if: github.event.inputs.sign != 'false'
         run: |
