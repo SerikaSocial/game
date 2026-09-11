@@ -1,0 +1,219 @@
+# Serika Social — iOS build via GitHub Actions (macOS runner).
+#
+# Why this exists on CI and not the dev box: Godot refuses iOS export of a C#/.NET project
+# anywhere but macOS ("Exporting to an Apple Embedded platform when using C#/.NET is
+# experimental and requires macOS"). The dev machine is Linux. The `macos-14` runner ships
+# with Xcode, so the export can actually run here.
+#
+# Distribution: App Store. The provisioning profile must be an *App Store* profile created
+# against a distribution certificate (not a development one). See the setup guide in
+# tools/IOS_SETUP.md — you generate the signing materials from Linux with openssl + the
+# Apple Developer portal in a browser; no Mac is needed for that part.
+#
+# First run with no secrets: set `sign: false` in the workflow_dispatch input below to export
+# an unsigned Xcode project (export_project_only=true) and upload it as an artifact. This
+# validates Godot + dotnet + AOT + the preset without any Apple credentials. Flip back to
+# signed once the four secrets are in place.
+name: ios
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "Produce a signed IPA (needs secrets). false = unsigned Xcode project for pipeline validation."
+        required: false
+        default: "true"
+
+jobs:
+  ios:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    env:
+      GODOT_VERSION: "4.7.1"
+      # The .app bundle's MacOS executable is `Godot` (mono universal build).
+      GODOT: "Godot_mono.app/Contents/MacOS/Godot"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # ── Godot mono (macOS universal) + export templates ──────────────────────────
+      - name: Download Godot mono
+        run: |
+          curl -L -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_mono_macos.universal.zip"
+          unzip -q godot.zip
+          ls -la "$GODOT"
+
+      - name: Install export templates
+        run: |
+          curl -L -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_mono_export_templates.tpz"
+          # .tpz is a zip whose top dir is `templates/`. Godot looks in
+          # ~/Library/Application Support/Godot/export_templates/<version>.mono/.
+          TPL_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable.mono"
+          mkdir -p "$TPL_DIR"
+          unzip -q templates.tpz -d /tmp/tpl-extract
+          cp -r /tmp/tpl-extract/templates/* "$TPL_DIR/"
+          ls "$TPL_DIR"
+
+      # ── Render app icons from the vector source (icon.svg) ───────────────────────
+      # All 8 iOS icon slots in export_presets.cfg are empty by design — the dev box has
+      # no Mac to validate, and Apple rejects iconless builds. We render icon.svg (brand
+      # purple, hue 262) to each required PNG size here so the build passes. Replace with
+      # real art later by dropping PNGs in game/icons/ and skipping this step.
+      - name: Render icons
+        run: |
+          brew install librsvg
+          mkdir -p icons
+          for spec in \
+            "iphone_120x120:120" \
+            "iphone_180x180:180" \
+            "ipad_76x76:76" \
+            "ipad_152x152:152" \
+            "ipad_167x167:167" \
+            "app_store_1024x1024:1024" \
+            "spotlight_40x40:40" \
+            "spotlight_80x80:80"; do
+            key="${spec%%:*}"
+            size="${spec##*:}"
+            rsvg-convert -w "$size" -h "$size" -o "icons/${key}.png" icon.svg
+          done
+          ls -la icons/
+
+      # ── Patch the preset: team id, sign identity, icon paths ────────────────────
+      - name: Patch export preset (signed)
+        if: github.event.inputs.sign != 'false'
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("export_presets.cfg")
+          t = p.read_text()
+          team = "${{ secrets.IOS_TEAM_ID }}"
+          ident = "Apple Distribution"
+          icons = {
+            "icons/iphone_120x120": "res://icons/iphone_120x120.png",
+            "icons/iphone_180x180": "res://icons/iphone_180x180.png",
+            "icons/ipad_76x76": "res://icons/ipad_76x76.png",
+            "icons/ipad_152x152": "res://icons/ipad_152x152.png",
+            "icons/ipad_167x167": "res://icons/ipad_167x167.png",
+            "icons/app_store_1024x1024": "res://icons/app_store_1024x1024.png",
+            "icons/spotlight_40x40": "res://icons/spotlight_40x40.png",
+            "icons/spotlight_80x80": "res://icons/spotlight_80x80.png",
+          }
+          repl = {
+            "application/app_store_team_id": team,
+            "application/code_sign_identity_release": ident,
+            "application/code_sign_identity_debug": ident,
+            **icons,
+          }
+          for k, v in repl.items():
+              t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}="{v}"', t, flags=re.M)
+          p.write_text(t)
+          print("patched preset (signed)")
+          PY
+
+      - name: Patch export preset (unsigned — pipeline validation)
+        if: github.event.inputs.sign == 'false'
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("export_presets.cfg")
+          t = p.read_text()
+          icons = {
+            "icons/iphone_120x120": "res://icons/iphone_120x120.png",
+            "icons/iphone_180x180": "res://icons/iphone_180x180.png",
+            "icons/ipad_76x76": "res://icons/ipad_76x76.png",
+            "icons/ipad_152x152": "res://icons/ipad_152x152.png",
+            "icons/ipad_167x167": "res://icons/ipad_167x167.png",
+            "icons/app_store_1024x1024": "res://icons/app_store_1024x1024.png",
+            "icons/spotlight_40x40": "res://icons/spotlight_40x40.png",
+            "icons/spotlight_80x80": "res://icons/spotlight_80x80.png",
+          }
+          for k, v in icons.items():
+              t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}="{v}"', t, flags=re.M)
+          # Export an Xcode project instead of a signed IPA — no signing needed.
+          t = re.sub(r'^application/export_project_only=.*$', 'application/export_project_only=true', t, flags=re.M)
+          p.write_text(t)
+          print("patched preset (unsigned, export_project_only=true)")
+          PY
+
+      # ── Import signing cert + install provisioning profile ─────────────────────
+      - name: Import signing certificate
+        if: github.event.inputs.sign != 'false'
+        run: |
+          echo "${{ secrets.IOS_P12_BASE64 }}" | base64 -d > cert.p12
+          # Create a temporary keychain so we don't pollute the runner default.
+          KEYCHAIN="serika-build.keychain"
+          security create-keychain -p "${{ secrets.IOS_P12_PASSWORD }}" "$KEYCHAIN"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
+          security unlock-keychain -p "${{ secrets.IOS_P12_PASSWORD }}" "$KEYCHAIN"
+          security import cert.p12 -k "$KEYCHAIN" -P "${{ secrets.IOS_P12_PASSWORD }}" -T /usr/bin/codesign -T /usr/bin/xcrun
+          # Let xcodebuild/codesign see this keychain.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Partition the identity so codesign can use it without a prompt.
+          security set-partition-list -S apple-tool:,apple: -s -k "${{ secrets.IOS_P12_PASSWORD }}" "$KEYCHAIN"
+
+      - name: Install provisioning profile
+        if: github.event.inputs.sign != 'false'
+        run: |
+          echo "${{ secrets.IOS_PROVISION_BASE64 }}" | base64 -d > profile.mobileprovision
+          # Godot/xcodebuild finds profiles in ~/Library/MobileDevice/Provisioning Profiles/,
+          # named by the profile's UUID.
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< \
+            "$(security cms -D -i profile.mobileprovision)")
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/${UUID}.mobileprovision"
+          echo "installed profile $UUID"
+
+      # ── Build C# (AOT for iOS) and export ───────────────────────────────────────
+      - name: Build C# solution
+        run: dotnet build
+
+      - name: Export iOS
+        run: |
+          mkdir -p ../dist/ios
+          if [ "${{ github.event.inputs.sign }}" = "false" ]; then
+            # Unsigned: Godot writes an Xcode project, not an IPA.
+            "$GODOT" --headless --export-release "iOS" "../dist/ios/SerikaSocial.xcodeproj"
+          else
+            "$GODOT" --headless --export-release "iOS" "../dist/ios/SerikaSocial.ipa"
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts
+          cp -r ../dist/ios/* artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SerikaSocial-iOS
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: ios
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SerikaSocial-iOS
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
