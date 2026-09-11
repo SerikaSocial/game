@@ -292,6 +292,72 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+  # ── visionOS (Apple Vision Pro) ──────────────────────────────────────────────
+  # Godot's visionOS platform exports like iOS (Apple-embedded, C# needs macOS) and
+  # produces an Xcode project for a FLAT-window app — Godot's visionOS support has no
+  # immersive/XR mode yet, so this is the flat client that runs in a Vision Pro window.
+  # First cut is an UNSIGNED Xcode project: signing needs a visionOS provisioning
+  # profile, which is a separate App Store Connect artifact from the iOS one.
+  # `continue-on-error` keeps the tag pipeline (IPA + release) alive while the visionOS
+  # preset and template support settle.
+  visionos:
+    runs-on: blacksmith-6vcpu-macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+
+    env:
+      GODOT_VERSION: "4.7.1"
+      GODOT: "Godot_mono.app/Contents/MacOS/Godot"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Download Godot mono
+        run: |
+          curl -L -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_mono_macos.universal.zip"
+          unzip -q godot.zip
+          ls -la "$GODOT"
+
+      - name: Install export templates
+        run: |
+          curl -L -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_mono_export_templates.tpz"
+          TPL_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable.mono"
+          mkdir -p "$TPL_DIR"
+          unzip -q templates.tpz -d /tmp/tpl-extract
+          cp -r /tmp/tpl-extract/templates/* "$TPL_DIR/"
+          echo "template pack contents (visionOS expected):"
+          ls "$TPL_DIR" | grep -i vision || echo "  NO visionOS TEMPLATE IN PACK"
+
+      - name: Build C# solution
+        run: dotnet build
+
+      - name: Export visionOS (Xcode project)
+        run: |
+          mkdir -p ../dist/visionos
+          "$GODOT" --headless --export-release "visionOS" "../dist/visionos/SerikaSocial"
+          ls -la ../dist/visionos/
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts
+          cp -r ../dist/visionos/* artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SerikaSocial-visionOS
+          path: artifacts/*
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: ios
@@ -307,3 +373,23 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Appends the visionOS Xcode project to the same release, only if the visionos job
+  # actually produced one — its absence must never block the iOS release.
+  release-visionos:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release, visionos]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SerikaSocial-visionOS
+          path: dist
+        continue-on-error: true
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          fail_on_unmatched_files: false

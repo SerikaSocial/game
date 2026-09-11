@@ -66,6 +66,16 @@ public static class DeviceProfile
     /// True on iPhone/iPad builds.
     public static bool IsIos => OS.HasFeature("ios");
 
+    /// True on the Godot visionOS platform (Apple Vision Pro, flat-window export). The
+    /// headset reports its own feature tag rather than "ios", but it is the same class of
+    /// device for every decision this profile makes: Apple GPU, touch/pinch input,
+    /// thermally limited, no Discord SDK, no self-update. It shares the iOS tier and every
+    /// platform gate through `IsAppleEmbedded`.
+    public static bool IsVisionOs => OS.HasFeature("visionos");
+
+    /// Apple embedded — iPhone/iPad (iOS) and Vision Pro (visionOS).
+    public static bool IsAppleEmbedded => IsIos || IsVisionOs;
+
     private static bool? _forceStandaloneXr;
 
     /// Pretend to be (or not be) a standalone headset, for diagnostics only.
@@ -119,7 +129,7 @@ public static class DeviceProfile
             // for a social app where collision precision doesn't matter much.
             Engine.PhysicsTicksPerSecond = isQuest3 ? 50 : 45;
         }
-        else if (IsIos)
+        else if (IsAppleEmbedded)
         {
             // iOS gets its own branch rather than sharing the generic touchscreen one, because
             // the hardware assumptions are different in both directions. Apple's GPUs are strong

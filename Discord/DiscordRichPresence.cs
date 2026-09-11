@@ -82,7 +82,8 @@ public static class DiscordRichPresence
         // Desktop only. Android ships the SDK as an AAR with Java glue, and iOS has no
         // dlopen-able drop at all — gating on "android" alone meant an iOS build would try to
         // extract and load a desktop .so that is not in the bundle.
-        if (OS.HasFeature("mobile") || OS.HasFeature("android") || OS.HasFeature("ios"))
+        if (OS.HasFeature("mobile") || OS.HasFeature("android") || OS.HasFeature("ios")
+            || OS.HasFeature("visionos"))
         {
             UnavailableReason = "Discord SDK is desktop-only";
             return;

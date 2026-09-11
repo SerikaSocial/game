@@ -468,7 +468,7 @@ public partial class SettingsMenu : CanvasLayer
         v.AddChild(Row("Show profile pictures on tags", _pfp));
 
         // Desktop only — the Social SDK is not wired on either mobile platform.
-        if (!OS.HasFeature("android") && !OS.HasFeature("ios"))
+        if (!OS.HasFeature("android") && !OS.HasFeature("ios") && !OS.HasFeature("visionos"))
         {
             _discordPresence = new CheckButton();
             _discordPresence.Toggled += on => Discord.DiscordRichPresence.SetEnabled(on);
