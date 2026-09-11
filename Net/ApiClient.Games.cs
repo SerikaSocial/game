@@ -1,6 +1,8 @@
 using System;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using SerikaSocial;
 
 namespace Serika.Net;
 
@@ -16,7 +18,7 @@ public sealed partial class ApiClient
     /// Start a session on an instance. Host only, server-enforced. `mode` 0 = imposter, 1 = gauntlet.
     public async Task<JsonElement> StartGameAsync(string instanceId, int mode, int rounds = 3) =>
         await PostAuthedAsync($"/v1/games/{instanceId}/start",
-            JsonSerializer.Serialize(new { mode, rounds }));
+            new JsonObject { ["mode"] = mode, ["rounds"] = rounds }.ToJsonString());
 
     /// What this player is allowed to know about themselves.
     public async Task<JsonElement> GetGameMeAsync(string instanceId) =>
@@ -33,7 +35,7 @@ public sealed partial class ApiClient
     /// (same posture as `rms` in the pose codec) and uses it only as a sanity bound.
     public async Task<JsonElement> KillAsync(string instanceId, string targetId, float distance) =>
         await PostAuthedAsync($"/v1/games/{instanceId}/kill",
-            JsonSerializer.Serialize(new { targetId, distance }));
+            new JsonObject { ["targetId"] = targetId, ["distance"] = distance }.ToJsonString());
 
     public async Task<JsonElement> ReportBodyAsync(string instanceId) =>
         await PostAuthedAsync($"/v1/games/{instanceId}/report", "{}");
@@ -41,7 +43,7 @@ public sealed partial class ApiClient
     /// `targetId` may be the literal "skip".
     public async Task<JsonElement> VoteAsync(string instanceId, string targetId) =>
         await PostAuthedAsync($"/v1/games/{instanceId}/vote",
-            JsonSerializer.Serialize(new { targetId }));
+            new JsonObject { ["targetId"] = targetId }.ToJsonString());
 
     public async Task<JsonElement> CloseMeetingAsync(string instanceId) =>
         await PostAuthedAsync($"/v1/games/{instanceId}/close-meeting", "{}");

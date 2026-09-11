@@ -101,7 +101,14 @@ public sealed class LiveEvent
     public long ServerTime { get; set; }
     public ShowConfig Config { get; set; }
     public bool IsOpen => Status is "open" or "live";
-    public static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    // AotJsonCamelContext reproduces this contract with compile-time metadata: iOS is an AOT
+    // build and has no reflection-based serializer to fall back on.
+    public static readonly JsonSerializerOptions Json = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = AotJsonCamelContext.Default,
+    };
 }
 public static class ShowTimeline
 {

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -248,18 +249,22 @@ public sealed class GatewayClient
     public void RequestPresence(string[] friendIds)
     {
         if (friendIds == null || friendIds.Length == 0) return;
-        Send(new { type = "presence:friends", friends = friendIds });
+        var ids = new JsonArray();
+        foreach (var id in friendIds) ids.Add(id);
+        Send(new JsonObject { ["type"] = "presence:friends", ["friends"] = ids });
     }
 
     /// Keepalive, so an idle socket is not reaped by an intermediary.
-    public void Ping() => Send(new { type = "ping" });
+    public void Ping() => Send(new JsonObject { ["type"] = "ping" });
 
-    private void Send(object obj)
+    private void Send(JsonObject obj)
     {
         if (_ws?.State != WebSocketState.Open) return;
         try
         {
-            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(obj));
+            // JsonObject is the reflection-free DOM writer: this socket runs on iOS too,
+            // where `JsonSerializer.Serialize(object)` has no reflection to fall back on.
+            var bytes = Encoding.UTF8.GetBytes(obj.ToJsonString());
             _ = _ws.SendAsync(bytes, WebSocketMessageType.Text, true, _cts.Token);
         }
         catch (Exception) { }

@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
+using SerikaSocial;
 
 namespace Serika.Net;
 
@@ -11,7 +12,7 @@ public static class DefaultHomeResolver
 {
     public sealed record World(string Id, string Name, string VersionId, string DownloadUrl);
     public sealed record Resolved(World World, string Path);
-    private sealed record Cached(string ApiBaseUrl, World World);
+    internal sealed record Cached(string ApiBaseUrl, World World);
 
     public static async Task<Resolved> ResolveAsync(string apiBaseUrl, string cacheDirectory,
         Func<Task<JsonElement>> fetch, Func<World, Task<string>> download, string accountId = null)
@@ -38,7 +39,7 @@ public static class DefaultHomeResolver
             try
             {
                 Directory.CreateDirectory(cacheDirectory);
-                await File.WriteAllTextAsync(registryPath + ".tmp", JsonSerializer.Serialize(new Cached(apiBaseUrl, world)));
+                await File.WriteAllTextAsync(registryPath + ".tmp", JsonSerializer.Serialize(new Cached(apiBaseUrl, world), AotJson.Options));
                 File.Move(registryPath + ".tmp", registryPath, true);
             }
             catch { /* A read-only cache must not prevent entering a downloaded world. */ }
@@ -80,7 +81,7 @@ public static class DefaultHomeResolver
     {
         try
         {
-            var cache = JsonSerializer.Deserialize<Cached>(File.ReadAllText(registryPath));
+            var cache = JsonSerializer.Deserialize<Cached>(File.ReadAllText(registryPath), AotJson.Options);
             return cache?.ApiBaseUrl == apiBaseUrl && Valid(cache.World)
                 ? VerifiedBundle(cache.World, cacheDirectory) : null;
         }

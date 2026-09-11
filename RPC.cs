@@ -2,6 +2,7 @@ using System;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Godot;
 
@@ -85,25 +86,25 @@ public static class RpcPresence
     {
         try
         {
-            var payload = new
+            var payload = new JsonObject
             {
-                type = "game",
-                name = "Serika Social",
-                details = details,
-                state = state,
-                applicationId = _applicationId,
-                assets = new
+                ["type"] = "game",
+                ["name"] = "Serika Social",
+                ["details"] = details,
+                ["state"] = state,
+                ["applicationId"] = _applicationId,
+                ["assets"] = new JsonObject
                 {
-                    largeImage = "serika_logo",
-                    largeText = "Serika Social",
+                    ["largeImage"] = "serika_logo",
+                    ["largeText"] = "Serika Social",
                 },
-                buttons = new[]
+                ["buttons"] = new JsonArray
                 {
-                    new { label = "Join Serika Social", url = "https://social.serika.dev" },
+                    new JsonObject { ["label"] = "Join Serika Social", ["url"] = "https://social.serika.dev" },
                 },
             };
 
-            var json = JsonSerializer.Serialize(payload);
+            var json = payload.ToJsonString();
             var req = new HttpRequestMessage(HttpMethod.Post,
                 $"{SerikaApiBaseUrl}/api/users/me/rich-presence")
             {

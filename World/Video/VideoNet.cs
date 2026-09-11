@@ -107,16 +107,16 @@ internal static class VideoNet
     {
         var sb = new StringBuilder(Prefix, 256);
         sb.Append("{\"op\":");
-        sb.Append(JsonSerializer.Serialize(op));
+        sb.Append(AotJson.JStr(op));
         if (!string.IsNullOrEmpty(url))
         {
             sb.Append(",\"u\":");
-            sb.Append(JsonSerializer.Serialize(url));
+            sb.Append(AotJson.JStr(url));
         }
         if (!string.IsNullOrEmpty(by))
         {
             sb.Append(",\"by\":");
-            sb.Append(JsonSerializer.Serialize(by));
+            sb.Append(AotJson.JStr(by));
         }
         if (t > 0)
         {
@@ -129,7 +129,7 @@ internal static class VideoNet
             for (int i = 0; i < queue.Length; i++)
             {
                 if (i > 0) sb.Append(',');
-                sb.Append(JsonSerializer.Serialize(queue[i]));
+                sb.Append(AotJson.JStr(queue[i]));
             }
             sb.Append(']');
         }

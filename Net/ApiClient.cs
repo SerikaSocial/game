@@ -4,8 +4,10 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Godot;
+using SerikaSocial;
 using HttpClient = System.Net.Http.HttpClient;
 
 namespace Serika.Net;
@@ -43,7 +45,7 @@ public sealed partial class ApiClient
     /// throws with the server's error code (e.g. "banned").
     public async Task<JsonElement> ExchangeAsync(string code, string codeVerifier)
     {
-        var body = JsonSerializer.Serialize(new { code, code_verifier = codeVerifier });
+        var body = new JsonObject { ["code"] = code, ["code_verifier"] = codeVerifier }.ToJsonString();
         var res = await _http.PostAsync($"{_baseUrl}/v1/session/exchange",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
@@ -58,7 +60,7 @@ public sealed partial class ApiClient
     /// Login with email+password (no browser required). Returns the user object, or throws.
     public async Task<JsonElement> LoginWithEmailAsync(string email, string password)
     {
-        var body = JsonSerializer.Serialize(new { email, password });
+        var body = new JsonObject { ["email"] = email, ["password"] = password }.ToJsonString();
         var res = await _http.PostAsync($"{_baseUrl}/v1/session/login",
             new StringContent(body, Encoding.UTF8, "application/json"));
         var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync()).RootElement;
@@ -103,7 +105,7 @@ public sealed partial class ApiClient
             $"{_baseUrl}/v1/users/me/home");
         request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", SessionToken);
         if (worldId != null)
-            request.Content = new StringContent(JsonSerializer.Serialize(new { worldId }), Encoding.UTF8, "application/json");
+            request.Content = new StringContent(new JsonObject { ["worldId"] = worldId }.ToJsonString(), Encoding.UTF8, "application/json");
         using var response = await _http.SendAsync(request, timeout.Token);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
         if (!response.IsSuccessStatusCode)
@@ -445,7 +447,7 @@ public sealed partial class ApiClient
     /// Create a brand-new instance of a world (used when you explicitly want a private/fresh one).
     public async Task<JsonElement> CreateInstanceAsync(string worldId, int access = 0)
     {
-        var body = JsonSerializer.Serialize(new { worldId, access });
+        var body = new JsonObject { ["worldId"] = worldId, ["access"] = access }.ToJsonString();
         return await PostAuthedAsync("/v1/instances", body);
     }
 
@@ -454,7 +456,7 @@ public sealed partial class ApiClient
     /// actually meet — `CreateInstanceAsync` always made a separate empty instance.
     public async Task<JsonElement> JoinWorldInstanceAsync(string worldId)
     {
-        var body = JsonSerializer.Serialize(new { worldId });
+        var body = new JsonObject { ["worldId"] = worldId }.ToJsonString();
         return await PostAuthedAsync("/v1/instances/join-world", body);
     }
 
@@ -596,13 +598,13 @@ public sealed partial class ApiClient
     /// error code ("already_reported", "report_rate_limited", …).
     public async Task<string> ReportAsync(bool world, string targetId, int category, string details)
     {
-        var body = JsonSerializer.Serialize(new
+        var body = new JsonObject
         {
-            targetType = world ? "world" : "user",
-            targetId,
-            category,
-            details = details ?? "",
-        });
+            ["targetType"] = world ? "world" : "user",
+            ["targetId"] = targetId,
+            ["category"] = category,
+            ["details"] = details ?? "",
+        }.ToJsonString();
         var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/v1/reports")
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
@@ -659,13 +661,13 @@ public sealed partial class ApiClient
     /// (`rate_limited`, `blocked`, `not_permitted`, …) so the caller can show a real reason.
     public async Task SendDirectMessageAsync(string userId, string body)
     {
-        var json = JsonSerializer.Serialize(new { body });
+        var json = new JsonObject { ["body"] = body }.ToJsonString();
         await PostAuthedAsync($"/v1/social/dms/{Uri.EscapeDataString(userId)}", json);
     }
 
     public async Task InviteToInstanceAsync(string targetUserId, string instanceId)
     {
-        var body = JsonSerializer.Serialize(new { targetUserId, instanceId });
+        var body = new JsonObject { ["targetUserId"] = targetUserId, ["instanceId"] = instanceId }.ToJsonString();
         await PostAuthedAsync("/v1/social/invite", body);
     }
 

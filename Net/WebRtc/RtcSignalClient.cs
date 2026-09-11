@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using SerikaSocial;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -79,7 +81,7 @@ public sealed class RtcSignalClient
         {
             case "ready":
                 Ready?.Invoke();
-                Send(new { type = "rtc:join", instanceId = _instanceId });
+                Send(new JsonObject { ["type"] = "rtc:join", ["instanceId"] = _instanceId });
                 break;
             case "rtc:peers":
             {
@@ -106,14 +108,14 @@ public sealed class RtcSignalClient
     /// Relay a signal (offer/answer/candidate) to a specific peer. `dataJson` is raw JSON.
     public void SendSignal(string toUserId, string dataJson)
     {
-        var payload = $"{{\"type\":\"rtc:signal\",\"instanceId\":{JsonSerializer.Serialize(_instanceId)}," +
-                      $"\"to\":{JsonSerializer.Serialize(toUserId)},\"data\":{dataJson}}}";
+        var payload = $"{{\"type\":\"rtc:signal\",\"instanceId\":{AotJson.JStr(_instanceId)}," +
+                      $"\"to\":{AotJson.JStr(toUserId)},\"data\":{dataJson}}}";
         SendRaw(payload);
     }
 
-    public void Leave() => Send(new { type = "rtc:leave", instanceId = _instanceId });
+    public void Leave() => Send(new JsonObject { ["type"] = "rtc:leave", ["instanceId"] = _instanceId });
 
-    private void Send(object obj) => SendRaw(JsonSerializer.Serialize(obj));
+    private void Send(JsonObject obj) => SendRaw(obj.ToJsonString());
 
     private void SendRaw(string json)
     {

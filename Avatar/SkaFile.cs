@@ -166,7 +166,7 @@ public sealed class SkaFile
         var glb = new byte[glbLen];
         Array.Copy(data, off, glb, 0, (int)glbLen);
 
-        var meta = JsonSerializer.Deserialize<SkaMeta>(json) ?? new SkaMeta();
+        var meta = JsonSerializer.Deserialize<SkaMeta>(json, AotJson.Options) ?? new SkaMeta();
         return new SkaFile(meta, glb);
     }
 
