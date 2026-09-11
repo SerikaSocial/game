@@ -79,6 +79,7 @@ public partial class VideoQueuePanel : CanvasLayer
             PlaceholderText = "Paste a video URL…",
             SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
         };
+        TextField.AsUrl(_urlInput);
         _urlInput.TextSubmitted += _ => AddCurrent();
         addRow.AddChild(_urlInput);
         var addBtn = Brand.Primary_(new Button { Text = "Queue" });

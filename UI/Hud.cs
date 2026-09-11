@@ -25,7 +25,7 @@ public partial class Hud : CanvasLayer
     public event Action<string> JoinWorldFromDetailPressed;
 
     private const string WorldsUrl = "https://social.serika.dev/worlds";
-    public const string ClientVersion = "1.10.2";
+    public const string ClientVersion = "1.10.3";
 
     private ColorRect _scrim;
     private Control _loginScreen;
@@ -163,6 +163,7 @@ public partial class Hud : CanvasLayer
             PlaceholderText = "Email",
             CustomMinimumSize = new Vector2(0, 44),
         };
+        TextField.AsEmail(_emailInput);
         _emailInput.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         content.AddChild(_emailInput);
 
@@ -170,9 +171,9 @@ public partial class Hud : CanvasLayer
         _passwordInput = new LineEdit
         {
             PlaceholderText = "Password",
-            Secret = true,
             CustomMinimumSize = new Vector2(0, 44),
         };
+        TextField.AsPassword(_passwordInput);
         _passwordInput.AddThemeFontSizeOverride("font_size", Brand.Fs(16));
         content.AddChild(_passwordInput);
 
