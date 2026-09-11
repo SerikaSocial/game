@@ -162,7 +162,7 @@ jobs:
           # Let xcodebuild/codesign see this keychain.
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
           # Partition the identity so codesign can use it without a prompt.
-          security set-partition-list -S apple-tool:,apple: -s -k "${{ secrets.IOS_P12_PASSWORD }}" "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.IOS_P12_PASSWORD }}" "$KEYCHAIN"
 
       - name: Install provisioning profile
         if: github.event.inputs.sign != 'false'
