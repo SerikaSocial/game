@@ -25,6 +25,11 @@ on:
         description: "Produce a signed IPA (needs secrets). false = unsigned Xcode project for pipeline validation."
         required: false
         default: "true"
+      upload_testflight:
+        description: "Upload the signed IPA to App Store Connect / TestFlight"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   ios:
@@ -235,6 +240,22 @@ jobs:
             -exportOptionsPlist ../dist/ios/export/ExportOptions.plist \
             -exportPath ../dist/ios/ipa
           ls -la ../dist/ios/ipa/
+
+      # ── Upload to App Store Connect / TestFlight ──────────────────────────────
+      - name: Upload to App Store Connect (TestFlight)
+        if: github.event.inputs.sign != 'false' && (github.event.inputs.upload_testflight != 'false' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          KEY_ID: "${{ secrets.APP_STORE_CONNECT_KEY_ID }}"
+          ISSUER_ID: "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}"
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "${{ secrets.APP_STORE_CONNECT_KEY_P8_BASE64 }}" | base64 -d > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+          xcrun altool --upload-app \
+            -f ../dist/ios/ipa/SerikaSocial.ipa \
+            -t ios \
+            --apiKey "$KEY_ID" \
+            --apiIssuer "$ISSUER_ID"
+          echo "Uploaded to App Store Connect successfully!"
 
       - name: Collect artifacts
         run: |
