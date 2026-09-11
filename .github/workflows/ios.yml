@@ -2,8 +2,8 @@
 #
 # Why this exists on CI and not the dev box: Godot refuses iOS export of a C#/.NET project
 # anywhere but macOS ("Exporting to an Apple Embedded platform when using C#/.NET is
-# experimental and requires macOS"). The dev machine is Linux. The `macos-14` runner ships
-# with Xcode, so the export can actually run here.
+# experimental and requires macOS"). The dev machine is Linux. Runs on a Blacksmith
+# macOS runner (Apple Silicon M4, macOS 15) with Xcode preinstalled.
 #
 # Distribution: App Store. The provisioning profile must be an *App Store* profile created
 # against a distribution certificate (not a development one). See the setup guide in
@@ -18,7 +18,6 @@ name: ios
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
     inputs:
