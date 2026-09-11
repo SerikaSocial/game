@@ -189,7 +189,7 @@ jobs:
 
           # Archive the project.
           xcodebuild archive \
-            -project "$PBXPROJ" \
+            -project "../dist/ios/SerikaSocial.xcodeproj" \
             -scheme SerikaSocial \
             -configuration Release \
             -archivePath ../dist/ios/SerikaSocial.xcarchive \
