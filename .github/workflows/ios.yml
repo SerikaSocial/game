@@ -164,23 +164,20 @@ jobs:
       # Godot's bundled libgodot.a was built with a metal-cpp that references
       # CADynamicRange* and MTLTensorDomain as external constants. On the iOS
       # SDK used by Xcode 16.4, these are either weak-linked or unavailable,
-      # causing ld to fail with undefined symbols. Appending definitions to
-      # dummy.cpp (which is already compiled into the app target) provides the
-      # missing symbols.
+      # causing ld to fail with undefined symbols. Appending pure C pointer
+      # definitions to dummy.cpp (compiled as C++) provides the missing symbols
+      # without needing Objective-C syntax or Foundation headers.
       - name: Inject missing metal-cpp symbol stubs
         run: |
           cat >> ../dist/ios/SerikaSocial/dummy.cpp <<'CPP'
 
-          #import <Foundation/Foundation.h>
-          #import <CoreGraphics/CoreGraphics.h>
-
-          // Stubs for symbols referenced by Godot's metal-cpp:
+          // Stubs for symbols referenced by Godot's metal-cpp (pure C linkage, no ObjC headers needed):
           extern "C" {
-            __attribute__((visibility("default"))) NSString * const CADynamicRangeAutomatic = @"CADynamicRangeAutomatic";
-            __attribute__((visibility("default"))) NSString * const CADynamicRangeStandard = @"CADynamicRangeStandard";
-            __attribute__((visibility("default"))) NSString * const CADynamicRangeConstrainedHigh = @"CADynamicRangeConstrainedHigh";
-            __attribute__((visibility("default"))) NSString * const CADynamicRangeHigh = @"CADynamicRangeHigh";
-            __attribute__((visibility("default"))) NSErrorDomain const MTLTensorDomain = @"MTLTensorDomain";
+            __attribute__((visibility("default"))) const void * const CADynamicRangeAutomatic = (const void *)"CADynamicRangeAutomatic";
+            __attribute__((visibility("default"))) const void * const CADynamicRangeStandard = (const void *)"CADynamicRangeStandard";
+            __attribute__((visibility("default"))) const void * const CADynamicRangeConstrainedHigh = (const void *)"CADynamicRangeConstrainedHigh";
+            __attribute__((visibility("default"))) const void * const CADynamicRangeHigh = (const void *)"CADynamicRangeHigh";
+            __attribute__((visibility("default"))) const void * const MTLTensorDomain = (const void *)"MTLTensorDomain";
           }
           CPP
           echo "injected symbol stubs into dummy.cpp"
