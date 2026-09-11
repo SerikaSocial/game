@@ -111,14 +111,18 @@ jobs:
             "icons/spotlight_40x40": "res://icons/spotlight_40x40.png",
             "icons/spotlight_80x80": "res://icons/spotlight_80x80.png",
           }
+          # Integer fields (no quotes in Godot's cfg format — ="1" is a string, =1 is int).
+          int_repl = {
+            "application/export_method_release": "1",
+            "application/export_method_debug": "1",
+          }
+          for k, v in int_repl.items():
+              t = re.sub(rf'^{re.escape(k)}=.*$', f'{k}={v}', t, flags=re.M)
+          # String fields (quoted in Godot's cfg format).
           repl = {
             "application/app_store_team_id": team,
             "application/code_sign_identity_release": ident,
             "application/code_sign_identity_debug": ident,
-            # 1 = manual signing (use the cert + profile we imported). The preset
-            # ships with 0 (automatic) which conflicts with a manual identity.
-            "application/export_method_release": "1",
-            "application/export_method_debug": "1",
             **icons,
           }
           for k, v in repl.items():
