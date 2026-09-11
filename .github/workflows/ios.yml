@@ -163,31 +163,11 @@ jobs:
       - name: Sign and archive (signed)
         if: github.event.inputs.sign != 'false'
         run: |
-          PBXPROJ="../dist/ios/SerikaSocial.xcodeproj/project.pbxproj"
           PROFILE_UUID="${{ steps.provision.outputs.uuid }}"
           TEAM_ID="${{ secrets.IOS_TEAM_ID }}"
 
-          # Patch the pbxproj: switch to manual signing with our identity + profile.
-          python3 - <<PY
-          import re, pathlib
-          p = pathlib.Path("$PBXPROJ")
-          t = p.read_text()
-          # Force manual signing style.
-          t = re.sub(r'CODE_SIGN_STYLE\s*=\s*Automatic', 'CODE_SIGN_STYLE = Manual', t)
-          # Set the distribution identity.
-          t = re.sub(r'CODE_SIGN_IDENTITY\s*=\s*.*', 'CODE_SIGN_IDENTITY = "Apple Distribution"', t)
-          # Set the provisioning profile UUID.
-          t = re.sub(r'PROVISIONING_PROFILE\s*=\s*.*', 'PROVISIONING_PROFILE = "$PROFILE_UUID"', t)
-          if 'PROVISIONING_PROFILE' not in t:
-              # Insert after DEVELOPMENT_TEAM if no existing PROVISIONING_PROFILE line.
-              t = re.sub(r'(DEVELOPMENT_TEAM\s*=\s*.*;)', r'\1\n\t\t\tPROVISIONING_PROFILE = "$PROFILE_UUID";', t)
-          # Set the team.
-          t = re.sub(r'DEVELOPMENT_TEAM\s*=\s*.*', 'DEVELOPMENT_TEAM = "$TEAM_ID"', t)
-          p.write_text(t)
-          print("patched pbxproj for manual signing")
-          PY
-
-          # Archive the project.
+          # Archive the project — pass signing settings as xcodebuild overrides
+          # instead of patching the pbxproj (which corrupted the file).
           xcodebuild archive \
             -project "../dist/ios/SerikaSocial.xcodeproj" \
             -scheme SerikaSocial \
