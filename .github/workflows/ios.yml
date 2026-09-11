@@ -192,7 +192,7 @@ jobs:
       # ── Inject missing entitlements (Game Center, Increased Memory) ──────────
       - name: Inject custom entitlements
         run: |
-          XCENT="../dist/ios/SerikaSocial.entitlements"
+          XCENT="$PWD/../dist/ios/SerikaSocial.entitlements"
           cat > "$XCENT" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -213,6 +213,7 @@ jobs:
         run: |
           PROFILE_UUID="${{ steps.provision.outputs.uuid }}"
           TEAM_ID="${{ secrets.IOS_TEAM_ID }}"
+          XCENT="$PWD/../dist/ios/SerikaSocial.entitlements"
 
           # Archive the project — pass signing settings and custom entitlements
           # as xcodebuild overrides.
@@ -221,7 +222,7 @@ jobs:
             -scheme SerikaSocial \
             -configuration Release \
             -archivePath ../dist/ios/SerikaSocial.xcarchive \
-            CODE_SIGN_ENTITLEMENTS="../dist/ios/SerikaSocial.entitlements" \
+            CODE_SIGN_ENTITLEMENTS="$XCENT" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             CODE_SIGN_STYLE=Manual \
             PROVISIONING_PROFILE="$PROFILE_UUID" \
