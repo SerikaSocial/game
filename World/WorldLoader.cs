@@ -258,7 +258,7 @@ public static class WorldLoader
             AddFillLights(instance as Node3D);
 
         // Environment tuned to the world: a dark cinema, a bright studio, a baked interior, …
-        SetupEnvironment(root, lighting);
+        SetupEnvironment(root, lighting, gameMode is 1 or 2);
 
         // …and a sun, if the GLB brought none. Must run after the fill-light pass above so a
         // baked world's grid is already in place, and before `ApplyToScene` so the new light
@@ -1088,7 +1088,7 @@ public static class WorldLoader
     ///   lit      warm interiors that carry their own lamps (Serika Home)
     ///   dark     theatres — near-black ambient so the screen and sconces dominate (Cinema)
     ///   baked    model worlds whose lighting is painted into the textures (Backrooms, Gryffindor)
-    private static void SetupEnvironment(Node3D root, string mode)
+    private static void SetupEnvironment(Node3D root, string mode, bool oceanHorizon = false)
     {
         // A pre-existing WorldEnvironment (e.g. a C# fallback builder set one up) keeps its
         // authored sky, ambient and fog — but it still gets the post-processing pass below.
@@ -1186,7 +1186,12 @@ public static class WorldLoader
 
         env.Sky = new Sky
         {
-            SkyMaterial = new ProceduralSkyMaterial { SkyTopColor = skyTop, SkyHorizonColor = skyHorizon },
+            SkyMaterial = oceanHorizon
+                ? new ProceduralSkyMaterial {
+                    SkyTopColor = skyTop, SkyHorizonColor = skyHorizon,
+                    GroundHorizonColor = skyHorizon, GroundBottomColor = new Color(.09f, .29f, .36f),
+                }
+                : new ProceduralSkyMaterial { SkyTopColor = skyTop, SkyHorizonColor = skyHorizon },
         };
         env.AmbientLightSource = ambientSource;
         env.AmbientLightColor = ambient;
