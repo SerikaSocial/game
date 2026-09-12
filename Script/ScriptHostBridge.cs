@@ -190,6 +190,7 @@ public sealed class ScriptHostBridge : IHostBridge
 
         var origin = node.GetParent();
         if (origin == null) return false;
+        if (origin == target) return true;
 
         // Remember the FIRST parent only. Re-attaching an already-attached node must still detach
         // back to the world, not to whichever bone it happened to be on last.
@@ -215,9 +216,14 @@ public sealed class ScriptHostBridge : IHostBridge
 
     /// Put every attachment back. Called when the script is unloaded or hard-killed, so a dead
     /// script does not leave props welded to people.
-    public void DetachAll()
+    public void DetachAll(bool discard = false)
     {
-        foreach (int slot in new List<int>(_attachedFrom.Keys)) PlayerDetach(slot);
+        foreach (int slot in new List<int>(_attachedFrom.Keys))
+        {
+            if (discard) NodeAt(slot)?.QueueFree();
+            else PlayerDetach(slot);
+        }
+        _attachedFrom.Clear();
     }
 
     // ── networking ──

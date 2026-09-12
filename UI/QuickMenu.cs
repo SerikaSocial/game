@@ -20,6 +20,15 @@ public partial class QuickMenu : CanvasLayer
         EventsBanner.Suppressed = inEvent;
         if (_videoTile != null) _videoTile.Visible = !inEvent;
     }
+    public event Action GameActionPressed;
+    private Button _gameAction;
+    public void SetGameAction(string text, bool enabled)
+    {
+        if (_gameAction == null) return;
+        _gameAction.Visible = text != null;
+        _gameAction.Text = text ?? "";
+        _gameAction.Disabled = !enabled;
+    }
     private Button _eventAdminButton;
     public void SetEventAdmin(bool enabled) { if (_eventAdminButton != null) _eventAdminButton.Visible = enabled; }
     public event Action Closed;
@@ -79,6 +88,9 @@ public partial class QuickMenu : CanvasLayer
         _eventAdminButton = Brand.Ghost_(new Button { Text = "Admin · Events", Visible = false, CustomMinimumSize = new Vector2(0, 40) });
         _eventAdminButton.Pressed += () => AdminEventsPressed?.Invoke();
         column.AddChild(_eventAdminButton);
+        _gameAction = Brand.Ghost_(new Button { Visible = false, CustomMinimumSize = new Vector2(0, 42) });
+        _gameAction.Pressed += () => GameActionPressed?.Invoke();
+        column.AddChild(_gameAction);
 
         var header = Row();
         column.AddChild(header);

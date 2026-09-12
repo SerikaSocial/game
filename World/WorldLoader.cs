@@ -141,7 +141,7 @@ public static class WorldLoader
                 // every world would start tugging players toward each other.
                 // Opt-in game session. Worlds without this never poll the game API at all.
                 if (rootEl.TryGetProperty("gameMode", out var gm) && gm.ValueKind == JsonValueKind.String)
-                    gameMode = gm.GetString() switch { "imposter" => 0, "gauntlet" => 1, _ => -1 };
+                    gameMode = gm.GetString() switch { "imposter" => 0, "gauntlet" => 1, "rope" => 2, _ => -1 };
                 if (rootEl.TryGetProperty("rope", out var rp) && rp.ValueKind == JsonValueKind.Object)
                     ropeLength = rp.TryGetProperty("length", out var rl) && rl.ValueKind == JsonValueKind.Number
                         ? Mathf.Clamp((float)rl.GetDouble(), 1.5f, 30f)
@@ -543,7 +543,7 @@ public static class WorldLoader
     public static event Action<ScriptWorld> ScriptWorldCreated;
 
     /// Raised when a loaded world declares a `gameMode` in its manifest (0 = imposter,
-    /// 1 = gauntlet). `Main` answers by standing up a GameSession; worlds that declare nothing
+    /// 1 = gauntlet, 2 = rope). `Main` answers by standing up a GameSession; worlds that declare nothing
     /// never poll the game API, so a plain social world costs zero requests.
     public static event Action<int> GameModeRequested;
 
@@ -796,6 +796,7 @@ public static class WorldLoader
                 parent.AddChild(button);
                 button.GlobalPosition = pos;
                 button.GlobalRotation = new Vector3(0, Mathf.DegToRad(yawDeg), 0);
+                if (name.EndsWith("_RESET", StringComparison.Ordinal)) button.SetMeta("reset_checkpoints", true);
                 nodesBySlot[slot] = button;
                 scriptButtons.Add(button);
             }
@@ -910,13 +911,22 @@ public static class WorldLoader
         {
             var lowest = checkpoints[0];
             foreach (var c in checkpoints)
-                if (c.RespawnPoint.Y < lowest.RespawnPoint.Y) lowest = c;
+                if (c.Index < lowest.Index) lowest = c;
             var monitor = new CheckpointMonitor(lowest, LocalBody);
             (worldRoot as Node)?.AddChild(monitor);
+            foreach (var button in scriptButtons)
+                if (button.HasMeta("reset_checkpoints")) button.Interacted += body =>
+                {
+                    if (body != LocalBody?.Invoke()) return;
+                    monitor.Reset();
+                    body.GlobalPosition = lowest.RespawnPoint;
+                    if (body is CharacterBody3D character) character.Velocity = Vector3.Zero;
+                    RaiseCheckpointReached(lowest.RespawnPoint);
+                };
             foreach (var pad in checkpoints)
             {
                 pad.Reached += monitor.NotifyReached;
-                pad.Reached += _ => RaiseCheckpointReached(pad.RespawnPoint);
+                pad.Reached += _ => { if (monitor.Enabled && monitor.Current == pad) RaiseCheckpointReached(pad.RespawnPoint); };
             }
         }
 
@@ -1033,7 +1043,11 @@ public static class WorldLoader
         {
             var faces = proxy.Mesh.GetFaces();
             if (faces.Length == 0) continue;
-            var transform = proxy.GlobalTransform;
+            Node3D mover = null;
+            for (var ancestor = proxy.GetParent(); ancestor != instance && ancestor != null; ancestor = ancestor.GetParent())
+                if (ancestor is Node3D n && n.Name.ToString().StartsWith("SERIKA_SNODE", StringComparison.Ordinal))
+                { mover = n; break; }
+            var transform = mover == null ? proxy.GlobalTransform : mover.GlobalTransform.AffineInverse() * proxy.GlobalTransform;
             for (int i = 0; i < faces.Length; i++) faces[i] = transform * faces[i];
             if (transform.Basis.Determinant() < 0)
                 for (int i = 0; i + 2 < faces.Length; i += 3)
@@ -1041,9 +1055,13 @@ public static class WorldLoader
 
             var shape = new ConcavePolygonShape3D();
             shape.SetFaces(faces);
-            var body = new StaticBody3D { Name = $"AuthoredCollision_{generated}", TopLevel = true };
-            instance.AddChild(body);
-            body.GlobalTransform = Transform3D.Identity;
+            PhysicsBody3D body = mover == null
+                ? new StaticBody3D { TopLevel = true }
+                : new AnimatableBody3D { SyncToPhysics = false };
+            body.Name = $"AuthoredCollision_{generated}";
+            (mover ?? instance).AddChild(body);
+            if (mover == null) body.GlobalTransform = Transform3D.Identity;
+            else body.Transform = Transform3D.Identity;
             body.AddChild(new CollisionShape3D { Shape = shape });
             proxy.Visible = false;
             generated++;
@@ -1137,6 +1155,14 @@ public static class WorldLoader
                 skyHorizon = new Color(0.12f, 0.10f, 0.12f);
                 ambient = new Color(0.42f, 0.38f, 0.40f);
                 ambientEnergy = 0.5f;
+                break;
+            case "space": // Pressurised interiors with black space visible through the hull windows.
+                skyTop = new Color(.001f, .002f, .007f);
+                skyHorizon = skyTop;
+                ambient = new Color(.45f, .59f, .78f);
+                ambientEnergy = .38f;
+                env.BackgroundMode = Godot.Environment.BGMode.Color;
+                env.BackgroundColor = skyTop;
                 break;
             case "daylit": // Neutral daylight for atria and skylit natural interiors.
                 skyTop = new Color(.20f, .36f, .52f);

@@ -184,7 +184,7 @@ public partial class ScriptWorld : Node
     {
         foreach (var s in _scripts)
         {
-            try { s.Bridge.DetachAll(); } catch (Exception) { /* tearing down anyway */ }
+            try { s.Bridge.DetachAll(discard: true); } catch (Exception) { /* tearing down anyway */ }
         }
         _scripts.Clear();
     }

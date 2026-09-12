@@ -70,6 +70,7 @@ public partial class Main : Node3D
     /// else — a plain social world must never poll the game API.
     private SerikaSocial.Game.GameSession _gameSession;
     private SerikaSocial.Game.GameHud _gameHud;
+    private SerikaSocial.Game.MinigameWorld _minigameWorld;
 
     private readonly HashSet<string> _blockedUserIds = new();
     /// Peers currently rendered as the anonymous bean (blocked). Mirrors the SpawnRemote
@@ -803,6 +804,7 @@ public partial class Main : Node3D
     private void SwapWorld(System.Action<Node3D> build)
     {
         StopEventPlayer();
+        TearDownGameSession();
         _audio?.StopAllAmbient();
         _strokeCanvas?.QueueFree();
         _strokeCanvas = null;
@@ -2857,8 +2859,17 @@ public partial class Main : Node3D
         TearDownGameSession();
         if (string.IsNullOrEmpty(_currentInstanceId) || _api == null) return;
 
-        _gameSession = SerikaSocial.Game.GameSession.Create(_api, _currentInstanceId);
+        _gameSession = SerikaSocial.Game.GameSession.Create(_api, _currentInstanceId, (SerikaSocial.Game.GameModeKind)mode);
         AddChild(_gameSession);
+        _gameSession.Error += msg => _inWorldHud?.Toast(msg, 4);
+        _minigameWorld = SerikaSocial.Game.MinigameWorld.Create(
+            _gameSession, _worldRoot, () => WorldLoader.LocalBody?.Invoke(),
+            () => _currentInstanceOwner == _localUserId, () => _remotes.Count + 1,
+            () => _peerUserIds, () => _remotes, NameForUserId, MoveLocalTo,
+            msg => _inWorldHud?.Toast(msg, 3),
+            (label, enabled) => _quickMenu?.SetGameAction(label, enabled));
+        AddChild(_minigameWorld);
+        _quickMenu.GameActionPressed += OnMinigameAction;
 
         _gameHud = SerikaSocial.Game.GameHud.Create(
             _gameSession,
@@ -2874,8 +2885,17 @@ public partial class Main : Node3D
         GD.Print($"Main: game session online (mode {mode}) for instance {_currentInstanceId}");
     }
 
+    private void OnMinigameAction() => _minigameWorld?.HostAction();
+
     private void TearDownGameSession()
     {
+        if (_quickMenu != null)
+        {
+            _quickMenu.GameActionPressed -= OnMinigameAction;
+            _quickMenu.SetGameAction(null, false);
+        }
+        _minigameWorld?.QueueFree();
+        _minigameWorld = null;
         _gameHud?.QueueFree();
         _gameSession?.QueueFree();
         _gameHud = null;

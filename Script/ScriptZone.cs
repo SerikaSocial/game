@@ -1,5 +1,6 @@
 using System;
 using Godot;
+using SerikaSocial.Player;
 
 namespace Serika.Script;
 
@@ -23,6 +24,8 @@ public partial class ScriptZone : Area3D
         {
             ZoneId = zoneId,
             Name = $"ScriptZone{zoneId}",
+            CollisionLayer = 0,
+            CollisionMask = PhysicsLayers.LocalPlayer | PhysicsLayers.RemotePlayer,
             Monitoring = true,
             // Zones observe; they never push. Monitorable off keeps them out of other queries.
             Monitorable = false,

@@ -36,6 +36,7 @@ public class GoldenModuleTests
         public readonly List<(int Channel, double Payload)> Emits = new();
         public readonly List<(int Player, int Node, int Point)> Attachments = new();
         public int Players = 3;
+        public float Height = 28;
 
         public void Log(string message) => Logs.Add(message);
         public double Time() => 0;
@@ -48,7 +49,7 @@ public class GoldenModuleTests
         public void ScreenSetText(int s, string t) { }
         public void ScreenSetNumber(int s, double v) { }
         public int PlayerCount() => Players;
-        public (float X, float Y, float Z) PlayerPos(int i) => (0, 0, 0);
+        public (float X, float Y, float Z) PlayerPos(int i) => (0, Height, 0);
         public bool PlayerAttach(int player, int node, int point)
         {
             Attachments.Add((player, node, point));
@@ -67,7 +68,7 @@ public class GoldenModuleTests
         public void NetSyncSet(string k, double v) { }
     }
 
-    private static ScriptModule Parkour() => ScriptModule.Load(LoadGolden("rope_parkour.sskb"), rank: 8);
+    private static ScriptModule Parkour() => ScriptModule.Load(LoadGolden("co_op_demo.sskb"), rank: 8);
 
     [Fact]
     public void GoldenModuleLoadsAndDeclaresItsHooks()
@@ -142,6 +143,7 @@ public class GoldenModuleTests
 
         host.Emits.Clear();
         vm.RunHook(HookId.OnEnterZone, new double[] { 0, 4 }); // summit
+        vm.RunHook(HookId.OnTick, new double[] { 0 });
 
         // channel 1 = progress, channel 2 = finish time
         var finish = host.Emits.Find(e => e.Channel == 2);
@@ -155,4 +157,34 @@ public class GoldenModuleTests
         vm.RunHook(HookId.OnEnterZone, new double[] { 1, 4 });
         Assert.DoesNotContain(host.Emits, e => e.Channel == 2);
     }
+    [Fact]
+    public void SummitWaitsForTeammatesAndIgnoresUnrelatedZones()
+    {
+        var host = new ParkourHost { Height = 10 };
+        var vm = new ScriptVm(Parkour(), host);
+        vm.RunHook(HookId.OnReady);
+        vm.RunHook(HookId.OnEnterZone, new double[] { 0, 99 });
+        Assert.Empty(host.Emits);
+        vm.RunHook(HookId.OnEnterZone, new double[] { 0, 4 });
+        vm.RunHook(HookId.OnTick, new double[] { 1 });
+        Assert.DoesNotContain(host.Emits, e => e.Channel == 2);
+        host.Height = 28;
+        vm.RunHook(HookId.OnTick, new double[] { 1 });
+        Assert.Single(host.Emits.FindAll(e => e.Channel == 2));
+    }
+
+    [Fact]
+    public void RaceAndStationNeverBroadcastRolesOrPlacements()
+    {
+        foreach (var name in new[] { "imposter_station", "gauntlet_course", "rope_parkour" })
+        {
+            var host = new ParkourHost();
+            var vm = new ScriptVm(ScriptModule.Load(LoadGolden(name + ".sskb"), rank: 8), host);
+            vm.RunHook(HookId.OnReady);
+            for (int i = 0; i < 200; i++) vm.RunHook(HookId.OnTick, new double[] { .1 });
+            vm.RunHook(HookId.OnMessage, new double[] { 1028, 0 });
+            Assert.Empty(host.Emits);
+        }
+    }
+
 }

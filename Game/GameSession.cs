@@ -7,10 +7,10 @@ using Serika.Net;
 
 namespace SerikaSocial.Game;
 
-public enum GameModeKind { Imposter = 0, Gauntlet = 1 }
+public enum GameModeKind { Imposter = 0, Gauntlet = 1, Rope = 2 }
 public enum GamePhase { Lobby = 0, Playing = 1, Meeting = 2, Ended = 3 }
 public enum GameRole { Crew = 0, Imposter = 1 }
-public enum GameOutcome { None = 0, CrewWin = 1, ImposterWin = 2, GauntletWin = 3, Abandoned = 4 }
+public enum GameOutcome { None = 0, CrewWin = 1, ImposterWin = 2, GauntletWin = 3, Abandoned = 4, RopeWin = 5 }
 
 /// Client mirror of a server-authoritative game session.
 ///
@@ -37,6 +37,15 @@ public partial class GameSession : Node
     private double _pollTimer;
     private bool _inFlight;
     private int _consecutiveErrors;
+    private bool _disposed;
+    public bool Busy { get; private set; }
+    public long StartedAt { get; private set; }
+    public long RoundStartedAt { get; private set; }
+    public int Place { get; private set; }
+    public int FinishedCount { get; private set; }
+    public event Action Updated;
+    public List<string> Winners { get; } = new();
+    public HashSet<int> CompletedTasks { get; } = new();
 
     public GameModeKind Mode { get; private set; } = GameModeKind.Imposter;
     public GamePhase Phase { get; private set; } = GamePhase.Lobby;
@@ -73,8 +82,10 @@ public partial class GameSession : Node
 
     private readonly HashSet<string> _seenEvents = new();
 
-    public static GameSession Create(ApiClient api, string instanceId) =>
-        new() { Name = "GameSession", _api = api, _instanceId = instanceId };
+    public static GameSession Create(ApiClient api, string instanceId, GameModeKind mode = GameModeKind.Imposter) =>
+        new() { Name = "GameSession", _api = api, _instanceId = instanceId, Mode = mode };
+
+    public override void _ExitTree() => _disposed = true;
 
     public override void _Process(double delta)
     {
@@ -95,8 +106,22 @@ public partial class GameSession : Node
         {
             var state = await _api.GetGameStateAsync(_instanceId);
             var me = await _api.GetGameMeAsync(_instanceId);
-            ApplyState(state);
+            if (_disposed) return;
+            long started = GetLong(state, "startedAt");
+            bool fresh = StartedAt != started;
+            if (fresh)
+            {
+                StartedAt = started;
+                MyRole = null;
+                Winners.Clear();
+                CompletedTasks.Clear();
+                _seenEvents.Clear();
+            }
+            if (fresh || Round != GetInt(state, "round")) Place = 0;
+            HasSession = true;
             ApplyMe(me);
+            ApplyState(state);
+            Updated?.Invoke();
             _consecutiveErrors = 0;
             HasSession = true;
         }
@@ -128,6 +153,8 @@ public partial class GameSession : Node
         AliveCount = GetInt(s, "aliveCount");
         TotalPlayers = GetInt(s, "totalPlayers");
         Round = GetInt(s, "round");
+        RoundStartedAt = GetLong(s, "roundStartedAt");
+        FinishedCount = GetInt(s, "finishedCount");
         MaxRounds = GetInt(s, "maxRounds");
         MeetingEndsAtMs = GetLong(s, "meetingEndsAt");
 
@@ -157,8 +184,13 @@ public partial class GameSession : Node
             {
                 string type = e.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
                 long at = e.TryGetProperty("at", out var a) ? a.GetInt64() : 0;
-                string key = $"{type}:{at}";
+                string key = e.GetRawText();
                 if (!_seenEvents.Add(key)) continue;
+                if (type == "ended" && e.TryGetProperty("winners", out var winners))
+                {
+                    Winners.Clear();
+                    foreach (var id in winners.EnumerateArray()) Winners.Add(id.GetString());
+                }
                 GameEvent?.Invoke(type, e);
             }
             if (_seenEvents.Count > 256) _seenEvents.Clear();
@@ -172,6 +204,13 @@ public partial class GameSession : Node
         TasksRequired = Math.Max(1, GetInt(m, "tasksRequired"));
         KillReadyAtMs = GetLong(m, "killReadyAt");
 
+        if (m.TryGetProperty("completedTasks", out var completed) && completed.ValueKind == JsonValueKind.Array)
+        {
+            CompletedTasks.Clear();
+            foreach (var id in completed.EnumerateArray()) CompletedTasks.Add(id.GetInt32());
+        }
+        if (m.TryGetProperty("place", out var place) && place.ValueKind == JsonValueKind.Number) Place = place.GetInt32();
+        if (m.TryGetProperty("role", out var nullRole) && nullRole.ValueKind == JsonValueKind.Null) MyRole = null;
         if (m.TryGetProperty("role", out var r) && r.ValueKind == JsonValueKind.Number)
         {
             var role = (GameRole)r.GetInt32();
@@ -185,41 +224,34 @@ public partial class GameSession : Node
 
     // ── actions. Each is a REQUEST; the server decides. ──
 
-    public async Task<bool> TryCompleteTask()
+    private async Task<bool> Act(Func<Task<JsonElement>> action, Action<JsonElement> apply = null)
     {
-        try { await _api.CompleteTaskAsync(_instanceId); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
+        if (Busy || _disposed) return false;
+        Busy = true;
+        try
+        {
+            var result = await action();
+            if (_disposed) return false;
+            apply?.Invoke(result);
+            _pollTimer = 0;
+            return true;
+        }
+        catch (Exception e) { if (!_disposed) Error?.Invoke(e.Message); return false; }
+        finally { Busy = false; }
     }
 
-    public async Task<bool> TryKill(string targetId, float distance)
-    {
-        try { await _api.KillAsync(_instanceId, targetId, distance); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
-    }
-
-    public async Task<bool> TryReport()
-    {
-        try { await _api.ReportBodyAsync(_instanceId); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
-    }
-
-    public async Task<bool> TryVote(string targetId)
-    {
-        try { await _api.VoteAsync(_instanceId, targetId); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
-    }
-
-    public async Task<bool> TryFinish()
-    {
-        try { await _api.ReportFinishAsync(_instanceId); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
-    }
-
-    public async Task<bool> TryStart(GameModeKind mode, int rounds = 3)
-    {
-        try { await _api.StartGameAsync(_instanceId, (int)mode, rounds); _pollTimer = 0; return true; }
-        catch (Exception e) { Error?.Invoke(e.Message); return false; }
-    }
+    public Task<bool> TryCompleteTask(int taskId) =>
+        Act(() => _api.CompleteTaskAsync(_instanceId, taskId), _ => CompletedTasks.Add(taskId));
+    public Task<bool> TryKill(string targetId, float distance) =>
+        Act(() => _api.KillAsync(_instanceId, targetId, distance),
+            _ => KillReadyAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 25000);
+    public Task<bool> TryReport() => Act(() => _api.ReportBodyAsync(_instanceId));
+    public Task<bool> TryVote(string targetId) => Act(() => _api.VoteAsync(_instanceId, targetId));
+    public Task<bool> TryFinish() => Act(() => _api.ReportFinishAsync(_instanceId, Round, StartedAt), r => Place = GetInt(r, "place"));
+    public Task<bool> TryStart(GameModeKind mode, int rounds = 3) => Act(() => _api.StartGameAsync(_instanceId, (int)mode, rounds));
+    public Task<bool> TryCloseMeeting() => Act(() => _api.CloseMeetingAsync(_instanceId));
+    public Task<bool> TryAbort() => Act(() => _api.AbortGameAsync(_instanceId));
+    public Task<bool> TryEndRound() => Act(() => _api.EndRoundAsync(_instanceId));
 
     /// Whether the kill affordance should be enabled. A UI hint only — the server re-checks
     /// every one of these conditions and will refuse regardless of what we render.

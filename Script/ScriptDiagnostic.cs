@@ -35,7 +35,7 @@ public static class ScriptDiagnostic
         {
             for (int i = 0; i < n; i++)
             {
-                var body = new CharacterBody3D { Name = $"FakePlayer{i}", Position = new Vector3(i * 2, 0, 0) };
+                var body = new CharacterBody3D { Name = $"FakePlayer{i}", CollisionLayer = SerikaSocial.Player.PhysicsLayers.LocalPlayer, Position = new Vector3(i * 2, 0, 0) };
                 // A body with no shape is invisible to Area3D overlap, so the zone hooks would
                 // never fire and the test would be asserting nothing.
                 body.AddChild(new CollisionShape3D
@@ -78,7 +78,7 @@ public static class ScriptDiagnostic
     {
         // Same corpus the C# unit suite runs, compiled by tools/serikascript. Reading it from the
         // repo keeps this diagnostic honest: it runs shipped bytecode, not a hand-built module.
-        string path = ProjectSettings.GlobalizePath("res://../tools/serikascript/golden/rope_parkour.sskb");
+        string path = ProjectSettings.GlobalizePath("res://../tools/serikascript/golden/co_op_demo.sskb");
         if (!System.IO.File.Exists(path))
         {
             GD.PrintErr($"ScriptDiagnostic: golden module not found at {path} " +
@@ -153,12 +153,12 @@ public static class ScriptDiagnostic
 
         GD.Print("-- summit --");
         var summit = ScriptZone.Create(4, new Vector3(4, 4, 4));
-        summit.Position = new Vector3(0, 0, 40);
+        summit.Position = new Vector3(0, 28, 40);
         world.AddChild(summit);
         sw.BindZone(summit);
         emits.Clear();
 
-        roster.Bodies[1].GlobalPosition = summit.GlobalPosition;
+        foreach (var body in roster.Bodies) body.GlobalPosition = summit.GlobalPosition;
         for (int i = 0; i < 12; i++)
             await host.ToSignal(host.GetTree(), SceneTree.SignalName.PhysicsFrame);
 

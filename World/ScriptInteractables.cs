@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Godot;
+using SerikaSocial.Player;
 
 namespace SerikaSocial.World;
 
@@ -40,6 +41,8 @@ public partial class CheckpointNode : Area3D
             Name = $"Checkpoint{index}",
             Index = index,
             RespawnPoint = respawnPoint,
+            CollisionLayer = 0,
+            CollisionMask = PhysicsLayers.LocalPlayer,
             Monitoring = true,
             Monitorable = false,
         };
@@ -76,6 +79,10 @@ public partial class CheckpointMonitor : Node
     private const float PlaneMargin = 6f;
     private readonly Func<CharacterBody3D> _localBody;
     private CheckpointNode _last;
+    private CheckpointNode _start;
+    private int _minimum = int.MinValue, _maximum = int.MaxValue;
+    private bool _ordered;
+    public bool Enabled { get; set; } = true;
     private double _cooldown;
 
     public CheckpointMonitor(CheckpointNode start, Func<CharacterBody3D> localBody)
@@ -85,15 +92,24 @@ public partial class CheckpointMonitor : Node
         // "Last reached" falls back to the lowest pad, which for a fresh spawn is wherever the
         // author put checkpoint 0 — normally the start platform under the player's feet.
         _last = start;
+        _start = start;
     }
 
-    public void NotifyReached(CheckpointNode pad) => _last = pad;
+    public CheckpointNode Current => _last;
+    public void Configure(CheckpointNode start, int minimum, int maximum)
+    { _start = start; _minimum = minimum; _maximum = maximum; _ordered = true; Reset(); }
+    public void Reset() { _last = _start; _cooldown = 0; }
+    public void NotifyReached(CheckpointNode pad)
+    {
+        if (Enabled && pad.Index >= _minimum && pad.Index <= _maximum &&
+            (_last == null || (pad.Index > _last.Index && (!_ordered || pad.Index == _last.Index + 1)))) _last = pad;
+    }
 
     public override void _Process(double delta)
     {
         if (_cooldown > 0) _cooldown -= delta;
         var body = _localBody?.Invoke();
-        if (body == null || _last == null) return;
+        if (!Enabled || body == null || _last == null) return;
 
         // Landing surfaces at or above the plane are safe by authoring — only a fall THROUGH it
         // recovers. The deep-void guard is belt and braces: the engine's own −50 m respawn would
@@ -133,6 +149,8 @@ public partial class WarpPad : Area3D
             Name = $"WarpPad{group}_{slot}",
             GroupRef = groupRef,
             SlotInGroup = slot,
+            CollisionLayer = 0,
+            CollisionMask = PhysicsLayers.LocalPlayer,
             Monitoring = true,
             Monitorable = false,
         };

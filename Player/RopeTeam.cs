@@ -35,11 +35,15 @@ public partial class RopeTeam : Node3D
     /// whole team. This is the difference between a rope and a grappling hook.
     private const float MaxSaneViolation = 25.0f;
 
+    public bool Enabled { get; set; } = true;
+    public Func<int, bool> IncludePeer { get; set; }
     private IScriptPlayers _players;
     private Func<CharacterBody3D> _localBody;
     private MeshInstance3D _ropeView;
     private ImmediateMesh _ropeMesh;
     private readonly List<Vector3> _points = new();
+    private readonly Dictionary<int, (Vector3 Position, bool Linked)> _links = new();
+    private Vector3? _lastLocalPosition;
 
     public static RopeTeam Create(IScriptPlayers players, Func<CharacterBody3D> localBody, float length)
     {
@@ -78,21 +82,34 @@ public partial class RopeTeam : Node3D
         if (_players == null || body == null || !GodotObject.IsInstanceValid(body)) return;
 
         int count = _players.Count;
-        if (count < 2) { _points.Clear(); RedrawRope(); return; }
+        if (!Enabled || count < 2)
+        {
+            _links.Clear(); _lastLocalPosition = null;
+            _points.Clear(); RedrawRope(); return;
+        }
 
-        // Index 0 is the local player. Its rope neighbours are the adjacent entries in the roster,
-        // so the team forms a chain rather than every pair being tied to every other.
+        // Index 0 is local; each client solves its own links to the rest of the team.
+        // Respawning/restarting releases a link until its ends regroup within rope length.
         Vector3 here = body.GlobalPosition;
+        bool localTeleported = _lastLocalPosition.HasValue &&
+            here.DistanceTo(_lastLocalPosition.Value) > Length;
+        foreach (int index in new List<int>(_links.Keys))
+            if (index >= count) _links.Remove(index);
         Vector3 correction = Vector3.Zero;
 
         for (int i = 1; i < count; i++)
         {
-            if (!_players.TryGetPosition(i, out var them)) continue;
+            if ((IncludePeer != null && !IncludePeer(i)) || !_players.TryGetPosition(i, out var them)) { _links.Remove(i); continue; }
 
             Vector3 delta3 = them - here;
             float dist = delta3.Length();
-            if (dist <= Length || dist <= 0.0001f) continue;
-            if (dist - Length > MaxSaneViolation) continue; // teleport/spawn, not a taut rope
+            bool known = _links.TryGetValue(i, out var previous);
+            bool linked = known && previous.Linked;
+            if (localTeleported || (known && them.DistanceTo(previous.Position) > Length) ||
+                dist - Length > MaxSaneViolation) linked = false;
+            if (dist <= Length) linked = true;
+            _links[i] = (them, linked);
+            if (!linked || dist <= Length || dist <= 0.0001f) continue;
 
             correction += delta3.Normalized() * ((dist - Length) * ShareOfCorrection);
         }
@@ -104,6 +121,7 @@ public partial class RopeTeam : Node3D
             body.MoveAndCollide(correction);
         }
 
+        _lastLocalPosition = body.GlobalPosition;
         RebuildRopePoints(body.GlobalPosition, count);
         RedrawRope();
     }
@@ -111,12 +129,12 @@ public partial class RopeTeam : Node3D
     private void RebuildRopePoints(Vector3 localPos, int count)
     {
         _points.Clear();
-        _points.Add(localPos);
         for (int i = 1; i < count; i++)
-            if (_players.TryGetPosition(i, out var p)) _points.Add(p);
+            if (_links.TryGetValue(i, out var link) && link.Linked)
+            { _points.Add(localPos); _points.Add(link.Position); }
     }
 
-    /// Draw the rope as a sagging line between consecutive players. The sag is cosmetic — the
+    /// Draw each active link as a sagging line. The sag is cosmetic — the
     /// constraint above is a straight-line distance — but a dead-straight rope reads as a laser
     /// rather than a rope.
     private void RedrawRope()
@@ -126,8 +144,8 @@ public partial class RopeTeam : Node3D
         if (_points.Count < 2) return;
 
         const int SegmentsPerSpan = 8;
-        _ropeMesh.SurfaceBegin(Mesh.PrimitiveType.LineStrip);
-        for (int i = 0; i < _points.Count - 1; i++)
+        _ropeMesh.SurfaceBegin(Mesh.PrimitiveType.Lines);
+        for (int i = 0; i < _points.Count - 1; i += 2)
         {
             Vector3 a = _points[i], b = _points[i + 1];
             float span = a.DistanceTo(b);
@@ -138,7 +156,8 @@ public partial class RopeTeam : Node3D
                 float t = (float)s / SegmentsPerSpan;
                 Vector3 p = a.Lerp(b, t);
                 p.Y -= Mathf.Sin(t * Mathf.Pi) * slack * 0.35f;
-                _ropeMesh.SurfaceAddVertex(ToLocal(p));
+                if (s > 0) _ropeMesh.SurfaceAddVertex(ToLocal(p));
+                if (s < SegmentsPerSpan) _ropeMesh.SurfaceAddVertex(ToLocal(p));
             }
         }
         _ropeMesh.SurfaceEnd();

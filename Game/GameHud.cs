@@ -58,6 +58,9 @@ public partial class GameHud : Node
 
     public override void _ExitTree()
     {
+        InputMode.Release("game-meeting");
+        _readoutLayer?.QueueFree();
+        _votingLayer?.QueueFree();
         if (_session == null) return;
         _session.PhaseChanged -= OnPhaseChanged;
         _session.RoleRevealed -= OnRoleRevealed;
@@ -148,7 +151,7 @@ public partial class GameHud : Node
 
         bool live = _session.HasSession && _session.Phase != GamePhase.Lobby;
         _readoutLayer.Visible = live;
-        if (!live) return;
+        if (!live) { if (_votingLayer.Visible) CloseMeeting(); return; }
 
         UpdateReadout();
 
@@ -165,13 +168,31 @@ public partial class GameHud : Node
 
     private void UpdateReadout()
     {
-        if (_session.Mode == GameModeKind.Gauntlet)
+        if (_session.Phase == GamePhase.Ended)
+        {
+            _roleLabel.Text = "RESULT";
+            _statusLabel.Text = DescribeOutcome();
+            _cooldownLabel.Text = "Host can start another game at the lobby console";
+            return;
+        }
+        double countdown = (_session.RoundStartedAt + 3000 - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000.0;
+        if (_session.Phase == GamePhase.Playing && countdown > 0)
+        {
+            _roleLabel.Text = "GET READY";
+            _statusLabel.Text = $"{Math.Ceiling(countdown)}";
+            _cooldownLabel.Text = "The round starts after the countdown";
+            return;
+        }
+        if (_session.Mode != GameModeKind.Imposter)
         {
             _roleLabel.Text = _session.Alive ? "IN PLAY" : "OUT";
             _rolePanel.AddThemeStyleboxOverride("panel",
                 Brand.Panel(Brand.Bg1, 10, 1, _session.Alive ? Brand.Success : Brand.Danger));
-            _statusLabel.Text = $"Round {_session.Round}/{_session.MaxRounds}   ·   {_session.AliveCount} left";
-            _cooldownLabel.Text = "";
+            var elapsed = Math.Max(0, (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _session.RoundStartedAt - 3000) / 1000);
+            _statusLabel.Text = _session.Mode == GameModeKind.Rope
+                ? $"Canyon expedition · {elapsed / 60}:{elapsed % 60:00} · {_session.FinishedCount}/{_session.AliveCount} at summit"
+                : $"Round {_session.Round}/{_session.MaxRounds}   ·   {_session.AliveCount} left · {elapsed / 60}:{elapsed % 60:00}";
+            _cooldownLabel.Text = _session.Place > 0 ? (_session.Mode == GameModeKind.Rope ? "Regroup at the summit to complete the expedition" : $"Finished #{_session.Place} · wait for the next round") : "Cross all checkpoints, then the finish arch";
             return;
         }
 
@@ -205,6 +226,7 @@ public partial class GameHud : Node
 
     private void OpenMeeting()
     {
+        InputMode.Hold("game-meeting");
         _votedThisMeeting = false;
         _votingLayer.Visible = true;
         RebuildVoteList();
@@ -212,6 +234,7 @@ public partial class GameHud : Node
 
     private void CloseMeeting()
     {
+        InputMode.Release("game-meeting");
         _votingLayer.Visible = false;
         foreach (var b in _voteButtons) b.QueueFree();
         _voteButtons.Clear();
@@ -278,7 +301,9 @@ public partial class GameHud : Node
     {
         GameOutcome.CrewWin => "Crew win",
         GameOutcome.ImposterWin => "Imposters win",
-        GameOutcome.GauntletWin => "Winner decided",
+        GameOutcome.GauntletWin => _session.Winners.Count > 0
+            ? "Winner: " + string.Join(", ", _session.Winners.ConvertAll(id => _nameOf(id))) : "Race complete",
+        GameOutcome.RopeWin => "Expedition complete — the whole crew made it!",
         GameOutcome.Abandoned => "Round abandoned",
         _ => "Game over",
     };
